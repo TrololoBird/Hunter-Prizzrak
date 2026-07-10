@@ -24,9 +24,9 @@ from hunt_core.errors import (
 
 
 def test_require_finite_float_ok() -> None:
-    assert require_finite_float(1, "x") == 1.0
-    assert require_finite_float(2.5, "x") == 2.5
-    assert require_finite_float("3.5", "x") == 3.5
+    assert math.isclose(require_finite_float(1, "x"), 1.0)
+    assert math.isclose(require_finite_float(2.5, "x"), 2.5)
+    assert math.isclose(require_finite_float("3.5", "x"), 3.5)
 
 
 @pytest.mark.parametrize(
@@ -42,22 +42,22 @@ def test_require_finite_float_raises(bad: object) -> None:
 def test_optional_delegates_to_finite_float_or_none() -> None:
     assert optional_finite_float(None) is None
     assert optional_finite_float("abc") is None
-    assert optional_finite_float(1) == 1.0
+    assert math.isclose(optional_finite_float(1), 1.0)
     assert optional_finite_float(float("nan")) is None
 
 
 def test_finite_float_or_none() -> None:
     assert finite_float_or_none(None) is None
-    assert finite_float_or_none(True) == 1.0
-    assert finite_float_or_none(False) == 0.0
-    assert finite_float_or_none("2.5") == 2.5
+    assert math.isclose(finite_float_or_none(True), 1.0)
+    assert math.isclose(finite_float_or_none(False), 0.0)
+    assert math.isclose(finite_float_or_none("2.5"), 2.5)
     assert finite_float_or_none(float("inf")) is None
 
 
 def test_as_float_as_int() -> None:
     assert as_float(None) == 0.0
-    assert as_float(True) == 1.0
-    assert as_float("x", default=-1.0) == -1.0
+    assert math.isclose(as_float(True), 1.0)
+    assert math.isclose(as_float("x", default=-1.0), -1.0)
     assert as_int(None) == 0
     assert as_int(True) == 1
     assert as_int("7") == 7
@@ -66,8 +66,8 @@ def test_as_float_as_int() -> None:
 
 def test_row_float() -> None:
     assert row_float(None, "k") == 0.0
-    assert row_float({"k": "9"}, "k") == 9.0
-    assert row_float({"k": "bad"}, "k", default=-1.0) == -1.0
+    assert math.isclose(row_float({"k": "9"}, "k"), 9.0)
+    assert math.isclose(row_float({"k": "bad"}, "k", default=-1.0), -1.0)
 
 
 def test_math_finite_sanity() -> None:
