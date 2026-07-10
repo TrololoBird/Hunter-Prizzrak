@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python 3.14
+        run: uv python install 3.14
+
+      - name: Install project (with dev extras)
+        run: uv pip install --system -e ".[dev]"
+
+      - name: Ruff lint
+        run: ruff check .
+
+      - name: mypy (non-blocking until backlog is cleared)
+        run: mypy hunt_core || true
+
+      - name: pytest
+        run: pytest -q
