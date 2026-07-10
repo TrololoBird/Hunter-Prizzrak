@@ -125,9 +125,11 @@ class SignalDataMissing(Exception):
 def require_finite_float(value: Any, field: str) -> float:
     """Coerce *value* to a finite float, raising ``SignalDataMissing`` on failure.
 
-    Raises with ``detail="not_numeric"`` when the value cannot be parsed and
-    ``detail="non_finite"`` for NaN/inf.
+    Raises with ``detail="not_numeric"`` when the value cannot be parsed
+    (including booleans) and ``detail="non_finite"`` for NaN/inf.
     """
+    if isinstance(value, bool):
+        raise SignalDataMissing(field, detail="not_numeric")
     if value is None:
         raise SignalDataMissing(field)
     try:
@@ -160,13 +162,10 @@ def require_mark_price(
         val = optional_finite_float(candidate)
         if val is not None and val > 0:
             return val
-    candidate = mkt.get("last_price")
-    if not isinstance(candidate, bool):
+    for candidate in (price, mkt.get("last_price")):
+        if isinstance(candidate, bool):
+            continue
         val = optional_finite_float(candidate)
-        if val is not None and val > 0:
-            return val
-    if not isinstance(price, bool):
-        val = optional_finite_float(price)
         if val is not None and val > 0:
             return val
     raise SignalDataMissing(field)

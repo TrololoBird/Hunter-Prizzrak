@@ -165,6 +165,18 @@ def test_require_mark_price_falls_back_when_bool_fields_present():
     assert math.isclose(require_mark_price(12.5, market), 12.5)
 
 
+def test_require_mark_price_price_takes_precedence_over_last_price():
+    market = {"last_price": 9.9}
+    assert math.isclose(require_mark_price(12.5, market), 12.5)
+
+
+def test_require_finite_float_rejects_bool():
+    with pytest.raises(SignalDataMissing) as exc:
+        require_finite_float(True, "open")
+    assert exc.value.field == "open"
+    assert exc.value.detail == "not_numeric"
+
+
 def test_require_level_rejects_bool():
     with pytest.raises(SignalDataMissing) as exc:
         require_level(True, "support")
