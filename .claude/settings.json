@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "permissions": {
+    "allow": [
+      "Bash(uv lock*)",
+      "Bash(uv sync*)",
+      "Bash(uv pip *)",
+      "Bash(uv run *)",
+      "Bash(uv venv*)",
+      "Bash(.venv/bin/python -m pytest*)",
+      "Bash(.venv/bin/python -m ruff*)",
+      "Bash(.venv/bin/python -m mypy*)",
+      "Bash(.venv/bin/python -m compileall*)",
+      "Bash(.venv/bin/pytest*)",
+      "Bash(.venv/bin/ruff*)",
+      "Bash(.venv/bin/mypy*)",
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git add*)",
+      "Bash(git restore*)",
+      "Bash(git reset*)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.file_path // .tool_response.filePath // empty' | { read -r f; case \"$f\" in *.py) /Users/tonyaleksandrov/Documents/HUNTER/.venv/bin/ruff check --fix \"$f\";; esac; } 2>/dev/null || true",
+            "statusMessage": "ruff --fix"
+          }
+        ]
+      }
+    ]
+  }
+}

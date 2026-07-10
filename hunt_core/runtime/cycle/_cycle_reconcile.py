@@ -1,0 +1,271 @@
+"""Orphan/in-watch signal reconcile + follow-up TG delivery."""
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any
+
+from hunt_core import clock
+from hunt_core.data.collect import safe_fetch
+from hunt_core.data.lake import buffer_tracker_state
+from hunt_core.deliver.telegram import TelegramBroadcaster
+from hunt_core.market import HuntCcxtClient
+from hunt_core.runtime.state import LOG
+from hunt_core.track.events import append_signal_event
+from hunt_core.track.pump_history import record_signal_outcome
+from hunt_core.track.tracker import (
+    mark_close_notified,
+    mark_followups_sent,
+    reconcile_signal,
+)
+
+# Orphan signals (symbol no longer in watchlist) are re-checked via REST klines.
+ORPHAN_RECONCILE_MINUTES = 2
+INWATCH_KLINE_RECONCILE_SECONDS = 45
+
+
+async def _reconcile_inwatch_active(
+    client: HuntCcxtClient,
+    tracker_state: dict[str, Any],
+    *,
+    symbol: str,
+    now: datetime,
+) -> list[Any]:
+    """5m kline hi/lo since last_checked_at for active signals still in the watchlist."""
+    events: list[Any] = []
+    signals = tracker_state.get("signals") or {}
+    sym_u = symbol.upper()
+    for key, sig in list(signals.items()):
+        if not isinstance(sig, dict) or sig.get("status") != "active":
+            continue
+        o_sym, _, o_dir = key.partition(":")
+        if o_sym != sym_u:
+            continue
+        anchor_raw = sig.get("last_checked_at") or sig.get("opened_at")
+        try:
+            anchor = datetime.fromisoformat(str(anchor_raw))
+        except (TypeError, ValueError):
+            anchor = now
+        if (now - anchor).total_seconds() < INWATCH_KLINE_RECONCILE_SECONDS:
+            continue
+        df = await safe_fetch(
+            lambda: client.fetch_klines_between(
+                o_sym,
+                "5m",
+                start_time_ms=int(anchor.timestamp() * 1000),
+                end_time_ms=int(now.timestamp() * 1000),
+            ),
+            context="inwatch_klines",
+            client=client,
+        )
+        if df is None or df.is_empty():
+            sig["last_checked_at"] = now.isoformat()
+            continue
+        hi = float(df["high"].max())
+        lo = float(df["low"].min())
+        last_price = float(df["close"][-1])
+        events.extend(
+            reconcile_signal(
+                tracker_state,
+                symbol=o_sym,
+                direction=o_dir,
+                hi=hi,
+                lo=lo,
+                last_price=last_price,
+                ts=now,
+            )
+        )
+    return events
+
+
+async def _reconcile_orphan_signals(
+    client: HuntCcxtClient,
+    tracker_state: dict[str, Any],
+    *,
+    seen_symbols: set[str],
+    now: datetime,
+) -> list[Any]:
+    events: list[Any] = []
+    signals = tracker_state.get("signals") or {}
+    for key, sig in list(signals.items()):
+        if not isinstance(sig, dict) or sig.get("status") != "active":
+            continue
+        o_sym, _, o_dir = key.partition(":")
+        if not o_sym or not o_dir or o_sym in seen_symbols:
+            continue
+        anchor_raw = sig.get("last_checked_at") or sig.get("opened_at")
+        try:
+            anchor = datetime.fromisoformat(str(anchor_raw))
+        except (TypeError, ValueError):
+            anchor = now
+        if (now - anchor).total_seconds() < ORPHAN_RECONCILE_MINUTES * 60:
+            continue
+        df = await safe_fetch(
+            lambda: client.fetch_klines_between(
+                o_sym,
+                "5m",
+                start_time_ms=int(anchor.timestamp() * 1000),
+                end_time_ms=int(now.timestamp() * 1000),
+            ),
+            context="orphan_klines",
+            client=client,
+        )
+        if df is None or df.is_empty():
+            sig["last_checked_at"] = now.isoformat()
+            continue
+        hi = float(df["high"].max())
+        lo = float(df["low"].min())
+        last_price = float(df["close"][-1])
+        events.extend(
+            reconcile_signal(
+                tracker_state,
+                symbol=o_sym,
+                direction=o_dir,
+                hi=hi,
+                lo=lo,
+                last_price=last_price,
+                ts=now,
+            )
+        )
+    return events
+
+
+def _duration_str(opened: str) -> str:
+    """Human-readable duration from ISO opened_at to now."""
+    try:
+        from datetime import UTC, datetime
+        start = datetime.fromisoformat(opened.replace(" ", "T"))
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=UTC)
+        delta = clock.now_utc() - start
+        total_m = int(delta.total_seconds() // 60)
+        h, m = divmod(total_m, 60)
+        if h > 0:
+            return f"{h}ч {m}м"
+        return f"{m}м"
+    except Exception:
+        return "—"
+
+
+async def _deliver_followup(
+    broadcaster: Any,
+    fu: Any,
+    row: dict[str, Any],
+    tracker_state: dict[str, Any],
+    *,
+    now: datetime,
+    send_telegram: bool,
+) -> bool:
+    """Send one follow-up; mark + persist immediately on success."""
+    announced = bool((fu.payload or {}).get("announced", True))
+    if not send_telegram or broadcaster is None or not announced:
+        return False
+    from hunt_core.deliver.templates import format_followup_telegram_message
+
+    msg = format_followup_telegram_message(fu, row)
+    result = await broadcaster.send_html(msg)
+    if result.status != "sent":
+        LOG.warning(
+            "watch_followup_send_failed",
+            symbol=fu.symbol,
+            followup_event=fu.event,
+            status=result.status,
+            reason=result.reason,
+        )
+        return False
+    mark_followups_sent(tracker_state, [fu], now=now)
+    if fu.event == "invalidate":
+        mark_close_notified(
+            tracker_state,
+            symbol=fu.symbol,
+            direction=fu.direction,
+            message_key=fu.message_key,
+            now=now,
+        )
+    buffer_tracker_state(tracker_state)
+    LOG.info(
+        "watch_followup_sent",
+        symbol=fu.symbol,
+        followup_event=fu.event,
+        message_id=result.message_id,
+    )
+    return True
+
+
+def _record_followup_side_effects(
+    followups: list[Any],
+    *,
+    sent_keys: set[str],
+    now: datetime,
+    pump_store: Any | None,
+) -> None:
+    """Append signal_events / pump_history only for follow-ups that shipped."""
+    for fu in followups:
+        if fu.message_key not in sent_keys:
+            continue
+        if fu.event == "invalidate":
+            append_signal_event(
+                "invalidate",
+                symbol=fu.symbol,
+                direction=str(fu.direction or (fu.payload or {}).get("direction") or ""),
+                detail=str(fu.detail or ""),
+                payload=fu.payload or {},
+            )
+        if fu.event == "early_breakeven":
+            append_signal_event(
+                "followup",
+                symbol=fu.symbol,
+                direction=str(fu.direction or ""),
+                detail=f"early_breakeven:{fu.detail or ''}",
+                payload=fu.payload or {},
+            )
+        if pump_store is None:
+            continue
+        if fu.event == "fix_profit_tp1":
+            record_signal_outcome(pump_store, symbol=fu.symbol, outcome="tp1", now=now)
+        elif fu.event == "fix_profit_tp2":
+            record_signal_outcome(pump_store, symbol=fu.symbol, outcome="tp2", now=now)
+        elif fu.event == "invalidate":
+            record_signal_outcome(
+                pump_store, symbol=fu.symbol, outcome="invalidate", now=now
+            )
+
+
+def _split_telegram(text: str, *, limit: int = 3900) -> list[str]:
+    from hunt_core.deliver.telegram import _split_telegram_text
+
+    return _split_telegram_text(text, limit=limit)
+
+
+async def _send_telegram_chunks(
+    broadcaster: TelegramBroadcaster,
+    text: str,
+    *,
+    log_key: str,
+) -> bool:
+    ok = True
+    for idx, part in enumerate(_split_telegram(text)):
+        result = await broadcaster.send_html(part)
+        if result.status != "sent":
+            LOG.warning(
+                f"{log_key}_failed",
+                part=idx + 1,
+                status=result.status,
+                reason=result.reason,
+            )
+            ok = False
+        else:
+            LOG.info(f"{log_key}_sent", part=idx + 1, message_id=result.message_id)
+    return ok
+
+
+
+__all__ = [
+    "INWATCH_KLINE_RECONCILE_SECONDS",
+    "ORPHAN_RECONCILE_MINUTES",
+    "_deliver_followup",
+    "_reconcile_inwatch_active",
+    "_reconcile_orphan_signals",
+    "_record_followup_side_effects",
+    "_send_telegram_chunks",
+    "_split_telegram",
+]

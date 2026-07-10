@@ -1,0 +1,678 @@
+"""Factory for hunt CCXT market plane + CCXT helpers + OHLCV frames."""
+from __future__ import annotations
+
+
+
+import asyncio
+import logging
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+import ccxt
+import ccxt.async_support as ccxt_async
+import ccxt.pro as ccxtpro
+import polars as pl
+
+from hunt_core import clock
+from hunt_core.market.network import (
+    ProxyPool,
+    filter_working_proxies_ccxt,
+    mask_proxy_url,
+    probe_ccxt_direct,
+    resolve_proxy_url,
+)
+from hunt_core.market.symbols import to_ccxt_symbol
+
+if TYPE_CHECKING:
+    from hunt_core.market.client import HuntCcxtClient
+    from hunt_core.market.spot import HuntCcxtSpotCompanion
+    from hunt_core.market.streams import HuntCcxtStreams
+
+LOG = logging.getLogger("hunt_core.market.factory")
+
+_PROBE_TIMEOUT_MS = 20_000
+
+BINANCE_EXCHANGE_ID = "binance"
+FUTURES_DEFAULT_TYPE = "future"
+SPOT_DEFAULT_TYPE = "spot"
+
+_KLINE_FRAME_SCHEMA = {
+    "time": pl.Datetime("us", "UTC"),
+    "open": pl.Float64,
+    "high": pl.Float64,
+    "low": pl.Float64,
+    "close": pl.Float64,
+    "volume": pl.Float64,
+    "close_time": pl.Datetime("us", "UTC"),
+    "quote_volume": pl.Float64,
+    "num_trades": pl.Int64,
+    "taker_buy_base_volume": pl.Float64,
+    "taker_buy_quote_volume": pl.Float64,
+    "open_time": pl.Datetime("us", "UTC"),
+}
+
+
+def build_network_config(
+    *,
+    proxy_url: str | None = None,
+    trust_env: bool = True,
+    timeout_ms: int = 45_000,
+    default_type: str = FUTURES_DEFAULT_TYPE,
+    pro: bool = False,
+) -> dict[str, Any]:
+    """Base kwargs for ``ccxt.binance`` / ``ccxt.pro.binance`` (public endpoints only)."""
+    options: dict[str, Any] = {
+        "defaultType": default_type,
+        "adjustForTimeDifference": True,
+        # ccxt.pro seeds watch_order_book with a REST /fapi/v1/depth snapshot.
+        # Its default watchOrderBookLimit=1000 costs weight 20 PER SYMBOL and
+        # re-fires for every symbol on each WS reconnect — 135 symbols × 20 =
+        # 2700 weight in seconds → 429 → 418 IP ban. We only consume the top
+        # _TOP_BOOK_DEPTH_LEVELS (20), and limit≤50 costs weight 2, so cap the
+        # snapshot at 20 (10× less weight, identical usable data).
+        "watchOrderBookLimit": 20,
+        **(
+            {"fetchMarkets": ["linear"]}
+            if default_type == FUTURES_DEFAULT_TYPE
+            else {}
+        ),
+    }
+    if pro:
+        options["tradesLimit"] = 500
+        options["OHLCVLimit"] = 200
+    config: dict[str, Any] = {
+        "enableRateLimit": True,
+        "timeout": timeout_ms,
+        "options": options,
+    }
+    if pro:
+        # CCXT Pro manual: delta-only updates reduce hot-path work in watch loops.
+        config["newUpdates"] = True
+        config["streaming"] = {
+            # Binance recommendation: client-side keepalive every 3min.
+            # 30s was too aggressive — event-loop saturation during startup
+            # caused ping/pong misses, making CCXT Pro self-close every ~79s.
+            "keepAlive": 180_000,
+            "maxPingPongMisses": 3.0,
+        }
+    if proxy_url:
+        config["aiohttp_proxy"] = proxy_url
+    if trust_env:
+        config["aiohttp_trust_env"] = True
+    return config
+
+
+def create_async_binance_future(
+    *,
+    proxy_url: str | None = None,
+    trust_env: bool = True,
+    timeout_ms: int = 45_000,
+) -> ccxt_async.binance:
+    return ccxt_async.binance(
+        build_network_config(
+            proxy_url=proxy_url,
+            trust_env=trust_env,
+            timeout_ms=timeout_ms,
+            default_type=FUTURES_DEFAULT_TYPE,
+        )
+    )
+
+
+def create_pro_binance_future(
+    *,
+    proxy_url: str | None = None,
+    trust_env: bool = True,
+    timeout_ms: int = 45_000,
+) -> ccxtpro.binance:
+    return ccxtpro.binance(
+        build_network_config(
+            proxy_url=proxy_url,
+            trust_env=trust_env,
+            timeout_ms=timeout_ms,
+            default_type=FUTURES_DEFAULT_TYPE,
+            pro=True,
+        )
+    )
+
+
+def create_async_binance_spot(
+    *,
+    proxy_url: str | None = None,
+    trust_env: bool = True,
+    timeout_ms: int = 12_000,
+) -> ccxt_async.binance:
+    return ccxt_async.binance(
+        build_network_config(
+            proxy_url=proxy_url,
+            trust_env=trust_env,
+            timeout_ms=timeout_ms,
+            default_type=SPOT_DEFAULT_TYPE,
+        )
+    )
+
+
+def create_async_secondary_swap(
+    exchange_id: str,
+    *,
+    proxy_url: str | None = None,
+    trust_env: bool = True,
+    timeout_ms: int = 45_000,
+) -> ccxt_async.Exchange:
+    cls = getattr(ccxt_async, exchange_id)
+    return cls(
+        build_network_config(
+            proxy_url=proxy_url,
+            trust_env=trust_env,
+            timeout_ms=timeout_ms,
+            default_type="swap",
+        )
+    )
+
+
+def create_pro_secondary_swap(
+    exchange_id: str,
+    *,
+    proxy_url: str | None = None,
+    trust_env: bool = True,
+    timeout_ms: int = 45_000,
+) -> Any:
+    cls = getattr(ccxtpro, exchange_id)
+    config = build_network_config(
+        proxy_url=proxy_url,
+        trust_env=trust_env,
+        timeout_ms=timeout_ms,
+        default_type="swap",
+        pro=True,
+    )
+    # Bybit requires ping every 20 s; OKX every 30 s — both drop connection at ~60 s idle.
+    # The primary Binance client uses 180 s (Binance is tolerant; shorter caused misses).
+    # Secondary exchanges need a shorter keepAlive to survive.
+    config["streaming"]["keepAlive"] = 20_000
+    return cls(config)
+
+
+def create_sync_binance_future(
+    *,
+    proxy_url: str | None = None,
+    trust_env: bool = True,
+    timeout_ms: int = 45_000,
+) -> ccxt.binance:
+    config = build_network_config(
+        proxy_url=proxy_url,
+        trust_env=trust_env,
+        timeout_ms=timeout_ms,
+        default_type=FUTURES_DEFAULT_TYPE,
+    )
+    config.pop("aiohttp_proxy", None)
+    config.pop("aiohttp_trust_env", None)
+    return ccxt.binance(config)
+
+
+def close_exchange_sync(ex: Any, *, label: str) -> None:
+    close_fn = getattr(ex, "close", None)
+    if not callable(close_fn):
+        return
+    try:
+        close_fn()
+    except Exception as exc:
+        LOG.warning("exchange_close_failed | label=%s error=%s", label, exc)
+
+
+async def close_exchange_async(ex: Any, *, label: str) -> None:
+    close_fn = getattr(ex, "close", None)
+    if not callable(close_fn):
+        return
+    try:
+        result = close_fn()
+        if asyncio.iscoroutine(result):
+            await result
+    except Exception as exc:
+        LOG.warning("exchange_close_failed | label=%s error=%s", label, exc)
+
+
+def fetch_klines_sync(
+    symbol: str,
+    interval: str,
+    *,
+    since_ms: int | None = None,
+    until_ms: int | None = None,
+    limit: int = 1500,
+    max_pages: int = 10,
+    proxy_url: str | None = None,
+    trust_env: bool = True,
+) -> list[list[Any]]:
+    """Paginated sync OHLCV for offline scripts (calibration, reconcile, tg_backtest)."""
+    ex = create_sync_binance_future(proxy_url=proxy_url, trust_env=trust_env)
+    try:
+        ex.load_markets()
+        ccxt_sym = to_ccxt_symbol(symbol, exchange=ex)
+        out: list[list[Any]] = []
+        cursor = since_ms
+        page_limit = min(1500, max(1, int(limit)))
+        for _ in range(max_pages):
+            batch = ex.fetch_ohlcv(
+                ccxt_sym,
+                interval,
+                since=cursor,
+                limit=page_limit if cursor is not None else min(1500, max(1, int(limit))),
+            )
+            if not batch:
+                break
+            if until_ms is not None:
+                batch = [row for row in batch if int(row[0]) <= until_ms]
+            out.extend(batch)
+            if until_ms is not None and batch and int(batch[-1][0]) >= until_ms:
+                break
+            if len(batch) < page_limit:
+                break
+            if cursor is None:
+                break
+            cursor = int(batch[-1][0]) + 1
+        return out
+    finally:
+        close_exchange_sync(ex, label="sync_binance_future")
+
+
+async def fetch_klines_async(
+    client: "HuntCcxtClient",
+    symbol: str,
+    interval: str,
+    *,
+    since_ms: int,
+    limit: int = 1500,
+) -> list[list[Any]]:
+    return await client.fetch_ohlcv_list(
+        symbol,
+        interval,
+        since=max(0, int(since_ms)),
+        limit=min(1500, max(1, int(limit))),
+    )
+
+
+def interval_to_seconds(interval: str, exchange: Any) -> int:
+    if exchange is None:
+        raise TypeError("interval_to_seconds requires a CCXT exchange instance")
+    parse_tf = getattr(exchange, "parse_timeframe", None)
+    if not callable(parse_tf):
+        raise TypeError(f"{getattr(exchange, 'id', 'exchange')}: parse_timeframe is not available")
+    return int(parse_tf(interval))
+
+
+def _close_time_ms(open_ms: int, interval: str, exchange: Any) -> int:
+    step = interval_to_seconds(interval, exchange) * 1000
+    return open_ms + step - 1
+
+
+def ccxt_ohlcv_to_frame(
+    rows: list[list[Any]],
+    interval: str,
+    *,
+    exchange: Any,
+) -> pl.DataFrame:
+    if not rows:
+        return pl.DataFrame(schema=_KLINE_FRAME_SCHEMA)
+    built: list[dict[str, Any]] = []
+    for row in rows:
+        if not row or len(row) < 6:
+            continue
+        try:
+            open_ms = int(row[0])
+            o, h, low, c, v = (
+                float(row[1]),
+                float(row[2]),
+                float(row[3]),
+                float(row[4]),
+                float(row[5]),
+            )
+        except (TypeError, ValueError, IndexError):
+            continue
+        if open_ms <= 0 or c <= 0:
+            continue
+        close_ms = _close_time_ms(open_ms, interval, exchange)
+        built.append(
+            {
+                "time": open_ms,
+                "open": o,
+                "high": h,
+                "low": low,
+                "close": c,
+                "volume": v,
+                "close_time": close_ms,
+                "quote_volume": 0.0,
+                "num_trades": 0,
+                "taker_buy_base_volume": 0.0,
+                "taker_buy_quote_volume": 0.0,
+            }
+        )
+    if not built:
+        return pl.DataFrame(schema=_KLINE_FRAME_SCHEMA)
+    frame = pl.DataFrame(built)
+    return frame.with_columns(
+        pl.from_epoch(pl.col("time"), time_unit="ms").dt.replace_time_zone("UTC").alias("time"),
+        pl.from_epoch(pl.col("close_time"), time_unit="ms")
+        .dt.replace_time_zone("UTC")
+        .alias("close_time"),
+        pl.from_epoch(pl.col("time"), time_unit="ms").dt.replace_time_zone("UTC").alias("open_time"),
+    )
+
+
+def _ohlcv_frame_has_incomplete_tail(
+    df: pl.DataFrame,
+    timeframe: str,
+    *,
+    exchange: Any,
+) -> bool:
+    if df.is_empty():
+        return False
+    if "close_time" in df.columns:
+        last_close = df["close_time"].tail(1).item()
+        if isinstance(last_close, datetime):
+            return clock.now_utc() <= last_close
+    timeframe_seconds = interval_to_seconds(timeframe, exchange)
+    last_open = df["time"].tail(1).item()
+    if not isinstance(last_open, datetime):
+        return False
+    return clock.now_utc() < last_open + timedelta(seconds=timeframe_seconds)
+
+
+def _drop_incomplete_ohlcv_tail(
+    df: pl.DataFrame,
+    timeframe: str,
+    *,
+    exchange: Any,
+) -> pl.DataFrame:
+    if df.is_empty():
+        return df
+    if "close_time" in df.columns:
+        now = clock.now_utc()
+        closed = df.filter(pl.col("close_time") < pl.lit(now))
+        if closed.height != df.height:
+            return closed
+    if _ohlcv_frame_has_incomplete_tail(df, timeframe, exchange=exchange):
+        return df.head(df.height - 1)
+    return df
+
+
+_RESAMPLE_FROM_1M_INTERVALS = frozenset({"5m", "15m", "1h", "4h", "1d"})
+
+
+def min_1m_bars_for_resample(interval: str, target_limit: int, *, exchange: Any) -> int:
+    """How many 1m bars are needed to derive ``target_limit`` bars at ``interval``."""
+    if interval == "1m":
+        return max(1, int(target_limit))
+    step_s = interval_to_seconds(interval, exchange)
+    bars_per_bucket = max(1, step_s // 60)
+    return min(1500, int(target_limit) * bars_per_bucket + bars_per_bucket)
+
+
+def resample_ohlcv_from_1m(
+    df_1m: pl.DataFrame,
+    interval: str,
+    *,
+    exchange: Any,
+    limit: int | None = None,
+) -> pl.DataFrame:
+    """U3: derive higher TF OHLCV from 1m via Polars ``group_by_dynamic`` (MTF-consistent)."""
+    if df_1m.is_empty() or interval == "1m" or interval not in _RESAMPLE_FROM_1M_INTERVALS:
+        return df_1m
+    work = df_1m
+    if "open_time" not in work.columns and "time" in work.columns:
+        work = work.with_columns(pl.col("time").alias("open_time"))
+    if "open_time" not in work.columns:
+        return pl.DataFrame(schema=_KLINE_FRAME_SCHEMA)
+    if "close_time" in work.columns:
+        now = clock.now_utc()
+        work = work.filter(pl.col("close_time") < pl.lit(now))
+    if work.height < 2:
+        return pl.DataFrame(schema=_KLINE_FRAME_SCHEMA)
+    step_s = interval_to_seconds(interval, exchange)
+    every = f"{step_s}s"
+    agg_exprs: list[pl.Expr] = [
+        pl.col("open").first().alias("open"),
+        pl.col("high").max().alias("high"),
+        pl.col("low").min().alias("low"),
+        pl.col("close").last().alias("close"),
+        pl.col("volume").sum().alias("volume"),
+    ]
+    if "quote_volume" in work.columns:
+        agg_exprs.append(pl.col("quote_volume").sum().alias("quote_volume"))
+    else:
+        agg_exprs.append(pl.lit(0.0).alias("quote_volume"))
+    if "num_trades" in work.columns:
+        agg_exprs.append(pl.col("num_trades").sum().alias("num_trades"))
+    else:
+        agg_exprs.append(pl.lit(0).alias("num_trades"))
+    if "taker_buy_base_volume" in work.columns:
+        agg_exprs.append(pl.col("taker_buy_base_volume").sum().alias("taker_buy_base_volume"))
+    else:
+        agg_exprs.append(pl.lit(0.0).alias("taker_buy_base_volume"))
+    if "taker_buy_quote_volume" in work.columns:
+        agg_exprs.append(pl.col("taker_buy_quote_volume").sum().alias("taker_buy_quote_volume"))
+    else:
+        agg_exprs.append(pl.lit(0.0).alias("taker_buy_quote_volume"))
+    resampled = (
+        work.sort("open_time")
+        .group_by_dynamic("open_time", every=every, closed="left")
+        .agg(agg_exprs)
+    )
+    if resampled.is_empty():
+        return pl.DataFrame(schema=_KLINE_FRAME_SCHEMA)
+    resampled = resampled.with_columns(
+        pl.col("open_time").dt.epoch(time_unit="ms").alias("time"),
+        (
+            pl.col("open_time").dt.epoch(time_unit="ms")
+            + pl.lit(step_s * 1000 - 1)
+        ).alias("close_time"),
+    )
+    if limit is not None and resampled.height > int(limit):
+        resampled = resampled.tail(int(limit))
+    return finalize_kline_frame(resampled, interval, exchange=exchange)
+
+
+def finalize_kline_frame(frame: pl.DataFrame, interval: str, *, exchange: Any) -> pl.DataFrame:
+    return _drop_incomplete_ohlcv_tail(frame, interval, exchange=exchange)
+
+
+def ms_to_utc(ms: int) -> datetime:
+    return datetime.fromtimestamp(ms / 1000.0, tz=UTC)
+
+
+def utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+@dataclass(slots=True)
+class HuntMarketPlane:
+    client: "HuntCcxtClient"
+    streams: "HuntCcxtStreams"
+    spot: "HuntCcxtSpotCompanion"
+
+    async def aclose(self) -> None:
+        """Release CCXT REST + Pro WS resources (probes, one-shot scripts)."""
+        try:
+            await self.streams.stop()
+        except Exception:
+            LOG.debug("market_plane_streams_stop_failed", exc_info=True)
+        try:
+            await self.client.close()
+        except Exception:
+            LOG.debug("market_plane_client_close_failed", exc_info=True)
+        try:
+            await self.spot.close()
+        except Exception:
+            LOG.debug("market_plane_spot_close_failed", exc_info=True)
+        # Yield so aiohttp/CCXT Pro sessions finish teardown (avoids Unclosed client session).
+        await asyncio.sleep(1.5)
+
+    async def close(self) -> None:
+        """Alias for ``aclose()`` — matches probe/smoke call sites."""
+        await self.aclose()
+
+
+async def _create_plane_once(
+    *,
+    proxy_url: str | None,
+    trust_env: bool,
+    proxy_pool: ProxyPool | None = None,
+) -> HuntMarketPlane:
+    from hunt_core.market.client import HuntCcxtClient
+    from hunt_core.market.spot import HuntCcxtSpotCompanion
+    from hunt_core.market.streams import HuntCcxtStreams
+
+    client = HuntCcxtClient(
+        proxy_url=proxy_url,
+        trust_env=trust_env,
+        timeout_ms=_PROBE_TIMEOUT_MS,
+    )
+    client.attach_proxy_pool(proxy_pool)
+    try:
+        await client.load_markets()
+    except Exception:
+        await client.close()
+        raise
+    streams = HuntCcxtStreams(client=client)
+    client.set_streams_reconnect(streams._reconnect_binance_pro)
+    return HuntMarketPlane(
+        client=client,
+        streams=streams,
+        spot=HuntCcxtSpotCompanion(
+            proxy_url=proxy_url,
+            trust_env=trust_env,
+            timeout_ms=12_000,
+        ),
+    )
+
+
+async def _discover_and_refresh_proxies(config_path: Path) -> list[str]:
+    from hunt_core.market.network import auto_discover_proxies, write_proxies_to_config
+
+    urls = await auto_discover_proxies(include_public=False)
+    if not urls:
+        urls = await auto_discover_proxies(include_public=True)
+    if urls and config_path.is_file():
+        try:
+            await asyncio.to_thread(write_proxies_to_config, config_path, urls)
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("hunt_proxy_config_write_failed | error=%s", exc)
+    return urls
+
+
+async def _attempt_with_pool(
+    pool: ProxyPool | None,
+    *,
+    trust_env: bool,
+) -> HuntMarketPlane:
+    if pool is None:
+        if not await probe_ccxt_direct():
+            raise RuntimeError("hunt_market_plane_proxy_pool_exhausted")
+        return await _create_plane_once(proxy_url=None, trust_env=trust_env, proxy_pool=None)
+
+    last_exc: BaseException | None = None
+    tried: set[str] = set()
+    max_tries = max(len(pool.urls) * 2, 3)
+
+    for _ in range(max_tries):
+        proxy_url = pool.current()
+        if proxy_url in tried and len(tried) >= len(pool.urls):
+            break
+        tried.add(proxy_url)
+        try:
+            plane = await _create_plane_once(
+                proxy_url=proxy_url,
+                trust_env=trust_env,
+                proxy_pool=pool,
+            )
+            pool.mark_success(proxy_url)
+            LOG.info("hunt_market_plane_ready | proxy=%s", mask_proxy_url(proxy_url))
+            return plane
+        except Exception as exc:
+            last_exc = exc
+            nxt = pool.mark_failed(proxy_url, type(exc).__name__)
+            LOG.warning(
+                "hunt_market_plane_proxy_fail | proxy=%s error=%s",
+                mask_proxy_url(proxy_url),
+                type(exc).__name__,
+            )
+            if nxt is None:
+                break
+
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("hunt_market_plane_proxy_pool_exhausted")
+
+
+async def create_hunt_market_plane(
+    *,
+    proxy_url: str | None = None,
+    trust_env: bool = True,
+) -> HuntMarketPlane:
+    return await _create_plane_once(proxy_url=proxy_url, trust_env=trust_env, proxy_pool=None)
+
+
+async def create_hunt_market_plane_from_settings(settings: Any) -> HuntMarketPlane:
+    net = getattr(settings, "network", settings)
+    urls: list[str] = []
+    effective = getattr(net, "effective_proxy_urls", None)
+    if callable(effective):
+        urls = list(effective())
+
+    config_path = Path(getattr(settings, "config_path", "config.toml"))
+    # Seed standard proxy env vars (HTTPS_PROXY/ALL_PROXY/WSS_PROXY/BINANCE_PROXY_URL) into the
+    # primary pool so a user-supplied proxy is tried first — not only on the discovery fallback.
+    env_proxy = resolve_proxy_url(config_url=None, trust_env=True)
+    if env_proxy and env_proxy not in urls:
+        urls.insert(0, env_proxy)
+    raw_urls = list(urls)
+    if urls:
+        filtered = await filter_working_proxies_ccxt(urls)
+        if filtered:
+            urls = filtered
+            # Self-heal: persist the surviving working set so dead proxies are not
+            # re-probed every start (round-trips through [bot.network]).
+            if len(filtered) < len(raw_urls) and config_path.is_file():
+                from hunt_core.market.network import write_proxies_to_config
+
+                try:
+                    await asyncio.to_thread(write_proxies_to_config, config_path, filtered)
+                except Exception as exc:  # noqa: BLE001
+                    LOG.warning("hunt_proxy_prune_persist_failed | error=%s", exc)
+        else:
+            LOG.warning(
+                "hunt_proxy_filter_empty_keep_config | configured=%d",
+                len(raw_urls),
+            )
+            urls = raw_urls
+
+    pool = ProxyPool.from_urls(urls, cooldown_seconds=120.0) if urls else None
+
+    # Hold the failure outside the except block: Python 3 unbinds the `as`
+    # target once the block exits, so a later `raise first_exc` would itself
+    # raise NameError and mask the real cause.
+    first_exc: Exception
+    try:
+        return await _attempt_with_pool(pool, trust_env=False)
+    except Exception as exc:
+        first_exc = exc
+        LOG.warning(
+            "hunt_market_plane_initial_fail | error=%s — rediscovering proxies",
+            type(exc).__name__,
+        )
+
+    fresh = await _discover_and_refresh_proxies(config_path)
+    if not fresh:
+        if await probe_ccxt_direct():
+            LOG.info("hunt_market_plane_direct | reason=proxy_pool_exhausted_ccxt_direct_ok")
+            return await _create_plane_once(proxy_url=None, trust_env=False, proxy_pool=pool)
+        raise first_exc
+
+    fresh = await filter_working_proxies_ccxt(fresh)
+    if not fresh:
+        if await probe_ccxt_direct():
+            LOG.info("hunt_market_plane_direct | reason=no_ccxt_proxy_ccxt_direct_ok")
+            return await _create_plane_once(proxy_url=None, trust_env=False, proxy_pool=pool)
+        raise first_exc
+
+    fresh_pool = ProxyPool.from_urls(fresh, cooldown_seconds=120.0)
+    return await _attempt_with_pool(fresh_pool, trust_env=False)

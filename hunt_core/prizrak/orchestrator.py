@@ -1,0 +1,1554 @@
+"""build_prizrak_signals(ohlcv_by_tf, price) -> list[dict] — multiple, independent
+signals per tick, never a single verdict.
+
+Each returned dict is ``ScenarioVerdict``-summary-compatible (confirmed minimal field
+set: action, entry_lo/hi, stop, tp1-3, rr_primary, strength, path, fragility,
+trade_quality, catalyst_level, gates_failed, geometry_confidence, activation) plus two
+extra tags: ``setup_kind`` and ``tf_tier``. Consumers (signal_queue.py,
+delivery_policy.py, ``SignalEmitter.emit_deep``) need no changes — each candidate is
+fed through the shared spine independently (see runtime/emitter.py::emit_deep, which
+already dedupes/cools down per computed ``setup_id`` from the summary content alone).
+
+Course discipline encoded directly here, not left to a downstream gate:
+- Price INSIDE an accumulation zone -> no signal from that zone at all (course:
+  "не вижу смысла открывать сделки в середине диапазона"). Abstain, don't emit weak.
+- Every level-finding step runs across all three scale tiers (see config.py) — the
+  documented fix for the ONDO/BTC live-comparison mistake of checking one window.
+- Indicators/dominance only ever multiply strength; they never gate a candidate out.
+
+NOTE (Phase 6 dependency): this module's input contract is raw CCXT-shaped OHLCV rows
+per timeframe (``dict[str, list[list[float]]]``), the same shape used throughout this
+session's live ONDO/BTC validation and by ``research/build_deep.py``. The live pipeline
+call site (``runtime/analyst_assembly.py``) currently carries per-tf bars as
+``row["timeframes"][tf]["ohlcv"]`` (list of dicts). Phase 6 must adapt one to the other
+at the call site — deliberately not done here so this module stays independently
+testable against already-verified historical data.
+"""
+from __future__ import annotations
+
+from typing import Any, Literal
+
+from hunt_core.prizrak.invalidation import build_invalidation
+from hunt_core.prizrak.accumulation import _CLUSTER_TOL, _overlaps, find_accumulation_zone, find_accumulation_zones
+from hunt_core.prizrak.confluence import compute_confluence
+from hunt_core.prizrak.config import PrizrakConfig, ScaleTier
+from hunt_core.prizrak.dominance import dominance_confluence
+from hunt_core.prizrak.figures import tag_squeeze_pattern
+from hunt_core.prizrak.pp import detect_pereprior
+from hunt_core.prizrak.poc import zone_poc
+from hunt_core.prizrak.stop_volume import find_stop_volume
+from hunt_core.prizrak.structure import bars_from_ohlcv, multi_scale_structure, _tier_structure
+from hunt_core.prizrak.traps import classify_level_touch
+
+_TIER_SETUP_KIND = {"intraday": "level_intraday_scalp", "meso": "level_core", "macro": "level_core"}
+_SL_BUFFER_PCT = 0.02  # course: "стоп за структуру с запасом 1-3%"
+_ENTRY_BAND_PCT = 0.002  # course: entries near POC ± a bit, not one exact tick
+_FORWARD_ZONE_MIN_DIST_PCT = 0.5  # below this, price is basically already there — reactive path owns it
+_FORWARD_ZONE_MAX_DIST_PCT = 20.0  # beyond this, targeting is too speculative to act on
+
+
+def _entry_band(anchor: float) -> tuple[float, float]:
+    return round(anchor * (1 - _ENTRY_BAND_PCT), 8), round(anchor * (1 + _ENTRY_BAND_PCT), 8)
+
+
+def _tf_lookback_map(cfg: PrizrakConfig) -> dict[str, int]:
+    """Every configured timeframe across all three tiers, mapped to its own
+    lookback window — used to slice each TF consistently whenever a search needs
+    to scan across the whole multi-scale set at once, not just one TF at a time."""
+    mapping: dict[str, int] = {}
+    for tier in (cfg.intraday, cfg.meso, cfg.macro):
+        for tf in tier.timeframes:
+            mapping[tf] = tier.lookback_bars
+    return mapping
+
+
+def compute_interest_zones(
+    ohlcv_by_tf: dict[str, list[list[float]]],
+    *,
+    price: float,
+    cfg: PrizrakConfig,
+    tf: str = "4h",
+) -> dict[str, Any]:
+    """Nearest actionable accumulation zones for PENDING limit orders, so a WAIT tick
+    still shows where to act — support box below → 🟢 long interest, resistance box
+    above → 🔴 short interest. This is the trader's «локальные трейды: уровни 4ч ТФ»
+    (e.g. LINK long 7.25–7.38 / short 7.85–8.00): limits sit at these zones while price
+    is between them. Reuses find_accumulation_zones; falls back 4h→1h→1d.
+    """
+    lookback_map = _tf_lookback_map(cfg)
+    for use_tf in (tf, "1h", "1d"):
+        raw = ohlcv_by_tf.get(use_tf)
+        if not raw or price <= 0:
+            continue
+        # Interest zones need a LONGER window than the tier candidate lookback (4h=60)
+        # to capture both the support-below and resistance-above structural boxes — 60
+        # bars only saw the nearest one. 120 matches the trader's own multi-touch zones.
+        lookback = max(120, lookback_map.get(use_tf, 120))
+        bars = bars_from_ohlcv(raw[-lookback:])
+        if not bars:
+            continue
+        zones = find_accumulation_zones(bars, tf=use_tf, cfg=cfg, max_zones=8)
+        below = [z for z in zones if z.get("hi", 0) < price]
+        above = [z for z in zones if z.get("lo", 0) > price]
+        # Pick the STRONGEST accumulation box (most touches), nearest as tie-break —
+        # that is the zone the trader actually marks as the level (LINK long 7.25-7.38
+        # with 7 touches, not the shallow 7.50 with 5), not merely the closest one.
+        long_zone = max(below, key=lambda z: (int(z.get("touches") or 0), z["hi"])) if below else None
+        short_zone = max(above, key=lambda z: (int(z.get("touches") or 0), -z["lo"])) if above else None
+        if not long_zone and not short_zone:
+            continue
+        out: dict[str, Any] = {"tf": use_tf}
+        if long_zone:
+            out["long"] = {"lo": float(long_zone["lo"]), "hi": float(long_zone["hi"]),
+                           "touches": int(long_zone.get("touches") or 0)}
+        if short_zone:
+            out["short"] = {"lo": float(short_zone["lo"]), "hi": float(short_zone["hi"]),
+                            "touches": int(short_zone.get("touches") or 0)}
+        return out
+    return {}
+
+
+def _extract_swing_levels(
+    struct_by_tier: dict[str, dict[str, Any]] | None,
+    *,
+    direction: str,
+    entry: float,
+    max_levels: int = 6,
+) -> list[float]:
+    """Extract intermediate swing highs/lows from structure analysis, filtered to
+    those ahead of entry in the trade direction. Used to build the TP ladder."""
+    if not struct_by_tier:
+        return []
+    all_levels: list[float] = []
+    for tier_key in ("macro", "meso", "intraday"):
+        tier = struct_by_tier.get(tier_key)
+        if not isinstance(tier, dict):
+            continue
+        if direction == "long":
+            for level in tier.get("all_swing_highs") or []:
+                if isinstance(level, (int, float)) and level > entry:
+                    all_levels.append(level)
+        else:
+            for level in tier.get("all_swing_lows") or []:
+                if isinstance(level, (int, float)) and level > 0 and level < entry:
+                    all_levels.append(level)
+    deduped = sorted(set(all_levels)) if direction == "long" else sorted(set(all_levels), reverse=True)
+    return deduped[:max_levels]
+
+
+def _build_tp_ladder(
+    entry: float,
+    direction: str,
+    zone_targets: list[float],
+    swing_levels: list[float],
+    *,
+    max_steps: int = 5,
+) -> list[float]:
+    """Build an honest TP ladder: entry → intermediate swing levels → zone targets.
+
+    Returns a flat list of price levels, nearest first. The first level(s) are
+    intermediate swing highs/lows (structural resistance/support), followed by
+    accumulation zone edges. This prevents fake R:R where TP1 skips over real
+    structural obstacles.
+    """
+    ladder: list[float] = []
+    seen: set[float] = set()
+
+    candidates = swing_levels + zone_targets
+    if direction == "long":
+        candidates.sort()
+    else:
+        candidates.sort(reverse=True)
+
+    for p in candidates:
+        if p in seen:
+            continue
+        seen.add(p)
+        if len(ladder) >= max_steps:
+            break
+        # Skip levels that are behind entry
+        if direction == "long" and p <= entry:
+            continue
+        if direction == "short" and p >= entry:
+            continue
+        ladder.append(round(p, 8))
+
+    return ladder[:max_steps]
+
+
+_TF_MINUTES: dict[str, int] = {
+    "1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "2h": 120,
+    "4h": 240, "6h": 360, "8h": 480, "12h": 720, "1d": 1440, "3d": 4320, "1w": 10080,
+}
+
+
+def _tf_rank(tf: str) -> int:
+    return _TF_MINUTES.get(str(tf).lower(), 15)
+
+
+def _structural_targets(
+    ohlcv_by_tf: dict[str, list[list[float]]],
+    *,
+    cfg: PrizrakConfig,
+    direction: Literal["long", "short"],
+    entry: float,
+    swing_levels: list[float] | None = None,
+    min_tf: str | None = None,
+) -> list[float]:
+    """Real targets ahead of ``entry`` in the trade direction — the next accumulation
+    zone(s), nearest first. Searched across the setup's own TF and HIGHER (``min_tf``):
+    a 4h/1d trade takes 4h/1d/1w liquidity, never a tiny 5m zone (TP/SL must live on the
+    setup's timeframe, not a finer one). When no target exists ahead within that scale
+    it falls back to the full multi-TF scan — a support bounce found on 1h can still
+    have to travel through a zone that only resolves coarser, and the trade must not
+    abstain for lack of a target that is right there (course example: REZ's 1h add-long
+    zone 0.003063-0.00307367 targeting the 0.0031-0.0034 box that resolves on 4h).
+    Course discipline: targets are structural (the next base/liquidity a move
+    actually has to travel through), never a generic R-multiple off the entry.
+    Returns an EMPTY list when no real zone exists ahead on ANY timeframe — callers
+    must abstain rather than fabricate a distance-based target.
+
+    If ``swing_levels`` are provided, a full TP ladder is built (intermediate swing
+    levels + zone edges) so the caller gets an honest sequence of obstacles rather
+    than skipping directly to a distant zone.
+    """
+    lookback_map = _tf_lookback_map(cfg)
+    # TF-consistency (user methodology): TP/SL are read on the setup's own TF and
+    # HIGHER, never a finer one — a 4h/1d trade must not take a tiny 5m zone as its
+    # target (that is what produced the 2%-stop-on-an-HTF-move / R:R 1.44 mismatch).
+    # min_rank filters out sub-setup TFs; if that leaves NO target ahead we fall back
+    # to the full scan (never abstain on a real HTF trade for lack of a target).
+    min_rank = _tf_rank(min_tf) if min_tf else 0
+
+    def _collect(rank_floor: int) -> list[dict[str, Any]]:
+        pool: list[dict[str, Any]] = []
+        claimed: list[tuple[float, float]] = []
+        for tf, raw in ohlcv_by_tf.items():
+            lookback = lookback_map.get(tf)
+            if lookback is None or not raw or _tf_rank(tf) < rank_floor:
+                continue
+            bars = bars_from_ohlcv(raw[-lookback:])
+            for z in find_accumulation_zones(bars, tf=tf, cfg=cfg, max_zones=6):
+                if any(z["lo"] <= hi and lo <= z["hi"] for lo, hi in claimed):
+                    continue  # same base already captured from another timeframe's scan
+                claimed.append((z["lo"], z["hi"]))
+                pool.append(z)
+        return pool
+
+    def _edges(pool: list[dict[str, Any]]) -> list[float]:
+        if direction == "long":
+            return sorted(z["lo"] for z in pool if z["lo"] > entry)
+        return sorted((z["hi"] for z in pool if z["hi"] < entry), reverse=True)
+
+    pool = _collect(min_rank)
+    if min_rank > 0 and not _edges(pool):
+        pool = _collect(0)  # fallback: no in-scale target ahead → widen to all TFs
+
+    zone_edges = _edges(pool)
+
+    if not swing_levels:
+        return zone_edges[:3]
+
+    return _build_tp_ladder(
+        entry, direction, zone_targets=zone_edges, swing_levels=swing_levels, max_steps=5,
+    )
+
+
+def _geometry_from_zone(
+    *,
+    direction: Literal["long", "short"],
+    entry: float,
+    ohlcv_by_tf: dict[str, list[list[float]]],
+    cfg: PrizrakConfig,
+    swing_levels: list[float] | None = None,
+    min_tf: str | None = None,
+) -> dict[str, float] | None:
+    """SL beyond the TRADED LEVEL (entry/catalyst) with a 1-3% buffer (course: "стоп
+    за структуру с запасом") — NOT beyond the zone's opposite boundary. Every caller
+    passes ``entry`` as exactly the near edge being traded (the level price is
+    actually testing); the zone's far edge is a different level the trade isn't
+    about at all. Anchoring the stop to that far edge instead produced absurdly
+    wide, R:R-destroying stops on any накопление wider than a percent or two (course
+    example: BTC's 1h base 61283-62879, 2.6% wide — a long retesting the 62879 top
+    as new support got a stop all the way down at ~60057, a ~4.5% risk for a trade
+    that's actually about defending the 62879 level, not the zone's far side).
+    TP1-3 are the next real structural targets ahead, searched across every
+    configured timeframe (course: targets are the next base/liquidity a move has to
+    travel through, not a generic R-multiple off entry). Returns None — no geometry,
+    no signal — when there's no real target ahead anywhere; this must never fall
+    back to distance-based TPs.
+
+    If ``swing_levels`` are provided, an honest TP ladder is built with intermediate
+    swing levels between entry and zone targets — prevents fake R:R where TP1 skips
+    structural resistance ahead.
+    """
+    if direction == "long":
+        stop = entry * (1 - _SL_BUFFER_PCT)
+        risk = entry - stop
+    else:
+        stop = entry * (1 + _SL_BUFFER_PCT)
+        risk = stop - entry
+    if risk <= 0:
+        return None
+    targets = _structural_targets(
+        ohlcv_by_tf, cfg=cfg, direction=direction, entry=entry, swing_levels=swing_levels,
+        min_tf=min_tf,
+    )
+    if not targets:
+        return None
+
+    # Build the full ladder: tp1..tpN from the combined target list.
+    tp_ladder = targets[:5]
+    rr = abs(tp_ladder[0] - entry) / risk
+    if rr < cfg.min_rr:
+        return None
+
+    result: dict[str, Any] = {
+        "stop": round(stop, 8),
+        "rr_primary": round(rr, 2),
+        "tp_ladder": tp_ladder,
+    }
+    for i, tp in enumerate(tp_ladder):
+        result[f"tp{i + 1}"] = round(tp, 8)
+
+    # Legacy tp1-3 for external consumers that read them directly.
+    # tp4+ only exist in tp_ladder for the new format renderer.
+    for i in range(len(tp_ladder), 3):
+        result[f"tp{i + 1}"] = None
+
+    return result
+
+
+def _base_summary(
+    *,
+    direction: Literal["long", "short", "wait"],
+    entry: float,
+    zone: dict[str, Any],
+    setup_kind: str,
+    tf_tier: str,
+    tf: str,
+    catalyst_level: float,
+    poc_info: dict[str, Any],
+    ohlcv_by_tf: dict[str, list[list[float]]],
+    cfg: PrizrakConfig,
+    swing_levels: list[float] | None = None,
+    entry_band: tuple[float, float] | None = None,
+) -> dict[str, Any] | None:
+    # Explicit entry_band overrides the default ±0.2% tick band — used by the ПП
+    # path where the entry zone is the whole тень-свечи zone (course стр.55), not a
+    # single price ± a fixed band.
+    entry_lo, entry_hi = entry_band if entry_band else _entry_band(entry)
+    if direction == "wait":
+        geo: dict[str, Any] = {}
+    else:
+        geo = _geometry_from_zone(direction=direction, entry=entry, ohlcv_by_tf=ohlcv_by_tf, cfg=cfg, swing_levels=swing_levels, min_tf=tf)
+        if geo is None:
+            return None  # no real structural target ahead on any timeframe — abstain, never fabricate one
+    return {
+        "action": direction,
+        "entry_lo": entry_lo,
+        "entry_hi": entry_hi,
+        "stop": geo.get("stop"),
+        "tp1": geo.get("tp1"),
+        "tp2": geo.get("tp2"),
+        "tp3": geo.get("tp3"),
+        "tp_ladder": geo.get("tp_ladder", []),
+        "rr_primary": geo.get("rr_primary"),
+        "strength": 0.5,
+        "path": f"{setup_kind}_{direction}",
+        "fragility": 0.5,
+        "trade_quality": "marginal",
+        "catalyst_level": round(catalyst_level, 8),
+        "gates_failed": [],
+        "geometry_confidence": 0.7,
+        "activation": "idle",
+        "setup_kind": setup_kind,
+        "tf_tier": tf_tier,
+        "tf": tf,
+        "zone": zone,
+        "poc": poc_info,
+    }
+
+
+def _structural_quality_multiplier(summary: dict[str, Any], *, cfg: PrizrakConfig) -> tuple[float, list[str]]:
+    """Course rule: a base is only tradeable with "4+ явные точки" — a zone with more
+    touches than the minimum is a more decisive base, one at the bare minimum (or an
+    unconfirmed PP) is weaker. Strength previously ignored this entirely: every
+    candidate started from the same flat 0.5 base regardless of how many times price
+    had actually respected the zone, how dense a stop-volume pocket was, or whether a
+    PP break was confirmed vs early/unconfirmed.
+    """
+    zone = summary.get("zone") if isinstance(summary.get("zone"), dict) else {}
+    mult = 1.0
+    evidence: list[str] = []
+
+    touches = zone.get("touches")
+    if touches:
+        extra = int(touches) - cfg.accumulation_min_touches
+        bump = max(-0.15, min(0.15, extra * 0.03))
+        mult += bump
+        evidence.append(f"zone_touches={touches}({bump:+.2f})")
+
+    density = zone.get("volume_density")
+    if density is not None:
+        bump = max(-0.1, min(0.15, (float(density) - 1.0) * 0.1))
+        mult += bump
+        evidence.append(f"stop_volume_density={float(density):.2f}({bump:+.2f})")
+
+    if summary.get("gates_failed"):
+        mult -= 0.1
+        evidence.append("unconfirmed_pattern(-0.10)")
+
+    return max(0.8, min(1.2, mult)), evidence
+
+
+def _compute_fragility(summary: dict[str, Any], *, cfg: PrizrakConfig) -> float:
+    """How easily this setup gets invalidated by one more push — was hardcoded to a
+    flat 0.5 for every candidate (never computed), even though signal_queue.py's
+    opportunity score gives it an 18% weight via ``(1.0 - fragility) * 0.18``. A base
+    at the bare minimum touch count (or an unconfirmed/early PP) is easy to sweep
+    through; a well-tested base or a dense stop-volume pocket is sturdier.
+    """
+    zone = summary.get("zone") if isinstance(summary.get("zone"), dict) else {}
+    frag = 0.5
+    touches = zone.get("touches")
+    if touches:
+        frag = 0.75 - (int(touches) - cfg.accumulation_min_touches) * 0.05
+    density = zone.get("volume_density")
+    if density is not None:
+        frag -= (float(density) - 1.0) * 0.05
+    if summary.get("gates_failed"):
+        frag += 0.15
+    return round(max(0.1, min(0.9, frag)), 3)
+
+
+def _tier_trend(struct: dict[str, Any]) -> Literal["bull", "bear", "neutral"]:
+    """Reduce a `_detect_structure` result to a single directional trend. Bullish
+    structure = making higher highs/lows or a fresh upside slom (BOS/CHoCH); bearish =
+    lower highs/lows or a downside slom. Contradictory/absent = neutral (ranging)."""
+    if not struct:
+        return "neutral"
+    bull = bool(struct.get("hh") or struct.get("hl") or struct.get("bos_up") or struct.get("choch_bull"))
+    bear = bool(struct.get("lh") or struct.get("ll") or struct.get("bos_down") or struct.get("choch_bear"))
+    if bull and not bear:
+        return "bull"
+    if bear and not bull:
+        return "bear"
+    return "neutral"
+
+
+def _htf_bias(
+    struct_by_tier: dict[str, dict[str, Any]],
+    *,
+    cfg: PrizrakConfig,
+    ohlcv_by_tf: dict[str, list[list[float]]] | None = None,
+) -> dict[str, Any]:
+    """Course "МТФ" regime bias from explicit 1w, 1d, 4h, 1h structural trends.
+
+    PrizrakTrade methodology: when medium TF (4h) moves counter to higher TFs (1w/1d),
+    the market is in accumulation (4h↑ + 1w/1d↓ → smart money buying) or distribution
+    (4h↓ + 1w/1d↑ → smart money selling). In either case there is NO directional edge
+    — bias is neutral until the accumulation/distribution resolves with a fresh slom.
+
+    Pure weighted voting (1w+1d = 0.60 vs 4h = 0.30) would always produce a short bias
+    in accumulation, which is the WRONG call per PrizrakTrade: the 4h bull is the signal
+    of institutional absorption, not a counter-trend blip to ignore.
+    """
+    struct_by_tf: dict[str, dict[str, Any]] = {}
+    tier_for_tf: dict[str, str] = {"1w": "macro", "1d": "macro", "4h": "meso", "1h": "meso"}
+    if ohlcv_by_tf is not None:
+        for tf, tier_key in tier_for_tf.items():
+            if tf in ohlcv_by_tf:
+                tier = _mk_scale_tier(tf, tier_key, cfg)
+                struct = _tier_structure(ohlcv_by_tf, tier, cfg=cfg)
+                if struct:
+                    struct_by_tf[tf] = struct
+        if "1d" not in struct_by_tf and "macro" in struct_by_tier:
+            struct_by_tf["1d"] = struct_by_tier["macro"]
+        if "1h" not in struct_by_tf and "meso" in struct_by_tier:
+            struct_by_tf["1h"] = struct_by_tier["meso"]
+    else:
+        if "macro" in struct_by_tier:
+            struct_by_tf["1d"] = struct_by_tier["macro"]
+        if "meso" in struct_by_tier:
+            struct_by_tf["1h"] = struct_by_tier["meso"]
+
+    weights: list[tuple[str, float, str]] = [
+        ("1w", cfg.htf_1w_weight, "1w"),
+        ("1d", cfg.htf_1d_weight, "1d"),
+        ("4h", cfg.htf_4h_weight, "4h"),
+        ("1h", cfg.htf_1h_weight, "1h"),
+    ]
+
+    votes: dict[str, str] = {}
+    for tf_key, _w, display_key in weights:
+        struct = struct_by_tf.get(tf_key)
+        if not struct:
+            continue
+        votes[display_key] = _tier_trend(struct)
+
+    trend_4h = votes.get("4h", "neutral")
+    trend_1w = votes.get("1w", "neutral")
+    trend_1d = votes.get("1d", "neutral")
+
+    # Accumulation: 4h bull against higher-TF bear → no directional edge
+    if trend_4h == "bull" and (trend_1w == "bear" or trend_1d == "bear"):
+        return {"bias": "neutral", "score": 0.0, "weight_available": 1.0, "votes": votes, "struct_by_tf": struct_by_tf}
+    # Distribution: 4h bear against higher-TF bull → no directional edge
+    if trend_4h == "bear" and (trend_1w == "bull" or trend_1d == "bull"):
+        return {"bias": "neutral", "score": 0.0, "weight_available": 1.0, "votes": votes, "struct_by_tf": struct_by_tf}
+
+    # All TFs agree or mixed without accumulation — use weighted vote.
+    net = 0.0
+    weight_available = 0.0
+    for tf_key, w, display_key in weights:
+        struct = struct_by_tf.get(tf_key)
+        if not struct:
+            continue
+        trend = votes[display_key]
+        if trend == "neutral":
+            weight_available += w
+            continue
+        if _is_bos_only_trend(struct, trend) and _higher_tf_neutral(struct_by_tf, tf_key, weights):
+            w *= 0.5
+        weight_available += w
+        net += w if trend == "bull" else -w
+
+    if weight_available <= 0.0:
+        return {"bias": "unknown", "score": 0.0, "weight_available": 0.0, "votes": votes}
+    norm = net / weight_available
+    if norm >= cfg.htf_bias_threshold:
+        bias = "long"
+    elif norm <= -cfg.htf_bias_threshold:
+        bias = "short"
+    else:
+        bias = "neutral"
+    return {
+        "bias": bias,
+        "score": round(norm, 3),
+        "weight_available": round(weight_available, 3),
+        "votes": votes,
+        "struct_by_tf": struct_by_tf,
+    }
+
+
+def _is_bos_only_trend(struct: dict[str, Any], trend: str) -> bool:
+    """True when the trend signal comes purely from BOS/CHoCH, not organic HH/HL/LH/LL."""
+    if trend == "bull":
+        return bool(struct.get("bos_up") or struct.get("choch_bull")) and not bool(struct.get("hh") or struct.get("hl"))
+    if trend == "bear":
+        return bool(struct.get("bos_down") or struct.get("choch_bear")) and not bool(struct.get("lh") or struct.get("ll"))
+    return False
+
+
+def _higher_tf_neutral(
+    struct_by_tf: dict[str, dict[str, Any]],
+    tf_key: str,
+    weights: list[tuple[str, float, str]],
+) -> bool:
+    """Check if the next higher timeframe (in the weight list) is neutral/ranging."""
+    idx = [w[0] for w in weights].index(tf_key)
+    if idx == 0:
+        return False  # 1w is the highest — no context above
+    higher_key = weights[idx - 1][0]
+    higher = struct_by_tf.get(higher_key)
+    if not higher:
+        return False
+    return _tier_trend(higher) == "neutral"
+
+
+def _mk_scale_tier(tf: str, tier_key: str, cfg: PrizrakConfig) -> ScaleTier:
+    """Build a single-TF ScaleTier with the configured lookback for that tier."""
+    lookbacks = {
+        "macro": cfg.macro.lookback_bars,
+        "meso": cfg.meso.lookback_bars,
+        "intraday": cfg.intraday.lookback_bars,
+    }
+    return ScaleTier(timeframes=(tf,), lookback_bars=lookbacks.get(tier_key, 60))
+
+
+def _direction_has_slom(
+    direction: str,
+    struct_by_tier: dict[str, dict[str, Any]],
+    *,
+    max_bar_offset: int = 5,
+) -> bool:
+    """Confirmed BOS/CHoCH slom in the candidate direction on macro or meso TF —
+    the course condition that unlocks a counter-HTF-trend entry. The slom must have
+    occurred on a level established within ``max_bar_offset`` bars (3–5 = recent,
+    aligns with "для шортов нужен свежий слом структуры на МТФ").
+    """
+    for tier in ("macro", "meso"):
+        s = struct_by_tier.get(tier) or {}
+        if direction == "long":
+            if s.get("bos_up") and (s.get("bos_up_bar_offset") or 99) <= max_bar_offset:
+                return True
+            if s.get("choch_bull") and (s.get("choch_bull_bar_offset") or 99) <= max_bar_offset:
+                return True
+        if direction == "short":
+            if s.get("bos_down") and (s.get("bos_down_bar_offset") or 99) <= max_bar_offset:
+                return True
+            if s.get("choch_bear") and (s.get("choch_bear_bar_offset") or 99) <= max_bar_offset:
+                return True
+    return False
+
+
+def _htf_gate(
+    direction: str,
+    *,
+    htf_bias: dict[str, Any],
+    struct_by_tier: dict[str, dict[str, Any]],
+    cfg: PrizrakConfig,
+) -> tuple[str, float, list[str]]:
+    """Course veto+multiplier: (verdict, strength_multiplier, evidence).
+    - aligns with HTF bias -> bonus.
+    - opposes HTF bias, no confirmed slom -> VETO (abstain, "дождаться слома на МТФ").
+    - opposes HTF bias, confirmed slom -> allowed with strength penalty.
+    - unknown/neutral HTF -> no change.
+    """
+    bias = htf_bias.get("bias")
+    if bias in (None, "unknown", "neutral"):
+        return "neutral", 1.0, []
+    aligned = (direction == "long" and bias == "long") or (direction == "short" and bias == "short")
+    if aligned:
+        return "bonus", 1.0 + cfg.htf_align_bonus, [f"htf_bias={bias}_aligned(+{cfg.htf_align_bonus:.2f})"]
+    if _direction_has_slom(direction, struct_by_tier, max_bar_offset=cfg.bos_max_bar_offset):
+        return "penalty", 1.0 - cfg.htf_oppose_penalty, [f"htf_bias={bias}_opposed_but_slom(-{cfg.htf_oppose_penalty:.2f})"]
+    return "veto", 0.0, [f"htf_bias={bias}_opposed_no_slom(veto)"]
+
+
+def _apply_confluence(
+    summary: dict[str, Any],
+    *,
+    ohlcv: list[list[float]],
+    btc_d_change_24h: float | None,
+    total3_change_24h: float | None,
+    cfg: PrizrakConfig,
+    htf_bias: dict[str, Any] | None = None,
+    struct_by_tier: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    direction = "long" if summary["action"] == "long" else "short"
+
+    # Course МТФ discipline: HTF-trend gate can VETO a counter-trend candidate outright.
+    htf_mult = 1.0
+    htf_evidence: list[str] = []
+    if htf_bias is not None and struct_by_tier is not None:
+        verdict, htf_mult, htf_evidence = _htf_gate(
+            direction, htf_bias=htf_bias, struct_by_tier=struct_by_tier, cfg=cfg,
+        )
+        if verdict == "veto":
+            return None
+
+    conf = compute_confluence(ohlcv, direction=direction, cfg=cfg)
+    dom = dominance_confluence(
+        direction=direction, btc_d_change_24h=btc_d_change_24h, total3_change_24h=total3_change_24h, cfg=cfg,
+    )
+    quality_mult, quality_evidence = _structural_quality_multiplier(summary, cfg=cfg)
+
+    # Legacy flat strength for external consumers, and the driver breakdown.
+    strength = 0.5 * conf["multiplier"] * dom["multiplier"] * quality_mult * htf_mult
+    summary["strength"] = round(max(0.0, min(1.0, strength)), 3)
+    summary["fragility"] = _compute_fragility(summary, cfg=cfg)
+    summary["trade_quality"] = "favorable" if summary["strength"] >= 0.55 else ("marginal" if summary["strength"] >= 0.4 else "poor")
+
+    # Build structured confidence with driver breakdown.
+    drivers: list[dict[str, Any]] = _build_drivers(conf, dom, quality_mult, quality_evidence, htf_mult, htf_evidence, threshold=0.0)
+    total = sum(d["delta"] for d in drivers)
+    # Aggregate of the driver-delta breakdown (0.50 base ± driver deltas). Diagnostic
+    # only — `summary["strength"]` remains the authoritative score for ranking/delivery;
+    # this is surfaced alongside the drivers it summarizes for research/telemetry.
+    final_score = max(0.0, min(1.0, 0.5 + total))
+    drivers.append({"name": "базовая_оценка", "delta": 0.0, "description": "стартовое 0.50"})
+
+    summary["confluence_drivers"] = drivers
+    summary["confluence_score"] = round(final_score, 3)
+    if "confluence_evidence" not in summary:
+        summary["confluence_evidence"] = []
+    summary["confluence_evidence"] = (
+        [d["name"] for d in drivers if d["delta"] > 0.01][:5]
+        + ([d["name"] for d in drivers if d["delta"] < -0.01][:3] if any(d["delta"] < -0.01 for d in drivers) else [])
+    )
+    if htf_bias is not None:
+        summary["htf_bias"] = htf_bias.get("bias")
+    return tag_squeeze_pattern(summary, ohlcv=ohlcv, cfg=cfg)
+
+
+def _build_drivers(
+    conf: dict[str, Any],
+    dom: dict[str, Any],
+    quality_mult: float,
+    quality_evidence: list[str],
+    htf_mult: float,
+    htf_evidence: list[str],
+    *,
+    threshold: float = 0.01,
+) -> list[dict[str, Any]]:
+    """Build structured driver list from confluence factors.
+
+    Returns list of dicts with:
+      - name: short label
+      - delta: contribution to final score (positive = helps, negative = hurts)
+      - description: human-readable explanation
+    """
+    drivers: list[dict[str, Any]] = []
+
+    # Confluence indicators → decompose multiplier into drivers
+    conf_mult = conf.get("multiplier", 1.0)
+    if abs(conf_mult - 1.0) > threshold:
+        for ev in conf.get("evidence", []):
+            drivers.append(_driver_from_evidence(ev, "конфлюэнс"))
+
+    # Dominance
+    dom_mult = dom.get("multiplier", 1.0)
+    if abs(dom_mult - 1.0) > threshold:
+        for ev in dom.get("evidence", []):
+            drivers.append(_driver_from_evidence(ev, "доминация"))
+
+    # HTF alignment
+    if abs(htf_mult - 1.0) > threshold:
+        for ev in htf_evidence:
+            drivers.append(_driver_from_evidence(ev, "HTF"))
+
+    # Structural quality
+    if abs(quality_mult - 1.0) > threshold:
+        for ev in quality_evidence:
+            drivers.append(_driver_from_evidence(ev, "структура"))
+
+    return drivers
+
+
+def _driver_from_evidence(ev: str, category: str) -> dict[str, Any]:
+    """Parse an evidence string like "rsi_div_long(+0.08)" or
+    "zone_touches=6(+0.06)" into a structured driver."""
+    delta = 0.0
+    clean = ev.strip()
+    if "(" in clean and clean.endswith(")"):
+        paren = clean[clean.index("(") + 1 : -1]
+        try:
+            delta = float(paren)
+        except ValueError:
+            pass
+        clean = clean[:clean.index("(")]
+    return {
+        "name": f"{category}:{clean}",
+        "delta": round(delta, 4),
+        "description": ev,
+    }
+
+
+_ZONE_EDGE_BAND = 0.35  # bottom/top 35% of a zone counts as "at the edge", not the middle
+
+
+def _zone_edge_candidate(
+    *,
+    ohlcv: list[list[float]],
+    ohlcv_by_tf: dict[str, list[list[float]]],
+    price: float,
+    tf: str,
+    tier_name: str,
+    cfg: PrizrakConfig,
+    btc_d_change_24h: float | None,
+    total3_change_24h: float | None,
+    htf_bias: dict[str, Any] | None = None,
+    struct_by_tier: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    """Course: "покупай у зоны поддержки, продавай у зоны сопротивления" — price
+    sitting inside a well-touched zone but near one specific edge is the textbook
+    entry, not a range to avoid. ``_zone_candidate``'s "don't trade the middle"
+    abstain fired on ANY price-inside-zone tick, including price sitting right at
+    the low edge of a real base (course example: REZ's real add-long zone
+    0.003046-0.003093 — price sat inside it at the low edge; the engine stayed
+    silent there while still emitting an unrelated distant short from a different
+    tier). This covers exactly that edge case; the true middle still abstains.
+    """
+    bars = bars_from_ohlcv(ohlcv)
+    zone = find_accumulation_zone(bars, tf=tf, cfg=cfg)
+    if not zone:
+        return None
+    lo, hi = zone["lo"], zone["hi"]
+    width = hi - lo
+    if width <= 0:
+        return None
+    # The zone's lo/hi are themselves cluster AVERAGES of touches within
+    # _CLUSTER_TOL (0.6%) of each other — price sitting 0.1% outside that averaged
+    # boundary is well within the same noise band the touches were clustered at,
+    # not meaningfully "outside the zone". Without this, price landing just past
+    # lo/hi fell into a dead zone: too close for `_forward_zone_candidate` (which
+    # explicitly defers to "the reactive path already owns this"), but not a
+    # confirmed break for `_zone_candidate`'s retest either — net result, silence,
+    # even with price sitting right on a real, well-touched edge.
+    lo_t, hi_t = lo * (1 - _CLUSTER_TOL), hi * (1 + _CLUSTER_TOL)
+    if not (lo_t <= price <= hi_t):
+        return None  # genuinely outside — _zone_candidate / _forward_zone_candidate own this
+    position = (price - lo) / width
+    if position <= _ZONE_EDGE_BAND:
+        direction: Literal["long", "short"] = "long"
+        catalyst = lo
+    elif position >= (1 - _ZONE_EDGE_BAND):
+        direction = "short"
+        catalyst = hi
+    else:
+        return None  # genuinely mid-range — course: don't trade the middle
+
+    # Same ловушка guard as the retest path: if this edge has since been decisively
+    # broken (proboy), it's not support/resistance anymore — abstain rather than
+    # buy/sell a level that no longer holds.
+    trap = classify_level_touch(bars, level=catalyst, side=direction, cfg=cfg)
+    trap_evidence: list[str] = []
+    if trap.get("kind") == "proboy":
+        return None
+    if trap.get("kind") == "prokol":
+        trap_evidence.append("прокол_level_held")
+
+    poc_info = zone_poc(ohlcv, zone=zone, cfg=cfg)
+    setup_kind = _TIER_SETUP_KIND[tier_name]
+    swing_levels = _extract_swing_levels(struct_by_tier, direction=direction, entry=catalyst)
+    summary = _base_summary(
+        direction=direction, entry=catalyst, zone=zone, setup_kind=setup_kind,
+        tf_tier=tier_name, tf=tf, catalyst_level=catalyst, poc_info=poc_info,
+        ohlcv_by_tf=ohlcv_by_tf, cfg=cfg, swing_levels=swing_levels,
+    )
+    if summary is None:
+        return None
+    summary["activation"] = "in_entry_zone"
+    result = _apply_confluence(
+        summary, ohlcv=ohlcv, btc_d_change_24h=btc_d_change_24h, total3_change_24h=total3_change_24h,
+        cfg=cfg, htf_bias=htf_bias, struct_by_tier=struct_by_tier,
+    )
+    if result is not None:
+        if trap_evidence:
+            result["confluence_evidence"] = result.get("confluence_evidence", []) + trap_evidence
+        result["invalidation"] = build_invalidation(
+            direction=direction, entry_lo=result.get("entry_lo", catalyst * 0.998),
+            entry_hi=result.get("entry_hi", catalyst * 1.002),
+            stop=result.get("stop", 0), catalyst_level=catalyst, zone=zone,
+            swing_highs=swing_levels if direction == "long" else None,
+            swing_lows=swing_levels if direction == "short" else None,
+            entry_tf=tf,
+        )
+    return result
+
+
+def _level_already_worked(
+    bars: list[dict[str, float]], *, level: float, direction: str, exclude_last: int = 3,
+) -> int:
+    """Count PRIOR reactions to ``level`` (course стр.31: a level that already gave
+    a good reaction on one touch is weaker — "лимитными ордерами больше не торгуем").
+
+    A reaction = a bar touched the level (within 0.6%) and price subsequently moved
+    away in the favorable direction by >= 2.5% within the next few bars. The last
+    ``exclude_last`` bars are excluded — that's the CURRENT test, not a past one.
+    Returns the number of prior worked reactions.
+    """
+    if level <= 0 or len(bars) < exclude_last + 3:
+        return 0
+    tol = 0.006
+    scan = bars[:-exclude_last]
+    worked = 0
+    for i, b in enumerate(scan):
+        touched = (b["low"] <= level * (1 + tol) and b["low"] >= level * (1 - tol)) if direction == "long" \
+            else (b["high"] >= level * (1 - tol) and b["high"] <= level * (1 + tol))
+        if not touched:
+            continue
+        fwd = scan[i + 1:i + 6]
+        if not fwd:
+            continue
+        if direction == "long":
+            move = (max(x["high"] for x in fwd) - level) / level
+        else:
+            move = (level - min(x["low"] for x in fwd)) / level
+        if move >= 0.025:
+            worked += 1
+    return worked
+
+
+def _zone_candidate(
+    *,
+    ohlcv: list[list[float]],
+    ohlcv_by_tf: dict[str, list[list[float]]],
+    price: float,
+    tf: str,
+    tier_name: str,
+    cfg: PrizrakConfig,
+    btc_d_change_24h: float | None,
+    total3_change_24h: float | None,
+    htf_bias: dict[str, Any] | None = None,
+    struct_by_tier: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    bars = bars_from_ohlcv(ohlcv)
+    zone = find_accumulation_zone(bars, tf=tf, cfg=cfg)
+    if not zone:
+        return None
+    lo, hi = zone["lo"], zone["hi"]
+    if lo <= price <= hi:
+        return None  # course: don't trade the middle of the range — abstain, not weak-emit
+
+    poc_info = zone_poc(ohlcv, zone=zone, cfg=cfg)
+    setup_kind = _TIER_SETUP_KIND[tier_name]
+
+    if price > hi:
+        direction: Literal["long", "short"] = "long"
+        catalyst = hi  # retest of the broken zone top from above (now support)
+    else:
+        direction = "short"
+        catalyst = lo  # retest of the broken zone bottom from below (now resistance)
+
+    # Course ловушка: this is a retest of an already-broken level. If price has since
+    # PROBOY'd back through it (closed bodies back on the original side), the level flipped
+    # and the retest thesis is dead — abstain. A прокол (wick + snap-back) confirms it holds.
+    trap = classify_level_touch(bars, level=catalyst, side=direction, cfg=cfg)
+    trap_evidence: list[str] = []
+    if trap.get("kind") == "proboy":
+        return None
+    if trap.get("kind") == "prokol":
+        trap_evidence.append("прокол_level_held")
+
+    swing_levels = _extract_swing_levels(struct_by_tier, direction=direction, entry=catalyst)
+    summary = _base_summary(
+        direction=direction, entry=catalyst, zone=zone, setup_kind=setup_kind,
+        tf_tier=tier_name, tf=tf, catalyst_level=catalyst, poc_info=poc_info,
+        ohlcv_by_tf=ohlcv_by_tf, cfg=cfg, swing_levels=swing_levels,
+    )
+    if summary is None:
+        return None
+    near = abs(price - catalyst) / catalyst <= _ENTRY_BAND_PCT if catalyst else False
+    summary["activation"] = "in_entry_zone" if near else "near_entry"
+    # Course стр.31: a level that already reacted once is weaker — don't trade it
+    # with a fresh limit order (only on an LTF slom). Downgrade the reactive limit
+    # candidate rather than remove it (the pp/slom paths still cover a real break).
+    worked = _level_already_worked(bars, level=catalyst, direction=direction)
+    if worked >= 1:
+        summary["gates_failed"] = summary.get("gates_failed", []) + [f"уровень_отработан_x{worked}"]
+        summary["geometry_confidence"] = max(0.3, summary.get("geometry_confidence", 0.7) - 0.15 * worked)
+        summary["strength"] = max(0.1, summary.get("strength", 0.5) - 0.15 * worked)
+    result = _apply_confluence(
+        summary, ohlcv=ohlcv, btc_d_change_24h=btc_d_change_24h, total3_change_24h=total3_change_24h,
+        cfg=cfg, htf_bias=htf_bias, struct_by_tier=struct_by_tier,
+    )
+    if result is not None:
+        if trap_evidence:
+            result["confluence_evidence"] = result.get("confluence_evidence", []) + trap_evidence
+        result["invalidation"] = build_invalidation(
+            direction=direction, entry_lo=result.get("entry_lo", catalyst * 0.998),
+            entry_hi=result.get("entry_hi", catalyst * 1.002),
+            stop=result.get("stop", 0), catalyst_level=catalyst, zone=zone,
+            swing_highs=swing_levels if direction == "long" else None,
+            swing_lows=swing_levels if direction == "short" else None,
+            entry_tf=tf,
+        )
+    return result
+
+
+def _forward_zone_candidate(
+    *,
+    ohlcv: list[list[float]],
+    ohlcv_by_tf: dict[str, list[list[float]]],
+    price: float,
+    tf: str,
+    tier_name: str,
+    cfg: PrizrakConfig,
+    btc_d_change_24h: float | None,
+    total3_change_24h: float | None,
+    exclude_zone: dict[str, Any] | None = None,
+    htf_bias: dict[str, Any] | None = None,
+    struct_by_tier: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    """Anticipatory pending-order candidate — a strong, not-yet-reached zone ahead of
+    price (course: pre-place a limit order at a strong zone before price arrives,
+    rather than only reacting once it's already there). A zone above price is
+    untested resistance/supply — price is expected to rally into it and reverse
+    (SHORT the zone). A zone below price is untested support/demand — price is
+    expected to pull back into it and bounce (LONG the zone). This is the forward
+    counterpart to ``_zone_candidate``, which only fires once a zone has already
+    been broken and price is retesting it from the other side — ``exclude_zone``
+    (the single strongest zone, already owned by that reactive path) is dropped
+    here so the same base never emits two redundant candidates.
+    """
+    bars = bars_from_ohlcv(ohlcv)
+    zones = find_accumulation_zones(bars, tf=tf, cfg=cfg, max_zones=4)
+    if exclude_zone:
+        zones = [z for z in zones if not _overlaps(z, exclude_zone)]
+    if not zones:
+        return None
+
+    above = [z for z in zones if z["lo"] > price]
+    below = [z for z in zones if z["hi"] < price]
+
+    def _score(zone: dict[str, Any], dist_pct: float) -> float:
+        """Touch count alone favors old, wide macro накопления (many touches
+        accumulated over a long window) over a much closer, still-relevant base
+        that simply hasn't been sitting there as long — a zone from before a since-
+        confirmed large regime move (course example: REZ's daily 0.0036 base predating
+        a ~55% range decline) would otherwise always outrank a fresher, closer,
+        equally-valid meso/intraday zone. Recency (share of the lookback window since
+        this zone's last actual touch) and distance both temper raw touch strength so
+        "next strong base" means the next one still in play, not just whichever has
+        the longest touch history anywhere in the window.
+        """
+        recency_factor = 0.3 + 0.7 * zone.get("recency", 0.0)
+        distance_factor = 1.0 + dist_pct / 10.0
+        return zone["touches"] * recency_factor / distance_factor
+
+    def _best(pool: list[dict[str, Any]], *, near_edge_key: str) -> tuple[dict[str, Any], float, float] | None:
+        ranked = []
+        for z in pool:
+            edge = z[near_edge_key]
+            dist_pct = abs(edge - price) / price * 100.0
+            if not (_FORWARD_ZONE_MIN_DIST_PCT <= dist_pct <= _FORWARD_ZONE_MAX_DIST_PCT):
+                continue
+            ranked.append((z, dist_pct, _score(z, dist_pct)))
+        if not ranked:
+            return None
+        ranked.sort(key=lambda t: t[2], reverse=True)
+        return ranked[0]
+
+    resistance = _best(above, near_edge_key="lo")
+    support = _best(below, near_edge_key="hi")
+    if resistance is None and support is None:
+        return None
+
+    # Prefer whichever candidate zone scores higher (touches × recency ÷ distance)
+    # when both directions qualify — not raw touches, for the same reason as above.
+    if resistance is not None and (support is None or resistance[2] >= support[2]):
+        zone, dist_pct, _ = resistance
+        direction: Literal["long", "short"] = "short"
+        catalyst = zone["lo"]
+    else:
+        zone, dist_pct, _ = support
+        direction = "long"
+        catalyst = zone["hi"]
+
+    poc_info = zone_poc(ohlcv, zone=zone, cfg=cfg)
+    swing_levels = _extract_swing_levels(struct_by_tier, direction=direction, entry=catalyst)
+    summary = _base_summary(
+        direction=direction, entry=catalyst, zone=zone, setup_kind="zone_target_forward",
+        tf_tier=tier_name, tf=tf, catalyst_level=catalyst, poc_info=poc_info,
+        ohlcv_by_tf=ohlcv_by_tf, cfg=cfg, swing_levels=swing_levels,
+    )
+    if summary is None:
+        return None
+    summary["activation"] = "approaching"
+    summary["forward_target_distance_pct"] = round(dist_pct, 3)
+    result = _apply_confluence(
+        summary, ohlcv=ohlcv, btc_d_change_24h=btc_d_change_24h, total3_change_24h=total3_change_24h,
+        cfg=cfg, htf_bias=htf_bias, struct_by_tier=struct_by_tier,
+    )
+    if result is None:
+        return None  # HTF-veto: counter-trend forward target without a slom
+    # Speculative (price hasn't arrived yet) — temper strength/confidence vs a live retest.
+    result["strength"] = round(result["strength"] * 0.75, 3)
+    result["geometry_confidence"] = round(result["geometry_confidence"] * 0.8, 3)
+    result["trade_quality"] = (
+        "favorable" if result["strength"] >= 0.55 else ("marginal" if result["strength"] >= 0.4 else "poor")
+    )
+    result["invalidation"] = build_invalidation(
+        direction=direction, entry_lo=result.get("entry_lo", catalyst * 0.998),
+        entry_hi=result.get("entry_hi", catalyst * 1.002),
+        stop=result.get("stop", 0), catalyst_level=catalyst, zone=zone,
+        swing_highs=swing_levels if direction == "long" else None,
+        swing_lows=swing_levels if direction == "short" else None,
+        entry_tf=tf,
+    )
+    return result
+
+
+_STRUCTURAL_ZONE_GAP_FRACTION = 0.02  # 2% — same gap as confluence_grid
+
+
+def _cluster_swing_lows(
+    lows: list[float], *, max_gap_pct: float = _STRUCTURAL_ZONE_GAP_FRACTION,
+) -> list[dict[str, Any]]:
+    """Group swing lows into clusters separated by >max_gap_pct gap.
+    Returns clusters with their min/max/mean and member count."""
+    if not lows:
+        return []
+    sorted_lows = sorted(set(lows))
+    clusters: list[list[float]] = [[sorted_lows[0]]]
+    for p in sorted_lows[1:]:
+        gap = (p - clusters[-1][-1]) / max(clusters[-1][-1], 0.01)
+        if gap <= max_gap_pct:
+            clusters[-1].append(p)
+        else:
+            clusters.append([p])
+    return [
+        {"lo": min(c), "hi": max(c), "mean": sum(c) / len(c), "members": len(c), "touches": len(c) * 2}
+        for c in clusters
+    ]
+
+
+def _forward_deep_candidate(
+    *,
+    ohlcv_by_tf: dict[str, list[list[float]]],
+    price: float,
+    tf: str,
+    tier_name: str,
+    cfg: PrizrakConfig,
+    btc_d_change_24h: float | None,
+    total3_change_24h: float | None,
+    exclude_zone: dict[str, Any] | None = None,
+    htf_bias: dict[str, Any] | None = None,
+    struct_by_tier: dict[str, dict[str, Any]] | None = None,
+    existing_forward_zone: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Structural deep forward candidate — targets zones from swing-low clusters
+    that the accumulation-zone detector misses because they're outside the OHLCV
+    lookback window. PrizrakTrade's 60500–58550 deep zone is the course example:
+    4h/1h structural key levels project support far below recent price action.
+
+    Only fires for LONG (support below price) — resistance above price is already
+    handled by the normal forward-zone pool.
+    """
+    if not struct_by_tier:
+        return None
+    # Collect all swing lows from macro (deepest), then meso as fallback.
+    swings: list[float] = []
+    macro = struct_by_tier.get("macro")
+    if macro:
+        swings.extend(macro.get("all_swing_lows") or [])
+    meso = struct_by_tier.get("meso")
+    if meso:
+        swings.extend(meso.get("all_swing_lows") or [])
+    if not swings:
+        return None
+
+    # Cluster and keep only zones entirely below price.
+    clusters = _cluster_swing_lows(swings)
+    below = [z for z in clusters if z["hi"] < price]
+    if not below:
+        return None
+
+    # Score each zone: deeper clusters get priority (PrizrakTrade waits for deep levels).
+    def _score(z: dict[str, Any]) -> float:
+        dist_pct = (price - z["hi"]) / price * 100.0
+        if not (_FORWARD_ZONE_MIN_DIST_PCT <= dist_pct <= _FORWARD_ZONE_MAX_DIST_PCT):
+            return -1.0
+        return z["touches"] * (1.0 + dist_pct / 10.0)
+
+    ranked = [(z, _score(z)) for z in below]
+    ranked = [(z, s) for z, s in ranked if s > 0]
+    if not ranked:
+        return None
+    ranked.sort(key=lambda t: t[1], reverse=True)
+    best_zone = ranked[0][0]
+
+    # Skip if this overlaps with the existing forward zone (already covered).
+    if existing_forward_zone and _overlaps(best_zone, existing_forward_zone):
+        return None
+    if exclude_zone and _overlaps(best_zone, exclude_zone):
+        return None
+
+    direction: Literal["long", "short"] = "long"
+    catalyst = best_zone["hi"]
+    dist_pct = (price - catalyst) / price * 100.0
+    poc_info = {}
+    swing_levels = _extract_swing_levels(struct_by_tier, direction=direction, entry=catalyst)
+    summary = _base_summary(
+        direction=direction, entry=catalyst, zone=best_zone, setup_kind="zone_target_deep",
+        tf_tier=tier_name, tf=tf, catalyst_level=catalyst, poc_info=poc_info,
+        ohlcv_by_tf=ohlcv_by_tf, cfg=cfg, swing_levels=swing_levels,
+    )
+    if summary is None:
+        return None
+    summary["activation"] = "approaching"
+    summary["forward_target_distance_pct"] = round(dist_pct, 3)
+    result = _apply_confluence(
+        summary, ohlcv=(ohlcv_by_tf.get(tf) or []), btc_d_change_24h=btc_d_change_24h,
+        total3_change_24h=total3_change_24h, cfg=cfg, htf_bias=htf_bias,
+        struct_by_tier=struct_by_tier,
+    )
+    if result is None:
+        return None
+    result["strength"] = round(result["strength"] * 0.70, 3)
+    result["geometry_confidence"] = round(result["geometry_confidence"] * 0.75, 3)
+    result["trade_quality"] = (
+        "favorable" if result["strength"] >= 0.55 else ("marginal" if result["strength"] >= 0.4 else "poor")
+    )
+    result["invalidation"] = build_invalidation(
+        direction=direction, entry_lo=result.get("entry_lo", catalyst * 0.998),
+        entry_hi=result.get("entry_hi", catalyst * 1.002),
+        stop=result.get("stop", 0), catalyst_level=catalyst, zone=best_zone,
+        swing_highs=swing_levels if direction == "long" else None,
+        swing_lows=swing_levels if direction == "short" else None,
+        entry_tf=tf,
+    )
+    return result
+
+
+def _pp_candidate(
+    *,
+    ohlcv: list[list[float]],
+    ohlcv_by_tf: dict[str, list[list[float]]],
+    price: float,
+    tf: str,
+    tier_name: str,
+    cfg: PrizrakConfig,
+    btc_d_change_24h: float | None,
+    total3_change_24h: float | None,
+    htf_bias: dict[str, Any] | None = None,
+    struct_by_tier: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    bars = bars_from_ohlcv(ohlcv)
+    pp = detect_pereprior(bars)
+    # A real accumulation zone is required for the stop-buffer structure — no
+    # synthetic ±2% stand-in zone when none is found (that was fabricating
+    # structure the market never showed). Abstain instead.
+    zone = find_accumulation_zone(bars, tf=tf, cfg=cfg)
+    if not zone:
+        return None
+
+    # Course стр.55: a ПП level requires CONFIRMATION — a close of 2-3 full bodies
+    # beyond it. A wick-through that returns the same/next candle is just a прокол,
+    # "не берём позицию". This applies to истинный AND ранний ПП alike (the
+    # true/early distinction is the structural pattern, not the confirmation rule).
+    # Emit only when the break is confirmed; an unconfirmed break is abstained on
+    # here (a later retest, once confirmed, will produce the real entry).
+    min_bodies = cfg.trap_proboy_min_bodies
+    _RETEST_TOL = 0.007  # 0.7% — "price is currently testing the ПП zone"
+
+    if pp.get("pp_true_long") or pp.get("pp_early_long"):
+        is_true = bool(pp.get("pp_true_long"))
+        bodies = int((pp.get("pp_true_long_bodies") if is_true else pp.get("pp_early_long_bodies")) or 0)
+        if bodies < min_bodies:
+            return None  # unconfirmed прокол — course: не берём позицию
+        level = pp.get("pp_true_long_level") if is_true else pp.get("pp_early_long_level")
+        # Course стр.55: the ПП level is the whole тень-свечи zone. Entry band = that
+        # zone; the traded/defended edge (for the stop) is its lower boundary.
+        z_lo = pp.get("pp_true_long_zone_lo") if is_true else pp.get("pp_early_long_zone_lo")
+        z_hi = pp.get("pp_true_long_zone_hi") if is_true else pp.get("pp_early_long_zone_hi")
+        # Course стр.50-51: "ТВХ является ТЕСТ ПП" — the entry is the retest of the
+        # broken level, not the break itself. Emit only when price has come back
+        # to the zone; if it broke up and ran away (price >> zone), there's no
+        # entry yet — abstain until a retest brings price back.
+        if z_lo and z_hi and not (float(z_lo) * (1 - _RETEST_TOL) <= price <= float(z_hi) * (1 + _RETEST_TOL)):
+            return None
+        entry = float(z_lo) if z_lo else level
+        band = (float(z_lo), float(z_hi)) if (z_lo and z_hi) else None
+        long_swing = _extract_swing_levels(struct_by_tier, direction="long", entry=entry)
+        summary = _base_summary(
+            direction="long", entry=entry, zone={"hi": zone["hi"], "lo": min(zone["lo"], entry)},
+            setup_kind="pp_break", tf_tier=tier_name, tf=tf, catalyst_level=level, poc_info={},
+            ohlcv_by_tf=ohlcv_by_tf, cfg=cfg, swing_levels=long_swing, entry_band=band,
+        )
+        if summary is None:
+            return None
+        summary["gates_failed"] = []
+        summary["geometry_confidence"] = 0.7 if is_true else 0.6
+        summary["pp_bodies"] = bodies
+        result = _apply_confluence(
+            summary, ohlcv=ohlcv, btc_d_change_24h=btc_d_change_24h, total3_change_24h=total3_change_24h,
+            cfg=cfg, htf_bias=htf_bias, struct_by_tier=struct_by_tier,
+        )
+        if result is not None:
+            result["invalidation"] = build_invalidation(
+                direction="long", entry_lo=result.get("entry_lo", entry * 0.998),
+                entry_hi=result.get("entry_hi", entry * 1.002),
+                stop=result.get("stop", 0), catalyst_level=level, zone=zone,
+                swing_highs=long_swing, entry_tf=tf,
+            )
+        return result
+
+    if pp.get("pp_true_short") or pp.get("pp_early_short"):
+        is_true = bool(pp.get("pp_true_short"))
+        bodies = int((pp.get("pp_true_short_bodies") if is_true else pp.get("pp_early_short_bodies")) or 0)
+        if bodies < min_bodies:
+            return None  # unconfirmed прокол — course: не берём позицию
+        level = pp.get("pp_true_short_level") if is_true else pp.get("pp_early_short_level")
+        z_lo = pp.get("pp_true_short_zone_lo") if is_true else pp.get("pp_early_short_zone_lo")
+        z_hi = pp.get("pp_true_short_zone_hi") if is_true else pp.get("pp_early_short_zone_hi")
+        # Course стр.50-51: entry = retest of the broken level. Emit only when
+        # price has bounced back up to the ПП zone; if it broke down and ran
+        # away, abstain until the retest.
+        if z_lo and z_hi and not (float(z_lo) * (1 - _RETEST_TOL) <= price <= float(z_hi) * (1 + _RETEST_TOL)):
+            return None
+        entry = float(z_hi) if z_hi else level
+        band = (float(z_lo), float(z_hi)) if (z_lo and z_hi) else None
+        short_swing = _extract_swing_levels(struct_by_tier, direction="short", entry=entry)
+        summary = _base_summary(
+            direction="short", entry=entry, zone={"hi": max(zone["hi"], entry), "lo": zone["lo"]},
+            setup_kind="pp_break", tf_tier=tier_name, tf=tf, catalyst_level=level, poc_info={},
+            ohlcv_by_tf=ohlcv_by_tf, cfg=cfg, swing_levels=short_swing, entry_band=band,
+        )
+        if summary is None:
+            return None
+        summary["gates_failed"] = []
+        summary["geometry_confidence"] = 0.7 if is_true else 0.6
+        summary["pp_bodies"] = bodies
+        result = _apply_confluence(
+            summary, ohlcv=ohlcv, btc_d_change_24h=btc_d_change_24h, total3_change_24h=total3_change_24h,
+            cfg=cfg, htf_bias=htf_bias, struct_by_tier=struct_by_tier,
+        )
+        if result is not None:
+            result["invalidation"] = build_invalidation(
+                direction="short", entry_lo=result.get("entry_lo", entry * 0.998),
+                entry_hi=result.get("entry_hi", entry * 1.002),
+                stop=result.get("stop", 0), catalyst_level=level, zone=zone,
+                swing_lows=short_swing, entry_tf=tf,
+            )
+        return result
+
+    return None
+
+
+def _trap_flip_candidate(
+    *,
+    ohlcv: list[list[float]],
+    ohlcv_by_tf: dict[str, list[list[float]]],
+    price: float,
+    tf: str,
+    tier_name: str,
+    cfg: PrizrakConfig,
+    btc_d_change_24h: float | None,
+    total3_change_24h: float | None,
+    htf_bias: dict[str, Any] | None = None,
+    struct_by_tier: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    """Ловушка/пробой flip (course стр.43, вар.1): a level that gets ПРОБИТ (2-3
+    closed bodies beyond, not a прокол) flips to the opposite side. On the retest
+    of the now-flipped level, enter in the breakout direction with a stop behind
+    the original level/accumulation boundary. Reuses ``traps.classify_level_touch``
+    for the прокол-vs-пробой distinction — a wick-through that returned is NOT a
+    flip and produces no entry here.
+    """
+    bars = bars_from_ohlcv(ohlcv)
+    zone = find_accumulation_zone(bars, tf=tf, cfg=cfg)
+    if not zone:
+        return None
+    hi, lo = zone["hi"], zone["lo"]
+    _RETEST_TOL = 0.007
+
+    # Upper boundary broken UP -> flips to support -> LONG on retest from above.
+    up = classify_level_touch(bars, level=hi, side="short", cfg=cfg)
+    if up.get("kind") == "proboy" and hi * (1 - _RETEST_TOL) <= price <= hi * (1 + _RETEST_TOL):
+        direction: Literal["long", "short"] = "long"
+        entry = hi
+        swing = _extract_swing_levels(struct_by_tier, direction=direction, entry=entry)
+        summary = _base_summary(
+            direction=direction, entry=entry, zone=zone, setup_kind="trap_flip",
+            tf_tier=tier_name, tf=tf, catalyst_level=entry, poc_info={},
+            ohlcv_by_tf=ohlcv_by_tf, cfg=cfg, swing_levels=swing,
+        )
+        if summary is not None:
+            summary["pattern"] = "ловушка_пробой_флип"
+            result = _apply_confluence(
+                summary, ohlcv=ohlcv, btc_d_change_24h=btc_d_change_24h,
+                total3_change_24h=total3_change_24h, cfg=cfg, htf_bias=htf_bias, struct_by_tier=struct_by_tier,
+            )
+            if result is not None:
+                result["invalidation"] = build_invalidation(
+                    direction=direction, entry_lo=result.get("entry_lo", entry * 0.998),
+                    entry_hi=result.get("entry_hi", entry * 1.002),
+                    stop=result.get("stop", 0), catalyst_level=entry, zone=zone,
+                    swing_highs=swing, entry_tf=tf,
+                )
+            return result
+
+    # Lower boundary broken DOWN -> flips to resistance -> SHORT on retest from below.
+    down = classify_level_touch(bars, level=lo, side="long", cfg=cfg)
+    if down.get("kind") == "proboy" and lo * (1 - _RETEST_TOL) <= price <= lo * (1 + _RETEST_TOL):
+        direction = "short"
+        entry = lo
+        swing = _extract_swing_levels(struct_by_tier, direction=direction, entry=entry)
+        summary = _base_summary(
+            direction=direction, entry=entry, zone=zone, setup_kind="trap_flip",
+            tf_tier=tier_name, tf=tf, catalyst_level=entry, poc_info={},
+            ohlcv_by_tf=ohlcv_by_tf, cfg=cfg, swing_levels=swing,
+        )
+        if summary is not None:
+            summary["pattern"] = "ловушка_пробой_флип"
+            result = _apply_confluence(
+                summary, ohlcv=ohlcv, btc_d_change_24h=btc_d_change_24h,
+                total3_change_24h=total3_change_24h, cfg=cfg, htf_bias=htf_bias, struct_by_tier=struct_by_tier,
+            )
+            if result is not None:
+                result["invalidation"] = build_invalidation(
+                    direction=direction, entry_lo=result.get("entry_lo", entry * 0.998),
+                    entry_hi=result.get("entry_hi", entry * 1.002),
+                    stop=result.get("stop", 0), catalyst_level=entry, zone=zone,
+                    swing_lows=swing, entry_tf=tf,
+                )
+            return result
+
+    return None
+
+
+def build_prizrak_signals(
+    ohlcv_by_tf: dict[str, list[list[float]]],
+    *,
+    price: float,
+    btc_d_change_24h: float | None = None,
+    total3_change_24h: float | None = None,
+    cfg: PrizrakConfig | None = None,
+) -> list[dict[str, Any]]:
+    """0..N independent ScenarioVerdict-summary-compatible signals for one tick."""
+    cfg = cfg or PrizrakConfig.load()
+    if price <= 0:
+        return []
+
+    tiers = {"intraday": cfg.intraday, "meso": cfg.meso, "macro": cfg.macro}
+    out: list[dict[str, Any]] = []
+
+    # Course МТФ discipline: read multi-scale structure ONCE and derive the HTF regime
+    # bias (macro 1d/1w + meso 1h/4h). Every candidate below is gated against it —
+    # counter-trend without a confirmed slom is vetoed. This is the single structural
+    # source of truth for both the signal and the displayed "📐 МТФ структура".
+    struct_by_tier = multi_scale_structure(ohlcv_by_tf, cfg=cfg)
+    htf_bias = _htf_bias(struct_by_tier, cfg=cfg, ohlcv_by_tf=ohlcv_by_tf)
+
+    for tier_name, tier in tiers.items():
+        # A tier config lists more than one timeframe on purpose (course: macro is
+        # "1d/1w", meso is "1h/4h" — both scales matter, not either-or). Scanning
+        # only the first available TF meant e.g. meso's 4h накопления — the scale
+        # where REZ's real, still-relevant resistance box actually lived — were
+        # fetched every tick but never once reached a candidate, silently leaving a
+        # stale, distant, unrelated 1d zone as the tier's only signal. Scan every
+        # configured TF in the tier and let each contribute its own candidates.
+        for tf in tier.timeframes:
+            if not ohlcv_by_tf.get(tf):
+                continue
+            _scan_tier_timeframe(
+                out, ohlcv_by_tf=ohlcv_by_tf, tier=tier, tf=tf, tier_name=tier_name, price=price,
+                cfg=cfg, btc_d_change_24h=btc_d_change_24h, total3_change_24h=total3_change_24h,
+                htf_bias=htf_bias, struct_by_tier=struct_by_tier,
+            )
+
+    return out
+
+
+def _scan_tier_timeframe(
+    out: list[dict[str, Any]],
+    *,
+    ohlcv_by_tf: dict[str, list[list[float]]],
+    tier: ScaleTier,
+    tf: str,
+    tier_name: str,
+    price: float,
+    cfg: PrizrakConfig,
+    btc_d_change_24h: float | None,
+    total3_change_24h: float | None,
+    htf_bias: dict[str, Any],
+    struct_by_tier: dict[str, dict[str, Any]],
+) -> None:
+    """One (tier, timeframe) scan — every candidate generator that used to run once
+    per tier inside ``build_prizrak_signals``'s loop body, now run once per TF within
+    that tier so no configured scale is silently skipped."""
+    ohlcv = ohlcv_by_tf[tf][-tier.lookback_bars:]
+    if len(ohlcv) < 15:
+        return
+
+    bars = bars_from_ohlcv(ohlcv)
+    zone = find_accumulation_zone(bars, tf=tf, cfg=cfg)
+
+    zone_sig = _zone_candidate(
+        ohlcv=ohlcv, ohlcv_by_tf=ohlcv_by_tf, price=price, tf=tf, tier_name=tier_name, cfg=cfg,
+        btc_d_change_24h=btc_d_change_24h, total3_change_24h=total3_change_24h,
+        htf_bias=htf_bias, struct_by_tier=struct_by_tier,
+    )
+    if zone_sig:
+        out.append(zone_sig)
+
+    edge_sig = _zone_edge_candidate(
+        ohlcv=ohlcv, ohlcv_by_tf=ohlcv_by_tf, price=price, tf=tf, tier_name=tier_name, cfg=cfg,
+        btc_d_change_24h=btc_d_change_24h, total3_change_24h=total3_change_24h,
+        htf_bias=htf_bias, struct_by_tier=struct_by_tier,
+    )
+    if edge_sig:
+        out.append(edge_sig)
+
+    # Only exclude the strongest zone from forward-targeting if the reactive path
+    # actually turned it into a live candidate. It used to be excluded unconditionally
+    # just for existing — so a zone the reactive path rejected (bad geometry, price
+    # still mid-range, trap veto) was ALSO barred from the forward/pending-order path,
+    # leaving it claimed by nothing at all. Course example: BTC's 1h base
+    # (61283-62879) is exactly Призрак's own pending add-long zone — the reactive
+    # retest thesis there fails on R:R (nearest cross-tf target is too close for the
+    # zone's own wide stop), but that must not block treating the SAME zone as an
+    # anticipatory pending-limit target instead; the two paths are alternatives, not
+    # a strict ownership claim on existence alone.
+    forward_sig = _forward_zone_candidate(
+        ohlcv=ohlcv, ohlcv_by_tf=ohlcv_by_tf, price=price, tf=tf, tier_name=tier_name, cfg=cfg,
+        btc_d_change_24h=btc_d_change_24h, total3_change_24h=total3_change_24h,
+        exclude_zone=(zone if zone_sig else None), htf_bias=htf_bias, struct_by_tier=struct_by_tier,
+    )
+    if forward_sig:
+        out.append(forward_sig)
+
+    # Structural deep forward candidate: fire only once per tier (last TF) to avoid
+    # duplicates. Targets swing-low zones from macro/meso structure that the
+    # accumulation-zone detector couldn't see (price far from recent action).
+    # PrizrakTrade example: deep zone 60500–58550 from 4h + 1h structure levels.
+    if tf == tier.timeframes[-1]:
+        deep_sig = _forward_deep_candidate(
+            ohlcv_by_tf=ohlcv_by_tf, price=price, tf=tf, tier_name=tier_name, cfg=cfg,
+            btc_d_change_24h=btc_d_change_24h, total3_change_24h=total3_change_24h,
+            exclude_zone=(zone if zone_sig else None), htf_bias=htf_bias,
+            struct_by_tier=struct_by_tier, existing_forward_zone=(forward_sig.get("zone") if forward_sig else None),
+        )
+        if deep_sig:
+            out.append(deep_sig)
+
+    pp_sig = _pp_candidate(
+        ohlcv=ohlcv, ohlcv_by_tf=ohlcv_by_tf, price=price, tf=tf, tier_name=tier_name, cfg=cfg,
+        btc_d_change_24h=btc_d_change_24h, total3_change_24h=total3_change_24h,
+        htf_bias=htf_bias, struct_by_tier=struct_by_tier,
+    )
+    if pp_sig:
+        out.append(pp_sig)
+
+    flip_sig = _trap_flip_candidate(
+        ohlcv=ohlcv, ohlcv_by_tf=ohlcv_by_tf, price=price, tf=tf, tier_name=tier_name, cfg=cfg,
+        btc_d_change_24h=btc_d_change_24h, total3_change_24h=total3_change_24h,
+        htf_bias=htf_bias, struct_by_tier=struct_by_tier,
+    )
+    if flip_sig:
+        out.append(flip_sig)
+
+    # Stop-volume, when found inside this tier's zone, is its own scalp-scale candidate.
+    if zone:
+        sv = find_stop_volume(ohlcv, zone=zone, cfg=cfg)
+        if sv and not (sv["lo"] <= price <= sv["hi"]):
+            direction: Literal["long", "short"] = "long" if price > sv["hi"] else "short"
+            catalyst = sv["hi"] if direction == "long" else sv["lo"]
+            swing_levels = _extract_swing_levels(struct_by_tier, direction=direction, entry=catalyst)
+            summary = _base_summary(
+                direction=direction, entry=catalyst, zone=sv, setup_kind="level_intraday_scalp",
+                tf_tier=tier_name, tf=tf, catalyst_level=catalyst, poc_info={}, ohlcv_by_tf=ohlcv_by_tf, cfg=cfg,
+                swing_levels=swing_levels,
+            )
+            if summary is not None:
+                sv_result = _apply_confluence(
+                    summary, ohlcv=ohlcv, btc_d_change_24h=btc_d_change_24h,
+                    total3_change_24h=total3_change_24h, cfg=cfg,
+                    htf_bias=htf_bias, struct_by_tier=struct_by_tier,
+                )
+                if sv_result is not None:
+                    sv_result["invalidation"] = build_invalidation(
+                        direction=direction, entry_lo=sv_result.get("entry_lo", catalyst * 0.998),
+                        entry_hi=sv_result.get("entry_hi", catalyst * 1.002),
+                        stop=sv_result.get("stop", 0), catalyst_level=catalyst, zone=sv,
+                        swing_highs=swing_levels if direction == "long" else None,
+                        swing_lows=swing_levels if direction == "short" else None,
+                        entry_tf=tf,
+                    )
+                    out.append(sv_result)
+
+
+def compute_prizrak_structure(
+    ohlcv_by_tf: dict[str, list[list[float]]], *, cfg: PrizrakConfig | None = None
+) -> dict[str, Any]:
+    """Single source of truth for the multi-scale structure read + HTF regime bias.
+    Used both by ``build_prizrak_signals`` (gating) and by the display layer (📐 МТФ
+    структура) so the user always sees exactly the structure that gated the signal."""
+    cfg = cfg or PrizrakConfig.load()
+    struct_by_tier = multi_scale_structure(ohlcv_by_tf, cfg=cfg)
+    htf_bias = _htf_bias(struct_by_tier, cfg=cfg, ohlcv_by_tf=ohlcv_by_tf)
+    struct_by_tf = htf_bias.get("struct_by_tf") or {}
+    return {
+        "struct_by_tier": struct_by_tier,
+        "htf_bias": {k: v for k, v in htf_bias.items() if k != "struct_by_tf"},
+        "tier_trends": {tier: _tier_trend(struct_by_tier.get(tier) or {}) for tier in ("intraday", "meso", "macro")},
+        "tf_trends": {tf: _tier_trend(struct_by_tf.get(tf) or {}) for tf in ("1w", "1d", "4h", "1h")},
+        "struct_by_tf": struct_by_tf,
+    }
+
+
+__all__ = ["build_prizrak_signals", "compute_prizrak_structure"]

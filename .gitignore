@@ -1,0 +1,36 @@
+# Byte-compiled / caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtualenvs
+.venv/
+venv/
+
+# OS
+.DS_Store
+
+# Secrets
+.env
+*.env
+
+# Runtime logs & generated data
+*.log
+logs/
+data/
+dataset/
+reports/
+hunt_research/
+graphify-out/
+
+# Research datasets (keep code, drop bulky data snapshots)
+research/dataset/
+research/dataset_v*/
+research/dataset_active_version.txt
+
+# Local review artifacts
+crypto_hunter_library_review.md
+compass_artifact_*.md
