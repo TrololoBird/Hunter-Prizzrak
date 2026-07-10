@@ -123,6 +123,11 @@ class SignalDataMissing(Exception):
 
 
 def require_finite_float(value: Any, field: str) -> float:
+    """Coerce *value* to a finite float, raising ``SignalDataMissing`` on failure.
+
+    Raises with ``detail="not_numeric"`` when the value cannot be parsed and
+    ``detail="non_finite"`` for NaN/inf.
+    """
     if value is None:
         raise SignalDataMissing(field)
     try:
@@ -135,6 +140,7 @@ def require_finite_float(value: Any, field: str) -> float:
 
 
 def optional_finite_float(value: Any) -> float | None:
+    """Return a finite float or ``None`` (alias of :func:`finite_float_or_none`)."""
     return finite_float_or_none(value)
 
 
