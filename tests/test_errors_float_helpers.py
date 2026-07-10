@@ -87,6 +87,11 @@ def test_finite_float_or_none_non_numeric_to_none():
     assert finite_float_or_none(object()) is None
 
 
+def test_finite_float_or_none_rejects_sequences():
+    assert finite_float_or_none([1, 2]) is None
+    assert finite_float_or_none((3,)) is None
+
+
 def test_as_float_default_fallback():
     assert math.isclose(as_float(None), 0.0)
     assert math.isclose(as_float(None, default=9.0), 9.0)
@@ -105,6 +110,12 @@ def test_as_float_numeric():
     assert math.isclose(as_float("3.75"), 3.75)
     assert math.isclose(as_float(math.inf), 0.0)
     assert math.isclose(as_float(math.nan), 0.0)
+
+
+def test_as_float_rejects_sequences():
+    assert math.isclose(as_float([1, 2]), 0.0)
+    assert math.isclose(as_float((3,)), 0.0)
+    assert math.isclose(as_float([1, 2], default=9.0), 9.0)
 
 
 def test_as_int_default_fallback():
