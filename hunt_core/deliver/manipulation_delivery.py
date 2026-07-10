@@ -69,27 +69,28 @@ _INTERVAL_MS = {
 _AVERAGING_FRACTION = 0.5  # how far from entry toward stop the averaging limit sits
 
 
-def _stop_buffer(meso_bars: list[list[float]]) -> float:
-    """ATR-adaptive stop buffer: 0.3 × ATR%, min 1.5%, max 5%.
+def _stop_buffer(meso_bars: list[list[float]], *, pattern_a3: bool = False) -> float:
+    """ATR-adaptive stop buffer: 0.3 × ATR%, min 3.0%, max 5%.
 
-    The backtest-tuned 3% fixed buffer was optimal for EVAA (ATR%~10%).
-    For low-vol coins (ATR%~3%) a 3% stop is disproportionately wide (bad R);
-    for high-vol coins (ATR%~20%) a 3% stop risks getting stopped out by noise.
-    0.3×ATR% scales proportionally: ATR 3% → buffer 1.5%, ATR 10% → 3%, ATR 20% → 5%.
+    For Pattern A3 (no sweep — stop anchored at entry level) the minimum is
+    raised to 5.0% to compensate for the missing structural gap between
+    entry and stop anchor (A3 sets sweep_extreme = lo, so the entire risk
+    comes from this buffer alone — there is zero structural breathing room).
     """
     from hunt_core.scanner.detect.events import ohlcv_to_df, atr
+    min_buf = 0.05 if pattern_a3 else 0.03
     try:
         df = ohlcv_to_df(meso_bars)
         atr_val = atr(df, 14)
     except Exception:
         atr_val = 0.0
     if atr_val <= 0:
-        return 0.03
+        return min_buf
     last_close = float(df["close"][-1])
     if last_close <= 0:
-        return 0.03
+        return min_buf
     atr_pct = atr_val / last_close
-    return min(max(0.015, atr_pct * 0.3), 0.05)
+    return min(max(min_buf, atr_pct * 0.3), 0.05)
 
 
 def _geometry(setup: ManipulationSetup, *, price: float, stop_buffer: float | None = None) -> dict[str, Any] | None:
@@ -316,7 +317,7 @@ async def deliver_manipulation_setups(
             price = float(meso_bars[-1][4])
         if price <= 0:
             continue
-        stop_buffer = _stop_buffer(meso_bars)
+        stop_buffer = _stop_buffer(meso_bars, pattern_a3=(setup.pattern_type == "A3"))
         geo = _geometry(setup, price=price, stop_buffer=stop_buffer)
         if geo is None:
             continue

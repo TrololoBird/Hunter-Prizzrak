@@ -38,12 +38,14 @@ class HuntTelegramCommands:
         allowed_chat_ids: frozenset[int],
         allowed_user_ids: frozenset[int],
         poll_timeout: int = 25,
+        proxy_url: str | None = None,
         client: Any = None,
     ) -> None:
         self._token = token
         self._allowed_chat_ids = allowed_chat_ids
         self._allowed_user_ids = allowed_user_ids
         self._poll_timeout = poll_timeout
+        self._proxy_url = proxy_url
         # Shared watch CCXT client — probes reuse it instead of spinning a 2nd plane.
         self._client = client
         self._offset: int | None = None
@@ -57,9 +59,13 @@ class HuntTelegramCommands:
         self._pending_signal: tuple[int, str, bool] | None = None
 
     async def _session_get(self) -> aiohttp.ClientSession:
-        # Telegram API must bypass Binance SOCKS proxy (trust_env breaks getUpdates).
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(trust_env=False)
+            if self._proxy_url:
+                from aiohttp_socks import ProxyConnector
+                conn = ProxyConnector.from_url(self._proxy_url, rdns=True)
+                self._session = aiohttp.ClientSession(connector=conn, trust_env=False)
+            else:
+                self._session = aiohttp.ClientSession(trust_env=False)
         return self._session
 
     async def close(self) -> None:
@@ -81,7 +87,7 @@ class HuntTelegramCommands:
         return False
 
     async def _send(self, chat_id: int, text: str) -> None:
-        broadcaster = TelegramBroadcaster(self._token, str(chat_id))
+        broadcaster = TelegramBroadcaster(self._token, str(chat_id), proxy_url=self._proxy_url)
         try:
             await broadcaster.send_html(text)
         finally:
@@ -93,7 +99,7 @@ class HuntTelegramCommands:
             return
         async with self._probe_lock:
             await self._send(chat_id, "⏳ <b>/stats</b> — собираю метрики…")
-            broadcaster = TelegramBroadcaster(self._token, str(chat_id))
+            broadcaster = TelegramBroadcaster(self._token, str(chat_id), proxy_url=self._proxy_url)
             try:
                 await deliver_stats_report(broadcaster)
             except Exception:
@@ -113,7 +119,7 @@ class HuntTelegramCommands:
                 chat_id,
                 f"⏳ <b>/signals</b> — снимок watchlist{hint}…",
             )
-            broadcaster = TelegramBroadcaster(self._token, str(chat_id))
+            broadcaster = TelegramBroadcaster(self._token, str(chat_id), proxy_url=self._proxy_url)
             try:
                 await deliver_signals_report(broadcaster, symbols=syms or None)
             except Exception:
@@ -139,7 +145,7 @@ class HuntTelegramCommands:
             return
         async with self._probe_lock:
             sym_label = sym.replace("USDT", "-USDT")
-            broadcaster = TelegramBroadcaster(self._token, str(chat_id))
+            broadcaster = TelegramBroadcaster(self._token, str(chat_id), proxy_url=self._proxy_url)
             try:
                 await broadcaster.send_html(
                     f"⏳ <b>/analyze {sym_label}</b> — сценарий + уровни…"
@@ -211,7 +217,7 @@ class HuntTelegramCommands:
         async with self._probe_lock:
             sym_label = sym.replace("USDT", "-USDT")
             note = "live REST…" if live else "из watch-стора…"
-            broadcaster = TelegramBroadcaster(self._token, str(chat_id))
+            broadcaster = TelegramBroadcaster(self._token, str(chat_id), proxy_url=self._proxy_url)
             try:
                 await broadcaster.send_html(f"⏳ <b>/signal {sym_label}</b> — {note}")
                 await asyncio.wait_for(
@@ -395,7 +401,7 @@ class HuntTelegramCommands:
 
 
 def build_hunt_telegram_commands(
-    settings: Any, *, client: Any = None
+    settings: Any, *, proxy_url: str | None = None, client: Any = None
 ) -> HuntTelegramCommands | None:
     token = settings.tg_token
     if not token:
@@ -414,5 +420,6 @@ def build_hunt_telegram_commands(
         token,
         allowed_chat_ids=frozenset(chat_ids),
         allowed_user_ids=frozenset(user_ids),
+        proxy_url=proxy_url,
         client=client,
     )

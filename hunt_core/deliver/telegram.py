@@ -239,14 +239,14 @@ class TelegramBroadcaster:
     duplicate_window_seconds = TELEGRAM_DUPLICATE_WINDOW_SECONDS
     min_send_interval_seconds = 1.25
 
-    def __init__(self, token: str, target_chat_id: str) -> None:
+    def __init__(self, token: str, target_chat_id: str, proxy_url: str | None = None) -> None:
         if not _HAS_AIogram:
             msg = "aiogram not installed. Run: pip install aiogram>=3.27.0"
             raise RuntimeError(msg)
 
         self.token = token
         self.target_chat_id = target_chat_id
-        session = AiohttpSession()
+        session = AiohttpSession(proxy=proxy_url)
         self.bot = Bot(token=token, session=session)
         self._send_lock = asyncio.Lock()
         self._failure_count = 0
@@ -848,7 +848,7 @@ class WebhookBroadcaster:
         return payload
 
 
-def build_message_broadcaster(settings: Any) -> MessageBroadcaster:
+def build_message_broadcaster(settings: Any, proxy_url: str | None = None) -> MessageBroadcaster:
     provider = str(
         getattr(getattr(settings, "notifiers", None), "provider", "telegram") or "telegram"
     ).lower()
@@ -859,7 +859,7 @@ def build_message_broadcaster(settings: Any) -> MessageBroadcaster:
         chat_id = str(getattr(settings, "target_chat_id", "") or "").strip()
         if not token or not chat_id:
             return DisabledBroadcaster()
-        return TelegramBroadcaster(token, chat_id)
+        return TelegramBroadcaster(token, chat_id, proxy_url=proxy_url)
 
     provider_config = getattr(settings.notifiers, provider, None)
     if provider_config is None or not getattr(provider_config, "webhook_url", None):

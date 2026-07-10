@@ -503,3 +503,39 @@ def post_peak_fade_ratio(df: pl.DataFrame, peak_high: float, n: int = 3) -> tupl
     avg_range_pct = float((post["high"] - post["low"]).mean() / post["open"].mean() * 100)
     return avg_body_pct, avg_range_pct
 
+
+def is_ascending_channel(df: pl.DataFrame, *, lookback: int = 30, min_swings: int = 2) -> bool:
+    """Recent swings show higher highs AND higher lows (ascending channel).
+
+    Used for Pattern C / Type 2 context: confirms an uptrend preceded
+    the prior swing high, making a subsequent break more valid.
+    """
+    if df is None or df.height < lookback:
+        return False
+    feat = compute_features(df.tail(lookback))
+    highs = feat.filter(pl.col("_swing_high"))["high"]
+    lows = feat.filter(pl.col("_swing_low"))["low"]
+    if len(highs) < min_swings or len(lows) < min_swings:
+        return False
+    sh = highs.tail(min_swings).to_list()
+    sl = lows.tail(min_swings).to_list()
+    return all(sh[i] > sh[i - 1] for i in range(1, len(sh))) and all(sl[i] > sl[i - 1] for i in range(1, len(sl)))
+
+
+def is_descending_channel(df: pl.DataFrame, *, lookback: int = 30, min_swings: int = 2) -> bool:
+    """Recent swings show lower highs AND lower lows (descending channel).
+
+    Used for Pattern C / Type 2 context (post-peak pullback) and
+    Pattern A3 / Type 3 (pre-accumulation downtrend).
+    """
+    if df is None or df.height < lookback:
+        return False
+    feat = compute_features(df.tail(lookback))
+    highs = feat.filter(pl.col("_swing_high"))["high"]
+    lows = feat.filter(pl.col("_swing_low"))["low"]
+    if len(highs) < min_swings or len(lows) < min_swings:
+        return False
+    sh = highs.tail(min_swings).to_list()
+    sl = lows.tail(min_swings).to_list()
+    return all(sh[i] < sh[i - 1] for i in range(1, len(sh))) and all(sl[i] < sl[i - 1] for i in range(1, len(sl)))
+

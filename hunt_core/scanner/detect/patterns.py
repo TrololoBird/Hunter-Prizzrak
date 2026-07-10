@@ -24,7 +24,7 @@ from typing import Any
 import polars as pl
 
 from hunt_core.scanner.detect.events import (
-    ohlcv_to_df, compute_features,
+    ohlcv_to_df, compute_features, atr,
     detect_impulse, detect_consecutive_impulse,
     detect_absorption,
     detect_bokovik, detect_sweep_low, detect_sweep_high,
@@ -33,6 +33,7 @@ from hunt_core.scanner.detect.events import (
     bos_up, bos_down, choch_bull, choch_bear,
     bullish_volume,
     break_above_level_recent,
+    is_ascending_channel, is_descending_channel,
 )
 from hunt_core.scanner.detect.state import Direction, PatternType, new_symbol_state, is_stale
 from hunt_core.scanner.detect.scoring import full_confirmation_score
@@ -134,16 +135,27 @@ def _macro_extreme(df: pl.DataFrame, *, direction: Direction) -> float | None:
     return float(window["low"].min())
 
 
-def _prior_swing_high(df: pl.DataFrame, lookback: int = 60, *, exclude_last: int = 15) -> float | None:
-    """Most recent swing high BEFORE the pump (exclude last N bars = the impulse itself)."""
-    body = df.tail(lookback)[:-exclude_last] if exclude_last > 0 else df.tail(lookback)
+def _prior_swing_high(df: pl.DataFrame, lookback: int = 60, *, exclude_last: int = 15) -> tuple[float, int] | None:
+    """Most recent swing high BEFORE the pump (exclude last N bars = the impulse itself).
+
+    Returns (price, bar_index_into_df) or None.
+    """
+    start = max(0, len(df) - lookback)
+    body = df.slice(start, lookback)
+    if exclude_last > 0 and len(body) > exclude_last:
+        body = body[:-exclude_last]
     if len(body) < 10:
         return None
     df_c = compute_features(body)
-    swing_vals = df_c.filter(pl.col("_swing_high"))["high"]
-    if swing_vals.is_empty():
+    sw = df_c.filter(pl.col("_swing_high"))
+    if sw.is_empty():
         return None
-    return float(swing_vals.tail(1)[0])
+    last_sh = float(sw["high"].tail(1)[0])
+    # Scan body from the end to find the bar index within body
+    for i in range(len(body) - 1, -1, -1):
+        if abs(float(body["high"][i]) - last_sh) / max(last_sh, 1e-9) < 0.001:
+            return last_sh, start + i
+    return last_sh, start
 
 
 def _micro_df(micro_15m: pl.DataFrame | None, meso_df: pl.DataFrame) -> pl.DataFrame:
@@ -176,39 +188,175 @@ def _consolidation_long_entry(meso_df: pl.DataFrame, bokovik: dict[str, Any]) ->
     return lo
 
 
-def _target_ladder(
-    macro_df: pl.DataFrame, meso_df: pl.DataFrame, *, entry: float, direction: Direction,
-    max_targets: int = 6,
-) -> list[float]:
-    """Full structural target ladder — the liquidity pools the move travels through
-    (course: «много ликвидности снизу … среднесрочная цель», sequential take-profits),
-    NOT a single 30% retrace. Short → swing LOWS below entry (nearest first); long →
-    swing HIGHS above. Pulled from macro+meso pivots, deduped within 1.5%.
+def _count_touches(df: pl.DataFrame, level: float, tolerance_pct: float = 0.005) -> int:
+    """Count bars that touched a price level within tolerance."""
+    lo = level * (1.0 - tolerance_pct)
+    hi = level * (1.0 + tolerance_pct)
+    return int(((df["high"] >= lo) & (df["low"] <= hi)).sum())
+
+
+def _poc_level(df: pl.DataFrame) -> float | None:
+    """Compute POC level from OHLCV data. Returns None if insufficient data."""
+    if df is None or df.height < 10:
+        return None
+    try:
+        from hunt_core.features.volume_profile import volume_profile_levels
+        poc, _vah, _val = volume_profile_levels(
+            df.select(["high", "low", "volume"]),
+            buckets=20, value_area_pct=0.70,
+        )
+        return poc
+    except Exception:
+        return None
+
+
+def _funding_target_mult(direction: Direction, fctx: dict[str, Any] | None) -> float:
+    """Target-distance multiplier from funding context.
+
+    SHORT + elevated positive funding (crowded longs → squeeze fuel) → up to 1.3×.
+    LONG + elevated negative funding (crowded shorts → short squeeze) → up to 1.3×.
     """
-    levels: list[float] = []
-    for df in (meso_df, macro_df):
+    if not fctx:
+        return 1.0
+    rate = float(fctx.get("rate") or 0.0)
+    if direction == "short" and rate > _FUND_ELEVATED:
+        return min(1.0 + (rate / _FUND_HOT) * 0.3, 1.3)
+    if direction == "long" and rate < -_FUND_ELEVATED:
+        return min(1.0 + (abs(rate) / _FUND_HOT) * 0.3, 1.3)
+    return 1.0
+
+
+def _target_ladder(
+    macro_df: pl.DataFrame, meso_df: pl.DataFrame, *,
+    entry: float, direction: Direction,
+    htf_df: pl.DataFrame | None = None,
+    funding_mult: float = 1.0,
+) -> list[float]:
+    """Structural target ladder from HTF swing levels + POC zones.
+
+    Collects swing highs/lows from all TFs, plus POC levels from HTF/meso.
+    Scores each level by significance: POC > multi-tested swing > single swing.
+    ``funding_mult`` amplifies distance scores when funding confirms the direction.
+    Returns only levels ≥ 20 % from entry, nearest-first, deduped within 1.5 %.
+    Returns at most 3 targets. Empty list when no structural level reaches 20 %.
+    """
+    frames = [htf_df, meso_df, macro_df] if htf_df is not None else [meso_df, macro_df]
+
+    # ── Collect candidate levels ──
+    raw_candidates: list[float] = []
+    for df in frames:
         if df is None or df.height < 12:
             continue
+        # Swing levels
         feat = compute_features(df)
         col = "low" if direction == "short" else "high"
         swing_col = "_swing_low" if direction == "short" else "_swing_high"
-        vals = feat.filter(pl.col(swing_col))[col]
-        for v in vals:
+        for v in feat.filter(pl.col(swing_col))[col]:
             fv = float(v)
             if direction == "short" and fv < entry:
-                levels.append(fv)
+                raw_candidates.append(fv)
             elif direction == "long" and fv > entry:
-                levels.append(fv)
-    if not levels:
+                raw_candidates.append(fv)
+
+    if not raw_candidates:
         return []
-    levels = sorted(set(levels), reverse=(direction == "short"))
+
+    # ── Score each level ──
+    scored: dict[float, float] = {}
+    for lv in set(raw_candidates):
+        pct = ((lv - entry) / entry) if direction == "long" else ((entry - lv) / entry)
+        if pct < 0.20:
+            continue  # too close for a structural target
+        # Count touches across all available TFs (multi-tested = higher significance)
+        total_touches = 0
+        for df in frames:
+            if df is not None and df.height >= 10:
+                total_touches += _count_touches(df, lv)
+        # Base score = distance pct (farther = better), boosted by touches + funding
+        score = pct * (1.0 + min(total_touches, 10) * 0.15) * funding_mult
+        scored[lv] = score
+
+    if not scored:
+        return []
+
+    # ── Add POC levels as high-priority candidates ──
+    for df in frames[:2]:  # HTF and meso only
+        poc = _poc_level(df)
+        if poc is not None:
+            pct = ((poc - entry) / entry) if direction == "long" else ((entry - poc) / entry)
+            if pct >= 0.20 and poc not in scored:
+                total_touches = 0
+                for d in frames:
+                    if d is not None and d.height >= 10:
+                        total_touches += _count_touches(d, poc)
+                # POC gets a bonus multiplier, funding amplifies further
+                scored[poc] = pct * (1.5 + min(total_touches, 10) * 0.15) * funding_mult
+
+    # ── Select top 3 by score, nearest-first among equals ──
+    ranked = sorted(scored.items(), key=lambda x: (-x[1], abs(x[0] - entry)))
+
+    # Dedupe within 1.5 %
     out: list[float] = []
-    for lv in levels:  # nearest-first, dedupe within 1.5%
+    for lv, _score in ranked:
         if not out or abs(lv - out[-1]) / max(abs(out[-1]), 1e-9) >= 0.015:
             out.append(lv)
-        if len(out) >= max_targets:
+        if len(out) >= 3:
             break
+
+    # Sort nearest-first
+    out.sort(reverse=(direction == "short"))
     return out
+
+
+def _htf_trend_bias(df: pl.DataFrame | None) -> str | None:
+    """Determine trend bias from HTF channel using 20/50 EMA position + slope.
+
+    Returns 'bull', 'bear', or None (neutral / insufficient data).
+    """
+    if df is None or df.height < 60:
+        return None
+    close = df["close"]
+    ema20 = close.rolling_mean(20)
+    ema50 = close.rolling_mean(50)
+    last_close = float(close.tail(1)[0])
+    last_ema20 = float(ema20.tail(1)[0])
+    last_ema50 = float(ema50.tail(1)[0])
+    if last_close <= 0 or last_ema20 <= 0 or last_ema50 <= 0:
+        return None
+    above_20 = last_close > last_ema20 * 1.01
+    above_50 = last_close > last_ema50 * 1.01
+    ema20_vals = ema20.tail(5).to_list()
+    slope_up = len(ema20_vals) >= 2 and ema20_vals[-1] > ema20_vals[0]
+    slope_down = len(ema20_vals) >= 2 and ema20_vals[-1] < ema20_vals[0]
+    if above_20 and above_50 and slope_up:
+        return "bull"
+    if not above_20 and not above_50 and slope_down:
+        return "bear"
+    return None
+
+
+def _expected_move_pct(
+    direction: Direction, entry: float, extreme: float,
+    bokovik: dict[str, Any] | None = None,
+) -> float:
+    """Expected clean price move % from the manipulation structure.
+
+    For LONG: bokovik width × 2 (conservative), or sweep distance × 3, whichever larger.
+    For SHORT: sweep distance × 1.5.
+    Returns 0.0 if insufficient data (no bokovik, no meaningful sweep).
+    """
+    expected = 0.0
+    if direction == "long":
+        if bokovik is not None:
+            bw = (bokovik.get("hi", 0) - bokovik.get("lo", 0)) / max(entry, 1e-9)
+            expected = max(expected, bw * 2.0)
+        sweep_pct = abs(entry - extreme) / max(entry, 1e-9)
+        expected = max(expected, sweep_pct * 3.0)
+    else:
+        sweep_pct = abs(extreme - entry) / max(entry, 1e-9)
+        expected = max(expected, sweep_pct * 1.5)
+
+    return min(expected, 0.80)
 
 
 def _build_setup(
@@ -236,8 +384,8 @@ def _build_setup(
     )
 
 
-# ── Pattern A (long): impulse -> absorption -> accumulation -> sweep -> break
-#    Pattern A3 (long, no impulse): accumulation -> break
+# ── Pattern A / Type 1 (long): dump impulse -> absorption -> bokovik -> sweep -> break 100-400%
+#    Pattern A3 / Type 3 (long, no impulse): descending channel -> bokovik -> break 100%+
 _A_TOTAL_STEPS = 5
 _A3_TOTAL_STEPS = 2
 
@@ -245,22 +393,28 @@ _A3_TOTAL_STEPS = 2
 def _advance_pattern_a(
     macro_df: pl.DataFrame, meso_df: pl.DataFrame, meso_tf: str,
     micro_15m: pl.DataFrame | None, state: dict[str, Any], now_ms: float,
+    *,
+    htf_df: pl.DataFrame | None = None,
+    htf_bias: str | None = None,
+    funding_ctx: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], ManipulationSetup | None]:
     stage = int(state.get("stage", 0))
     pattern = state.get("pattern")
     data: dict[str, Any] = dict(state.get("data") or {})
 
     if stage == 0:
-        imp_ok, imp_idx = detect_impulse(meso_df, lookback=30, direction="up")
+        imp_ok, imp_idx = detect_impulse(meso_df, lookback=30, direction="down")
         if not imp_ok:
-            imp_ok, imp_idx = detect_consecutive_impulse(meso_df, min_count=3, direction="up")
+            imp_ok, imp_idx = detect_consecutive_impulse(meso_df, min_count=3, direction="down")
         if imp_ok and imp_idx is not None:
             return {
                 "pattern": "A", "stage": 1, "anchor_ts": now_ms, "first_ts": now_ms,
                 "meso_tf": meso_tf, "data": {"impulse_idx": int(imp_idx)},
             }, None
         b1 = detect_bokovik(meso_df, window=_BOKOVIK_WINDOW)
-        if b1 is not None:
+        # Type 3 (author's descending-channel long): persistent downtrend
+        # (lower highs+lows) → bokovik near channel bottom → break 100%+
+        if b1 is not None and is_descending_channel(meso_df, lookback=min(50, len(meso_df)), min_swings=2):
             return {
                 "pattern": "A3", "stage": 1, "anchor_ts": now_ms, "first_ts": now_ms,
                 "meso_tf": meso_tf, "data": {"bokovik": b1},
@@ -283,8 +437,8 @@ def _advance_pattern_a(
             return {**state, "stage": 3, "anchor_ts": now_ms, "data": data}, None
 
         if stage == 3:
-            # Variant A (predictive, symmetric to Pattern B): the long is taken at
-            # the LOW of the (second) consolidation the moment its low is swept
+            # Type 1 (author's aggressive-dump long): the long is taken at
+            # the LOW of the consolidation the moment its low is swept
             # ("вход у низа второй консолидации"), NOT after the 15m breaks up.
             # bos_up/choch_bull is a STRENGTH upgrade only (ltf_confirmed vs
             # ltf_pending). Stop below the swept low + averaging handle a deeper wick.
@@ -310,11 +464,14 @@ def _advance_pattern_a(
             # НЕ macro_low: тот — 1d-контекст, в сообщении читался как «свипнули
             # 1d-уровень 0.89», хотя свипнут 0.92 на 15m.
             a_entry = _consolidation_long_entry(meso_df, bokovik)
-            a_ladder = _target_ladder(macro_df, meso_df, entry=a_entry, direction="long")
+            a_ladder = _target_ladder(macro_df, meso_df, entry=a_entry, direction="long", htf_df=htf_df,
+                                      funding_mult=_funding_target_mult("long", funding_ctx))
             evidence = ["impulse", "absorption", "bokovik", "sweep_below",
                         "ltf_confirmed" if ltf_confirmed else "ltf_pending"]
             if not vol_ok:
                 evidence.append("volume_pending")
+            if htf_bias:
+                evidence.append(f"htf_{htf_bias}")
             setup = _build_setup(
                 pattern_type="A", direction="long", meso_tf=meso_tf,
                 swept_level=float(bokovik.get("lo") or 0.0),
@@ -330,6 +487,11 @@ def _advance_pattern_a(
             setup.score = base_score * 0.6 if not vol_ok else base_score
             setup.steps_covered = _A_TOTAL_STEPS if ltf_confirmed else _A_TOTAL_STEPS - 1
             setup.macro_tf = meso_tf
+            # Skip if no structural target ≥ 20 % from entry
+            if not a_ladder:
+                exp = _expected_move_pct("long", a_entry, sweep_extreme, bokovik=bokovik)
+                if exp < 0.20:
+                    return new_symbol_state(), None
             return new_symbol_state(), setup
 
     if pattern == "A3" and stage == 1:
@@ -352,14 +514,23 @@ def _advance_pattern_a(
         # way it does for impulse-driven Pattern A / C.
         vol_ok = bullish_volume(meso_df) or (micro_15m is not None and bullish_volume(micro_15m))
         a3_entry = _consolidation_long_entry(meso_df, bokovik)
-        a3_ladder = _target_ladder(macro_df, meso_df, entry=a3_entry, direction="long")
+        # A3 has no sweep — anchor sweep_extreme one full ATR below the bokovik
+        # low to create structural breathing room for the stop. Without this the
+        # stop sits at lo*(1-buf), just the buffer below entry — too tight for
+        # crypto noise on an accumulation-floor entry.
+        _a3_atr = atr(meso_df.tail(_BOKOVIK_WINDOW * 2), 14)
+        sweep_extreme = (lo - _a3_atr) if _a3_atr > 0 and lo - _a3_atr > 0 else lo * 0.97
+        a3_ladder = _target_ladder(macro_df, meso_df, entry=a3_entry, direction="long", htf_df=htf_df,
+                                   funding_mult=_funding_target_mult("long", funding_ctx))
         evidence = ["accumulation_no_impulse", "ltf_confirmed" if ltf_confirmed else "ltf_pending"]
         if not vol_ok:
             evidence.append("volume_pending")
+        if htf_bias:
+            evidence.append(f"htf_{htf_bias}")
         setup = _build_setup(
             pattern_type="A3", direction="long", meso_tf=meso_tf,
             swept_level=lo,
-            sweep_extreme=lo,
+            sweep_extreme=sweep_extreme,
             target=(a3_ladder[0] if a3_ladder else float(meso_df["high"].max())),
             target_ladder=tuple(a3_ladder),
             entry_ref=a3_entry,
@@ -371,6 +542,11 @@ def _advance_pattern_a(
         setup.score = base_score  # A3: no volume penalty (quiet accumulation)
         setup.steps_covered = _A3_TOTAL_STEPS if ltf_confirmed else _A3_TOTAL_STEPS - 1
         setup.macro_tf = meso_tf
+        # Skip if no structural target ≥ 20 % from entry
+        if not a3_ladder:
+            exp = _expected_move_pct("long", a3_entry, sweep_extreme, bokovik=bokovik)
+            if exp < 0.20:
+                return new_symbol_state(), None
         return new_symbol_state(), setup
 
     return new_symbol_state(), None
@@ -384,6 +560,9 @@ def _advance_pattern_b(
     macro_df: pl.DataFrame, meso_df: pl.DataFrame, meso_tf: str,
     micro_15m: pl.DataFrame | None, state: dict[str, Any], now_ms: float,
     macro_tf: str = _MACRO_TF,
+    *,
+    htf_df: pl.DataFrame | None = None,
+    htf_bias: str | None = None,
     funding_ctx: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], ManipulationSetup | None]:
     stage = int(state.get("stage", 0))
@@ -459,7 +638,8 @@ def _advance_pattern_b(
         # wick — the stop must sit above the whole pump ("стоп за хая с запасом"),
         # else it lands inside the noise and a re-sweep kills it before the dump.
         stop_anchor = max(sweep_ext, pump_high_f)
-        ladder = _target_ladder(macro_df, meso_df, entry=entry_ref, direction="short")
+        ladder = _target_ladder(macro_df, meso_df, entry=entry_ref, direction="short", htf_df=htf_df,
+                                funding_mult=_funding_target_mult("short", funding_ctx))
         setup = _build_setup(
             pattern_type="B", direction="short", meso_tf=meso_tf,
             swept_level=float(data.get("swept_level") or 0.0),
@@ -467,7 +647,8 @@ def _advance_pattern_b(
             target=(ladder[0] if ladder else target),
             target_ladder=tuple(ladder),
             entry_ref=entry_ref,
-            evidence=["sweep_above", fade_kind, "ltf_confirmed" if ltf_confirmed else "ltf_pending"],
+            evidence=["sweep_above", fade_kind, "ltf_confirmed" if ltf_confirmed else "ltf_pending"]
+                     + ([f"htf_{htf_bias}"] if htf_bias else []),
             total_steps=_B_TOTAL_STEPS,
             micro_confirmed=ltf_confirmed,
         )
@@ -501,10 +682,15 @@ _C_TOTAL_STEPS = 2
 def _advance_pattern_c(
     macro_df: pl.DataFrame, meso_df: pl.DataFrame, meso_tf: str,
     micro_15m: pl.DataFrame | None, state: dict[str, Any], now_ms: float,
+    *,
+    htf_df: pl.DataFrame | None = None,
+    htf_bias: str | None = None,
+    funding_ctx: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], ManipulationSetup | None]:
-    prior_high = _prior_swing_high(meso_df, lookback=60, exclude_last=15)
-    if prior_high is None:
+    prev = _prior_swing_high(meso_df, lookback=60, exclude_last=15)
+    if prev is None:
         return new_symbol_state(), None
+    prior_high, prior_idx = prev
 
     break_ok = break_above_level_recent(meso_df, prior_high, window=1)
 
@@ -512,15 +698,37 @@ def _advance_pattern_c(
         return {
             "pattern": "C", "stage": 1, "anchor_ts": now_ms, "first_ts": now_ms,
             "meso_tf": meso_tf,
-            "data": {"prior_high": prior_high},
+            "data": {"prior_high": prior_high, "prior_idx": prior_idx},
         }, None
+
+    # ── Type 2 channel context ──────────────────────────────────────
+    # The author's Type 2: ascending channel → peak → descending
+    # channel → bokovik → break above prior high → 20-50% move.
+    # Require ascending channel BEFORE the peak and descending channel
+    # AFTER the peak for a genuine trend-continuation break.
+    pre_df = meso_df[:prior_idx] if prior_idx > 0 else meso_df.head(1)
+    post_df = meso_df[prior_idx:]
+    asc_ok = is_ascending_channel(pre_df, lookback=min(40, len(pre_df)), min_swings=2)
+    desc_ok = is_descending_channel(post_df, lookback=min(40, len(post_df)), min_swings=2)
+    if not asc_ok or not desc_ok:
+        # Not a valid Type 2 structure — don't force through
+        return new_symbol_state(), None
 
     vol_ok = bullish_volume(meso_df) or (micro_15m is not None and bullish_volume(micro_15m))
     entry_ref = float(meso_df["close"][-1])
-    ladder = _target_ladder(macro_df, meso_df, entry=entry_ref, direction="long")
-    evidence = ["prior_swing_high", "break_above_prior_high"]
+    ladder = _target_ladder(macro_df, meso_df, entry=entry_ref, direction="long", htf_df=htf_df,
+                            funding_mult=_funding_target_mult("long", funding_ctx))
+    # HTF trend filter (TF hierarchy): Pattern C is a trend-following long
+    # — a break above prior high in a bearish HTF is a trap, not a signal.
+    if htf_bias == "bear":
+        return new_symbol_state(), None
+    evidence = ["prior_swing_high", "break_above_prior_high",
+                "ascending_channel_pre" if asc_ok else "",
+                "descending_channel_post" if desc_ok else ""]
     if not vol_ok:
         evidence.append("volume_pending")
+    if htf_bias == "bull":
+        evidence.append("htf_bullish")
     ltf_confirmed = break_ok
     setup = _build_setup(
         pattern_type="C", direction="long", meso_tf=meso_tf,
@@ -529,7 +737,7 @@ def _advance_pattern_c(
         target=(ladder[0] if ladder else float(meso_df["high"].max())),
         target_ladder=tuple(ladder),
         entry_ref=entry_ref,
-        evidence=evidence,
+        evidence=[e for e in evidence if e],
         total_steps=_C_TOTAL_STEPS,
         micro_confirmed=ltf_confirmed,
     )
@@ -551,6 +759,7 @@ def advance_manipulation_state(
     micro_tf: str = "15m",
     family: str | None = None,
     funding_ctx: dict[str, Any] | None = None,
+    htf_bias: str | None = None,
 ) -> tuple[dict[str, Any], ManipulationSetup | None]:
     """Advance ``symbol``'s tracked pattern by at most one stage, for ONE TF ladder.
 
@@ -593,30 +802,41 @@ def advance_manipulation_state(
 
     micro_15m = ohlcv_to_df(ohlcv_by_tf[micro_tf]) if ohlcv_by_tf.get(micro_tf) else None
 
+    # Grab the highest available macro TF for structural target ladders.
+    # 1d is ideal; fall back to 4h if daily data hasn't filled in yet.
+    htf_raw = ohlcv_by_tf.get("1d") or ohlcv_by_tf.get("4h")
+    htf_df = ohlcv_to_df(htf_raw) if htf_raw else None
+
     pattern = state.get("pattern")
     if family == "A":
-        return _advance_pattern_a(macro_df, meso_df, meso_tf, micro_15m, state, now_ms)
+        return _advance_pattern_a(macro_df, meso_df, meso_tf, micro_15m, state, now_ms,
+                                  htf_df=htf_df, htf_bias=htf_bias, funding_ctx=funding_ctx)
     if family == "B":
         return _advance_pattern_b(macro_df, meso_df, meso_tf, micro_15m, state, now_ms,
-                                  macro_tf=macro_tf, funding_ctx=funding_ctx)
+                                  macro_tf=macro_tf, funding_ctx=funding_ctx, htf_df=htf_df,
+                                  htf_bias=htf_bias)
     if family == "C":
-        return _advance_pattern_c(macro_df, meso_df, meso_tf, micro_15m, state, now_ms)
+        return _advance_pattern_c(macro_df, meso_df, meso_tf, micro_15m, state, now_ms,
+                                  htf_df=htf_df, htf_bias=htf_bias, funding_ctx=funding_ctx)
 
     # Legacy shared-state path (family=None): try A, B, C on one state. Kept for
     # the stateless detect_manipulation_setup wrapper; the multi-scale driver runs
     # A, B, C on independent states instead (see advance_manipulation_scales).
     if pattern in (None, "A", "A3"):
-        new_state, setup = _advance_pattern_a(macro_df, meso_df, meso_tf, micro_15m, state, now_ms)
+        new_state, setup = _advance_pattern_a(macro_df, meso_df, meso_tf, micro_15m, state, now_ms,
+                                              htf_df=htf_df, htf_bias=htf_bias, funding_ctx=funding_ctx)
         if setup is not None or new_state.get("pattern") in ("A", "A3"):
             return new_state, setup
 
     if pattern in (None, "B") or state.get("pattern") in (None, "B"):
         new_state, setup = _advance_pattern_b(macro_df, meso_df, meso_tf, micro_15m, state, now_ms,
-                                              macro_tf=macro_tf, funding_ctx=funding_ctx)
+                                              macro_tf=macro_tf, funding_ctx=funding_ctx, htf_df=htf_df,
+                                              htf_bias=htf_bias)
         return new_state, setup
 
     if pattern in (None, "C") or state.get("pattern") in (None, "C"):
-        new_state, setup = _advance_pattern_c(macro_df, meso_df, meso_tf, micro_15m, state, now_ms)
+        new_state, setup = _advance_pattern_c(macro_df, meso_df, meso_tf, micro_15m, state, now_ms,
+                                              htf_df=htf_df, htf_bias=htf_bias, funding_ctx=funding_ctx)
         return new_state, setup
 
     return new_symbol_state(), None
@@ -642,12 +862,18 @@ def advance_manipulation_scales(
     for macro_tf, meso_tf, micro_tf in _TF_LADDERS:
         if not ohlcv_by_tf.get(macro_tf) or not ohlcv_by_tf.get(meso_tf):
             continue
+        # Higher-TF trend bias constrains lower ladder direction:
+        #   (1d,4h,15m) → no higher TF, bias = None
+        #   (4h,1h,15m) → bias from 1d
+        #   (1h,15m,5m) → bias from 4h
+        bias_tf = {"1d": None, "4h": "1d", "1h": "4h"}.get(macro_tf)
+        htf_bias = _htf_trend_bias(ohlcv_to_df(ohlcv_by_tf[bias_tf])) if bias_tf and ohlcv_by_tf.get(bias_tf) else None
         for family in ("A", "B", "C"):
             key = f"{meso_tf}:{family}"
             new_state, setup = advance_manipulation_state(
                 symbol, ohlcv_by_tf, states.get(key), now_ms=now_ms,
                 macro_tf=macro_tf, meso_tf=meso_tf, micro_tf=micro_tf, family=family,
-                funding_ctx=funding_ctx,
+                funding_ctx=funding_ctx, htf_bias=htf_bias,
             )
             states[key] = new_state
             if setup is not None:

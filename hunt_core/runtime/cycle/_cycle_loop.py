@@ -64,7 +64,7 @@ from hunt_core.track.pump_history import (
 )
 from hunt_core.track.tracker import iter_active_tracker_symbols, load_tracker_state
 from hunt_core.domain.config import load_settings
-from hunt_core.market.network import run_proxy_refresh_daemon
+from hunt_core.market.network import detect_local_proxies, run_proxy_refresh_daemon
 
 
 def _build_digest_candidates(
@@ -190,6 +190,10 @@ async def run_loop(
     except Exception:
         LOG.exception("hunt_tick_rotate_failed")
     settings = load_settings()
+    tg_proxies = await detect_local_proxies() if send_telegram else []
+    proxy_url: str | None = tg_proxies[0] if tg_proxies else None
+    if proxy_url:
+        LOG.info("watch_telegram_proxy", proxy=proxy_url)
     broadcaster: TelegramBroadcaster | None = None
     if send_telegram:
         if not settings.tg_token or not settings.target_chat_id:
@@ -205,7 +209,9 @@ async def run_loop(
         else:
             for attempt in range(3):
                 try:
-                    broadcaster = TelegramBroadcaster(settings.tg_token, settings.target_chat_id)
+                    broadcaster = TelegramBroadcaster(
+                        settings.tg_token, settings.target_chat_id, proxy_url=proxy_url,
+                    )
                     await broadcaster.preflight_check()
                     LOG.info("watch_telegram_ready", chat=settings.target_chat_id, mode="confirm_only")
                     break
@@ -356,7 +362,7 @@ async def run_loop(
 
     # /signal polling conflicts with a second getUpdates consumer — only when TG sends enabled.
     tg_cmds = (
-        build_hunt_telegram_commands(settings, client=client)
+        build_hunt_telegram_commands(settings, proxy_url=proxy_url, client=client)
         if send_telegram and settings.tg_token
         else None
     )

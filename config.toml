@@ -4,7 +4,9 @@ trust_env = true
 failover_enabled = true
 failover_cooldown_seconds = 120
 proxy_url = ""
-proxy_urls = []
+proxy_urls = [
+  "socks5://127.0.0.1:10808",
+]
 [hunter]
 min_quote_volume_usd = 10_000_000
 min_open_interest_usd = 500_000

@@ -1,0 +1,39 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "instructions": ["AGENTS.md"],
+  "command": {
+    "test": {
+      "description": "Run pytest suite",
+      "template": "uv run pytest $ARGUMENTS"
+    },
+    "lint": {
+      "description": "Run ruff check (lint) and mypy (type-check)",
+      "template": "uv run ruff check . && uv run mypy hunt_core"
+    },
+    "watch": {
+      "description": "Run the production watch loop",
+      "template": "uv run python -m hunt_core watch $ARGUMENTS"
+    },
+    "smoke": {
+      "description": "Run a single-pass smoke test (no telegram)",
+      "template": "uv run python -m hunt_core watch --once --no-telegram"
+    },
+    "check": {
+      "description": "Quick sanity: compile-all + ruff",
+      "template": "uv run python -m compileall -q hunt_core && uv run ruff check ."
+    }
+  },
+  "mcp": {
+    "ccxt": {
+      "type": "local",
+      "command": ["uvx", "mcp-ccxt", "run"],
+      "enabled": true
+    },
+    "mcpmarket-me": {
+      "type": "remote",
+      "url": "https://link.mcpmarket.com/undeadbird-sc2/toolkits/me/mcp",
+      "headers": { "Authorization": "Bearer sk_user_rl0p9QGDXedLKT1DTcNOgH--4DlThY6E" },
+      "enabled": true
+    }
+  }
+}

@@ -19,6 +19,7 @@ from hunt_core import clock
 from hunt_core.market.network import (
     ProxyPool,
     filter_working_proxies_ccxt,
+    is_socks_proxy,
     mask_proxy_url,
     probe_ccxt_direct,
     resolve_proxy_url,
@@ -99,6 +100,10 @@ def build_network_config(
         }
     if proxy_url:
         config["aiohttp_proxy"] = proxy_url
+        if is_socks_proxy(proxy_url):
+            config["wsSocksProxy"] = proxy_url
+        else:
+            config["wssProxy"] = proxy_url
     if trust_env:
         config["aiohttp_trust_env"] = True
     return config
