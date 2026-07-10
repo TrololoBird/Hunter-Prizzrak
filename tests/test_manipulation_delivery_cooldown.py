@@ -129,8 +129,6 @@ def test_bug1_repeat_loser_gate_skips_delivery():
 
 def test_bug1_no_gate_when_tracker_none():
     # Without a tracker, BUG-1 gates must NOT fire; delivery proceeds and state commits.
-    now = datetime.now(timezone.utc)
-    burst_state = {"confirm_burst_ts": [now.isoformat(), now.isoformat()]}
     results, saved, _, _ = asyncio.run(_run(tracker_state=None))
     assert len(results) == 1
     assert saved is not None and saved.get("COINUSDT") == {"reset": True}

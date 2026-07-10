@@ -4,7 +4,6 @@ from hunt_core.scanner.detect.patterns import (
     advance_manipulation_state,
     _C_TOTAL_STEPS,
 )
-from hunt_core.scanner.detect.events import ohlcv_to_df
 
 
 def test_pattern_c_emits_after_break_above_prior_high():
