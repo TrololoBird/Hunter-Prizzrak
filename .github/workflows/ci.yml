@@ -32,5 +32,5 @@ jobs:
       - name: pytest
         # Repo snapshot is missing `hunt_core.data` (imported by every test
         # module), so the full suite is uncollectable; run the scoped smoke
-        # test covering the collectable PR surface (finite-float helpers).
+        # test covering the PR surface (finite-float helper dedup in errors.py).
         run: uv run pytest -q tests/test_errors_float_helpers_smoke.py
