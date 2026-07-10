@@ -1,4 +1,9 @@
-"""Tests for CircuitBreaker and TradingCircuitBreakers state machine."""
+"""Tests for CircuitBreaker and TradingCircuitBreakers state machine.
+
+Verifies CLOSED→OPEN→HALF_OPEN→CLOSED transitions, record_success()
+decrementing failures, TradingCircuitBreakers.can_trade()/all_closed(),
+and system_breakers() singleton behavior.
+"""
 from __future__ import annotations
 
 from hunt_core.errors import (
