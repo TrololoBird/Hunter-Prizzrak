@@ -1,3 +1,4 @@
+"""Tests for CircuitBreaker and TradingCircuitBreakers state machine."""
 from __future__ import annotations
 
 from hunt_core.errors import (
