@@ -1,11 +1,10 @@
 """Symbol data readiness gate (shortlist Phase 3)."""
 from __future__ import annotations
 
-
-
-import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
+
+from hunt_core.errors import finite_float_or_none
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -124,22 +123,10 @@ def missing_derivatives_context(enrichments: Mapping[str, Any]) -> list[str]:
     return [key for key in REQUIRED_DERIVATIVES_KEYS if enrichments.get(key) is None]
 
 
-def _finite_float(value: object) -> float | None:
-    if value is None:
-        return None
-    try:
-        numeric = float(value)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(numeric):
-        return None
-    return numeric
-
-
 def _last_column_finite(frame: pl.DataFrame | None, column: str) -> float | None:
     if frame is None or frame.is_empty() or column not in frame.columns:
         return None
-    return _finite_float(frame[column][-1])
+    return finite_float_or_none(frame[column][-1])
 
 
 def is_radar_promoted_item(item: UniverseSymbol | None) -> bool:
