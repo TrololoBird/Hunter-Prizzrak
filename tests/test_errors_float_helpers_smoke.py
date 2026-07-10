@@ -55,7 +55,7 @@ def test_finite_float_or_none() -> None:
 
 
 def test_as_float_as_int() -> None:
-    assert as_float(None) == 0.0
+    assert math.isclose(as_float(None), 0.0)
     assert math.isclose(as_float(True), 1.0)
     assert math.isclose(as_float("x", default=-1.0), -1.0)
     assert as_int(None) == 0
@@ -65,7 +65,7 @@ def test_as_float_as_int() -> None:
 
 
 def test_row_float() -> None:
-    assert row_float(None, "k") == 0.0
+    assert math.isclose(row_float(None, "k"), 0.0)
     assert math.isclose(row_float({"k": "9"}, "k"), 9.0)
     assert math.isclose(row_float({"k": "bad"}, "k", default=-1.0), -1.0)
 
