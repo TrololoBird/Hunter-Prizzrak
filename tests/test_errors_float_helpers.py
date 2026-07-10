@@ -11,6 +11,8 @@ from hunt_core.errors import (
     finite_float_or_none,
     optional_finite_float,
     require_finite_float,
+    require_level,
+    require_mark_price,
     row_float,
 )
 
@@ -143,6 +145,31 @@ def test_as_int_float_with_integer_value():
 def test_as_int_non_integer_float_falls_back():
     assert as_int(3.5) == 0
     assert as_int(3.5, default=9) == 9
+
+
+def test_require_mark_price_rejects_bool_price():
+    with pytest.raises(SignalDataMissing) as exc:
+        require_mark_price(True, None)
+    assert exc.value.field == "price"
+    assert exc.value.detail == "not_numeric"
+
+
+def test_require_mark_price_rejects_bool_market_fields():
+    market = {"mark_price": True, "last_price": False}
+    with pytest.raises(SignalDataMissing):
+        require_mark_price(None, market)
+
+
+def test_require_mark_price_falls_back_when_bool_fields_present():
+    market = {"last_price": True}
+    assert math.isclose(require_mark_price(12.5, market), 12.5)
+
+
+def test_require_level_rejects_bool():
+    with pytest.raises(SignalDataMissing) as exc:
+        require_level(True, "support")
+    assert exc.value.field == "support"
+    assert exc.value.detail == "not_numeric"
 
 
 def test_row_float_default_for_non_dict():

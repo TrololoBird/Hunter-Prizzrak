@@ -150,19 +150,31 @@ def require_mark_price(
     *,
     field: str = "price",
 ) -> float:
+    if isinstance(price, bool):
+        raise SignalDataMissing(field, detail="not_numeric")
     mkt = market or {}
     for mark_key in ("mark_price", "markPrice", "live_mark_price"):
-        val = optional_finite_float(mkt.get(mark_key))
+        candidate = mkt.get(mark_key)
+        if isinstance(candidate, bool):
+            continue
+        val = optional_finite_float(candidate)
         if val is not None and val > 0:
             return val
-    for candidate in (price, mkt.get("last_price")):
+    candidate = mkt.get("last_price")
+    if not isinstance(candidate, bool):
         val = optional_finite_float(candidate)
+        if val is not None and val > 0:
+            return val
+    if not isinstance(price, bool):
+        val = optional_finite_float(price)
         if val is not None and val > 0:
             return val
     raise SignalDataMissing(field)
 
 
 def require_level(value: Any, field: str) -> float:
+    if isinstance(value, bool):
+        raise SignalDataMissing(field, detail="not_numeric")
     val = optional_finite_float(value)
     if val is None or val <= 0:
         raise SignalDataMissing(field)
