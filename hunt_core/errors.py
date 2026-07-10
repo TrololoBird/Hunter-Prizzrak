@@ -135,15 +135,7 @@ def require_finite_float(value: Any, field: str) -> float:
 
 
 def optional_finite_float(value: Any) -> float | None:
-    if value is None:
-        return None
-    try:
-        numeric = float(value)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(numeric):
-        return None
-    return numeric
+    return finite_float_or_none(value)
 
 
 def require_mark_price(
