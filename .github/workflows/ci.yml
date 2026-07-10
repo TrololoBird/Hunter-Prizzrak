@@ -17,8 +17,11 @@ jobs:
       - name: Set up Python 3.14
         run: uv python install 3.14
 
+      - name: Create virtual environment
+        run: uv venv
+
       - name: Install project (with dev extras)
-        run: uv pip install -e ".[dev]"
+        run: uv pip install --python .venv -e ".[dev]"
 
       - name: Ruff lint
         run: ruff check .
