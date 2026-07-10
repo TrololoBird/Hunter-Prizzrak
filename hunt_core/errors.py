@@ -123,6 +123,13 @@ class SignalDataMissing(Exception):
 
 
 def require_finite_float(value: Any, field: str) -> float:
+    """Coerce *value* to a finite float, raising ``SignalDataMissing`` on failure.
+
+    Raises with ``detail="not_numeric"`` when the value cannot be parsed
+    (including booleans) and ``detail="non_finite"`` for NaN/inf.
+    """
+    if isinstance(value, bool):
+        raise SignalDataMissing(field, detail="not_numeric")
     if value is None:
         raise SignalDataMissing(field)
     try:
@@ -135,15 +142,8 @@ def require_finite_float(value: Any, field: str) -> float:
 
 
 def optional_finite_float(value: Any) -> float | None:
-    if value is None:
-        return None
-    try:
-        numeric = float(value)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(numeric):
-        return None
-    return numeric
+    """Return a finite float or ``None`` (alias of :func:`finite_float_or_none`)."""
+    return finite_float_or_none(value)
 
 
 def require_mark_price(
@@ -152,12 +152,19 @@ def require_mark_price(
     *,
     field: str = "price",
 ) -> float:
+    if isinstance(price, bool):
+        raise SignalDataMissing(field, detail="not_numeric")
     mkt = market or {}
     for mark_key in ("mark_price", "markPrice", "live_mark_price"):
-        val = optional_finite_float(mkt.get(mark_key))
+        candidate = mkt.get(mark_key)
+        if isinstance(candidate, bool):
+            continue
+        val = optional_finite_float(candidate)
         if val is not None and val > 0:
             return val
     for candidate in (price, mkt.get("last_price")):
+        if isinstance(candidate, bool):
+            continue
         val = optional_finite_float(candidate)
         if val is not None and val > 0:
             return val
@@ -165,6 +172,8 @@ def require_mark_price(
 
 
 def require_level(value: Any, field: str) -> float:
+    if isinstance(value, bool):
+        raise SignalDataMissing(field, detail="not_numeric")
     val = optional_finite_float(value)
     if val is None or val <= 0:
         raise SignalDataMissing(field)
