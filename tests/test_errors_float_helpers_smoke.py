@@ -12,6 +12,9 @@ import math
 
 import pytest
 
+import polars as pl
+
+from hunt_core import data_readiness
 from hunt_core.errors import (
     SignalDataMissing,
     as_float,
@@ -72,3 +75,12 @@ def test_row_float() -> None:
 
 def test_math_finite_sanity() -> None:
     assert not math.isfinite(float("nan"))
+
+
+def test_data_readiness_last_column_finite_uses_consolidated_helper() -> None:
+    frame = pl.DataFrame({"c": [1.0, 2.0, 3.0]})
+    assert math.isclose(data_readiness._last_column_finite(frame, "c"), 3.0)
+    assert data_readiness._last_column_finite(None, "c") is None
+    assert data_readiness._last_column_finite(pl.DataFrame({"c": []}), "c") is None
+    assert data_readiness._last_column_finite(pl.DataFrame({"c": [1.0]}), "missing") is None
+    assert data_readiness._last_column_finite(pl.DataFrame({"c": [float("nan")]}), "c") is None
