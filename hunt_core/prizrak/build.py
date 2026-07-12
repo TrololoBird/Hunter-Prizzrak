@@ -149,15 +149,24 @@ class AnalystReport:
         if not isinstance(iz, dict) or not (iz.get("long") or iz.get("short")):
             return ""
         tf = str(iz.get("tf") or "4h")
-        lines = [f"🎯 <b>Зоны интереса</b> ({tf} · лимитки, вход по факту касания)"]
-        lz = iz.get("long")
-        if isinstance(lz, dict):
-            t = f" ({lz['touches']} касаний)" if lz.get("touches") else ""
-            lines.append(f"🟢 Лонг: <code>{fmt_price(lz['lo'])}–{fmt_price(lz['hi'])}</code>{t}")
-        sz = iz.get("short")
-        if isinstance(sz, dict):
-            t = f" ({sz['touches']} касаний)" if sz.get("touches") else ""
-            lines.append(f"🔴 Шорт: <code>{fmt_price(sz['lo'])}–{fmt_price(sz['hi'])}</code>{t}")
+        lines = [f"🎯 <b>Зоны интереса</b> ({tf} · лимитки/доборы, вход по факту касания)"]
+
+        def _zone_line(z: dict[str, Any]) -> str:
+            t = f" ({z['touches']} касаний)" if z.get("touches") else ""
+            return f"<code>{fmt_price(z['lo'])}–{fmt_price(z['hi'])}</code>{t}"
+
+        def _side(label: str, single: Any, ladder: Any) -> None:
+            # Лесенка доборов (Д1/Д2/Д3) when present — the author works a GRID of levels,
+            # not one box; fall back to the single strongest zone otherwise.
+            rungs = [z for z in (ladder or ()) if isinstance(z, dict) and z.get("lo") and z.get("hi")]
+            if len(rungs) > 1:
+                tags = " · ".join(f"Д{i+1} {_zone_line(z)}" for i, z in enumerate(rungs))
+                lines.append(f"{label} {tags}")
+            elif isinstance(single, dict):
+                lines.append(f"{label} {_zone_line(single)}")
+
+        _side("🟢 Лонг:", iz.get("long"), iz.get("long_ladder"))
+        _side("🔴 Шорт:", iz.get("short"), iz.get("short_ladder"))
         return "\n".join(lines) if len(lines) > 1 else ""
 
     _ACTION_RU = {"LONG": "ЛОНГ", "SHORT": "ШОРТ", "WAIT": "ОЖИДАНИЕ"}

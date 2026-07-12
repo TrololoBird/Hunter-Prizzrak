@@ -54,6 +54,30 @@ def test_source_24h_change_from_cache(tmp_path, monkeypatch) -> None:
     assert round(ch["total3_change_24h"], 1) == 10.0
 
 
+def test_stable_cd_risk_off_opposes_long() -> None:
+    # Rising STABLE.C.D (money → stables) = risk-off = against a long, supports a short.
+    long_out = dominance_confluence(direction="long", btc_d_change_24h=0.0, total3_change_24h=0.0,
+                                    stable_cd_change_24h=1.0, cfg=_cfg(enabled=True))
+    short_out = dominance_confluence(direction="short", btc_d_change_24h=0.0, total3_change_24h=0.0,
+                                     stable_cd_change_24h=1.0, cfg=_cfg(enabled=True))
+    assert long_out["multiplier"] < 1.0 < short_out["multiplier"]
+
+
+def test_source_stable_cd_change_in_output(tmp_path, monkeypatch) -> None:
+    import hunt_core.prizrak.dominance_source as ds
+
+    cache = tmp_path / "dom.json"
+    monkeypatch.setattr(ds, "DOMINANCE_CACHE", cache)
+    now = time.time() * 1000.0
+    snaps = [
+        {"ts_ms": now - 86_400_000, "btc_d": 55.0, "eth_d": 15.0, "total3": 1000.0, "stable_cd": 6.0},
+        {"ts_ms": now, "btc_d": 55.0, "eth_d": 15.0, "total3": 1000.0, "stable_cd": 7.5},  # +1.5pp risk-off
+    ]
+    cache.write_text(json.dumps(snaps))
+    ch = ds.read_cached_changes_24h()
+    assert ch is not None and round(ch["stable_cd_change_24h"], 2) == 1.5
+
+
 def test_source_cold_start_returns_none(tmp_path, monkeypatch) -> None:
     import hunt_core.prizrak.dominance_source as ds
 

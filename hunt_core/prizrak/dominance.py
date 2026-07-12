@@ -19,10 +19,12 @@ def dominance_confluence(
     direction: str,
     btc_d_change_24h: float | None,
     total3_change_24h: float | None,
+    stable_cd_change_24h: float | None = None,
     cfg: PrizrakConfig | None = None,
 ) -> dict[str, Any]:
     """Bounded multiplier in [0.85, 1.15]. BTC.D falling / TOTAL3 rising = bullish for crypto
-    broadly (курс: «доминация вниз, крипта вверх»); neutral inside the band.
+    broadly (курс: «доминация вниз, крипта вверх»); rising STABLE.C.D = risk-off (money to
+    stables) = bearish. Neutral inside the band.
     """
     cfg = cfg or PrizrakConfig.load()
     want_up = direction == "long"
@@ -48,6 +50,17 @@ def dominance_confluence(
             mult -= 0.07
             evidence.append(f"total3_change_24h={total3_change_24h:+.2f}% against")
 
+    # STABLE.C.D (Prizrak «график Стейблов, как сейчас его использую»): rising stablecoin
+    # dominance = risk-off = supports SHORT / opposes LONG.
+    if stable_cd_change_24h is not None and abs(stable_cd_change_24h) > band:
+        stable_falling = stable_cd_change_24h < 0  # risk-on
+        if stable_falling == want_up:
+            mult += 0.05
+            evidence.append(f"stable_cd_change_24h={stable_cd_change_24h:+.2f}pp supports")
+        else:
+            mult -= 0.05
+            evidence.append(f"stable_cd_change_24h={stable_cd_change_24h:+.2f}pp against")
+
     mult = max(0.85, min(1.15, mult))
     return {"multiplier": round(mult, 3), "evidence": evidence}
 
@@ -72,6 +85,7 @@ def compute_dominance_factor(
         direction=direction,
         btc_d_change_24h=changes.get("btc_d_change_24h"),
         total3_change_24h=changes.get("total3_change_24h"),
+        stable_cd_change_24h=changes.get("stable_cd_change_24h"),
         cfg=cfg,
     )
     if not out.get("evidence"):

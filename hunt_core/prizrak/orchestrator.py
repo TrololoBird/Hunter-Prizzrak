@@ -172,13 +172,27 @@ def compute_interest_zones(
         short_zone = max(above, key=lambda z: _zone_rank(z, nearer=-z["lo"])) if above else None
         if not long_zone and not short_zone:
             continue
+        # Лесенка доборов (не одна зона): the method works a GRID of levels, not a single
+        # box — «широкой сеткой», «ключевые уровни 0.01860, 0.01810», «зона 0.07-0.073».
+        # Verified on the POL/AEVO разборы: the author draws 3-5 nested доборы while a single
+        # zone missed the rest. Return the nearest-first ladder (top-3 structural boxes per
+        # side) so limits sit across the whole зона; ``long``/``short`` stay the strongest
+        # for backward-compatible consumers.
+        def _ladder(zones_side: list[dict[str, Any]], *, nearer: Any) -> list[dict[str, Any]]:
+            ranked = sorted(zones_side, key=lambda z: _zone_rank(z, nearer=nearer(z)), reverse=True)[:3]
+            ranked.sort(key=lambda z: z["hi"], reverse=True)  # nearest-to-price first
+            return [{"lo": float(z["lo"]), "hi": float(z["hi"]), "touches": int(z.get("touches") or 0)}
+                    for z in ranked]
+
         out: dict[str, Any] = {"tf": use_tf}
         if long_zone:
             out["long"] = {"lo": float(long_zone["lo"]), "hi": float(long_zone["hi"]),
                            "touches": int(long_zone.get("touches") or 0)}
+            out["long_ladder"] = _ladder(below, nearer=lambda z: z["hi"])
         if short_zone:
             out["short"] = {"lo": float(short_zone["lo"]), "hi": float(short_zone["hi"]),
                             "touches": int(short_zone.get("touches") or 0)}
+            out["short_ladder"] = _ladder(above, nearer=lambda z: -z["lo"])
         return out
     return {}
 

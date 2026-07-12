@@ -32,6 +32,8 @@ from hunt_core.paths import DOMINANCE_CACHE
 log = structlog.get_logger(__name__)
 
 _COINGECKO_GLOBAL = "https://api.coingecko.com/api/v3/global"
+_COINGECKO_MARKETS = "https://api.coingecko.com/api/v3/coins/markets"
+_STABLE_IDS = "tether,usd-coin,dai,first-digital-usd,ethena-usde"  # major stablecoins for STABLE.C.D
 _DEFAULT_TTL_S = int(os.getenv("HUNT_DOMINANCE_TTL_S", "3600") or 3600)  # 1h between appends
 _HTTP_TIMEOUT_S = float(os.getenv("HUNT_DOMINANCE_TIMEOUT_S", "8") or 8)
 _MAX_SNAPSHOTS = 400  # ~16 days at 1h cadence — plenty to always straddle a 24h window
@@ -79,7 +81,29 @@ def _parse_global(payload: dict[str, Any]) -> dict[str, float] | None:
     if total <= 0:
         return None
     total3 = total * max(0.0, 1.0 - (btc_d + eth_d) / 100.0)
-    return {"ts_ms": time.time() * 1000.0, "btc_d": btc_d, "eth_d": eth_d, "total3": total3}
+    return {"ts_ms": time.time() * 1000.0, "btc_d": btc_d, "eth_d": eth_d, "total3": total3, "total": total}
+
+
+async def _fetch_stable_cd(session: Any, total_mcap: float) -> float | None:
+    """STABLE.C.D — stablecoin dominance % (Σ major stablecoin caps / total market cap).
+
+    Prizrak reads it as the risk regime («STABLE.C.D — как сейчас его использую»): rising =
+    money fleeing to stables = risk-off. Best-effort — ``None`` on any failure (the factor
+    then just uses BTC.D + TOTAL3)."""
+    if total_mcap <= 0:
+        return None
+    try:
+        params = {"vs_currency": "usd", "ids": _STABLE_IDS, "per_page": "50", "page": "1"}
+        async with session.get(_COINGECKO_MARKETS, params=params) as resp:
+            if resp.status != 200:
+                return None
+            rows = await resp.json()
+        if not isinstance(rows, list):
+            return None
+        stable_cap = sum(float(r.get("market_cap") or 0.0) for r in rows if isinstance(r, dict))
+        return stable_cap / total_mcap * 100.0 if stable_cap > 0 else None
+    except Exception:
+        return None
 
 
 async def refresh_dominance(*, ttl_s: int = _DEFAULT_TTL_S) -> None:
@@ -105,8 +129,11 @@ async def refresh_dominance(*, ttl_s: int = _DEFAULT_TTL_S) -> None:
                     log.debug("dominance_http_error", status=resp.status)
                     return
                 payload = await resp.json()
-        snap = _parse_global(payload)
+            snap = _parse_global(payload)
+            if snap is not None:
+                snap["stable_cd"] = await _fetch_stable_cd(session, float(snap.get("total") or 0.0))
         if snap is not None:
+            snap.pop("total", None)  # derived; not needed in the persisted snapshot
             snaps.append(snap)
             _write_snapshots(snaps)
     except Exception as exc:  # noqa: BLE001 — silent-fail is the contract
@@ -131,8 +158,10 @@ def read_cached_changes_24h() -> dict[str, float] | None:
     """Cache-only (no network): ``{btc_d_change_24h, total3_change_24h}`` or ``None``.
 
     ``btc_d_change_24h`` is the percentage-POINT change in BTC dominance; ``total3_change_24h``
-    is the percent change of the TOTAL3 aggregate — both vs the cached snapshot nearest the
-    24h mark. Returns ``None`` until such a snapshot exists (cold start → factor neutral).
+    is the percent change of the TOTAL3 aggregate; ``stable_cd_change_24h`` (when both snapshots
+    carry it) is the percentage-POINT change in stablecoin dominance (STABLE.C.D, risk regime).
+    All vs the cached snapshot nearest the 24h mark; ``None`` until such a snapshot exists
+    (cold start → factor neutral).
     """
     snaps = _read_snapshots()
     if len(snaps) < 2:
@@ -149,7 +178,13 @@ def read_cached_changes_24h() -> dict[str, float] | None:
         total3_change = (t3_now - t3_prior) / t3_prior * 100.0
     except Exception:
         return None
-    return {"btc_d_change_24h": round(btc_d_change, 4), "total3_change_24h": round(total3_change, 4)}
+    out = {"btc_d_change_24h": round(btc_d_change, 4), "total3_change_24h": round(total3_change, 4)}
+    try:
+        if now.get("stable_cd") is not None and prior.get("stable_cd") is not None:
+            out["stable_cd_change_24h"] = round(float(now["stable_cd"]) - float(prior["stable_cd"]), 4)
+    except Exception:
+        pass
+    return out
 
 
 __all__ = ["refresh_dominance", "read_cached_changes_24h"]
