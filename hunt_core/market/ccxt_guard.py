@@ -142,6 +142,14 @@ class CcxtGuard:
     def remaining_pause_s(self) -> float:
         return max(0.0, self.telemetry.pause_until_mono - time.monotonic())
 
+    def is_ip_banned(self) -> bool:
+        """True while a 418 IP-ban pause is still in effect — REST must NOT be attempted.
+
+        A 418 ban is long (minutes→days) and re-calling Binance *during* it EXTENDS the ban,
+        so unlike a short 429 the right move is to skip the call entirely, not sleep-then-hit.
+        """
+        return self.telemetry.last_kind == "ip_ban" and self.remaining_pause_s() > 0.0
+
     def extend_pause(self, seconds: float) -> None:
         if seconds <= 0:
             return

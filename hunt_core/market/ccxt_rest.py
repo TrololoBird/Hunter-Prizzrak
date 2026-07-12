@@ -28,6 +28,16 @@ from hunt_core.runtime.heartbeat import beat as _wd_beat
 
 LOG = logging.getLogger("hunt_core.market.ccxt_rest")
 
+
+class RestBanSkip(RuntimeError):
+    """Raised INSTEAD of performing a REST call while a 418 IP ban is active.
+
+    The request never leaves the client, so Binance cannot extend the ban (re-calling during
+    a 418 pushes it 2 min → 3 days). It is a **skip**, not a fetch failure: callers fall back
+    to cached/WS data. Subclasses ``RuntimeError`` so it is caught by the project's defensive
+    handlers (``DEFENSIVE_EXC``) everywhere and degrades to ``None`` — never an uncaught crash.
+    """
+
 # ── Process-global shared budgets ────────────────────────────────────────────
 # Binance limits are per-IP. Every HuntCcxtClient (scanner, pinned analyst,
 # /signal probe) egresses through the SAME IP, so they MUST pace against ONE set
@@ -122,6 +132,12 @@ class HuntCcxtRestGate:
         remaining = self.guard.remaining_pause_s()
         if remaining <= 0:
             return 0.0
+        # 418 IP ban: skip the call outright. Sleeping the 120s cap and then hitting Binance
+        # anyway (the old behavior) both stacked ~120s per call into a tick > watchdog AND
+        # re-hammered the banned endpoint, extending the ban. A short 429 falls through to the
+        # bounded sleep below and proceeds once it clears.
+        if self.guard.is_ip_banned():
+            raise RestBanSkip(f"ip_ban active, remaining_s={remaining:.0f}")
         sleep_s = min(remaining, cap_s)
         LOG.info(
             "hunt_ccxt_rate_pause | remaining_s=%.0f sleep_s=%.0f",
