@@ -180,6 +180,8 @@ class HuntCcxtStreams:
     _stop: asyncio.Event = field(default_factory=asyncio.Event)
     _connected: bool = False
     _symbols_dirty: bool = False
+    _ccxt_symbols_cache: list[str] = field(default_factory=list)
+    _ccxt_symbols_cache_dirty: bool = field(default=True)
     _kline_closed_open_ms: dict[str, int] = field(default_factory=dict)
     _kline_waiting: dict[str, _ClosedKlineBar] = field(default_factory=dict)
     _kline_ready: dict[str, _ClosedKlineBar] = field(default_factory=dict)
@@ -286,6 +288,7 @@ class HuntCcxtStreams:
         if new_set != self._symbols:
             self._symbols = new_set
             self._symbols_dirty = True
+            self._ccxt_symbols_cache_dirty = True
 
     @staticmethod
     def _ws_has(ex: Any, method: str) -> bool:
@@ -796,7 +799,8 @@ class HuntCcxtStreams:
         self._last_msg_ms = int(time.time() * 1000)
 
     def _record_liquidation(self, item: dict[str, Any], *, exchange: Any, venue: str = "binance") -> None:
-        info = item.get("info") if isinstance(item.get("info"), dict) else item
+        _raw_info = item.get("info")
+        info: dict[str, Any] = _raw_info if isinstance(_raw_info, dict) else {}
         sym = self._ws_binance_id(exchange, str(item.get("symbol") or info.get("s") or ""))
         side = str(item.get("side") or info.get("S") or "").upper()
         qty = float(item.get("amount") or info.get("q") or 0)
@@ -820,7 +824,8 @@ class HuntCcxtStreams:
                 LOG.debug("liquidation_map_store_error | sym=%s venue=%s error=%s", sym, venue, map_exc)
 
     def _record_trade(self, sym: str, trade: dict[str, Any]) -> None:
-        info = trade.get("info") if isinstance(trade.get("info"), dict) else trade
+        _raw_info = trade.get("info")
+        info: dict[str, Any] = _raw_info if isinstance(_raw_info, dict) else {}
         qty_full = float(trade.get("amount") or info.get("q") or 0)
         nq_raw = info.get("nq")
         qty_nq = float(nq_raw) if nq_raw is not None else qty_full
@@ -1044,7 +1049,8 @@ class HuntCcxtStreams:
                     mark = float(item.get("markPrice") or 0)
                     index = float(item.get("indexPrice") or 0)
                     funding = float(item.get("fundingRate") or 0)
-                    info = item.get("info") if isinstance(item.get("info"), dict) else {}
+                    _info = item.get("info")
+                    info: dict[str, Any] = _info if isinstance(_info, dict) else {}
                     ap_raw = info.get("ap")
                     ap = float(ap_raw) if ap_raw is not None else 0.0
                     if mark > 0:
@@ -1066,8 +1072,12 @@ class HuntCcxtStreams:
                 await self._on_ws_loop_error("mark", exc)
 
     def _ccxt_symbols(self) -> list[str]:
+        if not self._ccxt_symbols_cache_dirty and self._ccxt_symbols_cache:
+            return self._ccxt_symbols_cache
         ex = self._ws_ex()
-        return [to_ccxt_symbol(s, exchange=ex) for s in sorted(self._symbols)]
+        self._ccxt_symbols_cache = [to_ccxt_symbol(s, exchange=ex) for s in sorted(self._symbols)]
+        self._ccxt_symbols_cache_dirty = False
+        return self._ccxt_symbols_cache
 
     async def _watch_trades_mux(self) -> None:
         """Single multiplexed trades stream for all symbols via watch_trades_for_symbols."""
@@ -1336,7 +1346,7 @@ class HuntCcxtStreams:
     async def _watch_bids_asks_mux(self) -> None:
         """BBO spread via watch_bids_asks (lighter than full watch_tickers)."""
         ex = self._ws_ex()
-        if not getattr(ex, "has", {}).get("watchBidsAsks"):
+        if not self._ws_has(ex, "watchBidsAsks"):
             return
         while not self._stop.is_set():
             syms = self._ccxt_symbols()

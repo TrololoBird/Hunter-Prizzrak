@@ -177,14 +177,17 @@ def calibrate_from_cross_section(
         snap.params = HuntCalibratedParams(source="insufficient_liquid_sample")
         return snap
 
-    median_chg = float(pl.Series(chgs).median() or 0.0)
+    _m = pl.Series(chgs).median()
+    median_chg = float(_m) if isinstance(_m, (int, float)) else 0.0
     p75_chg = _pctile(chgs, 75)
     p90_chg = _pctile(chgs, 90)
-    median_range = float(pl.Series(ranges).median() or 0.0) if ranges else median_chg * 1.4
+    _mr = pl.Series(ranges).median() if ranges else None
+    median_range = float(_mr) if isinstance(_mr, (int, float)) else median_chg * 1.4
     p75_range = _pctile(ranges, 75) if ranges else median_range * 1.3
     pct_hot = float((pl.Series(chgs) >= 8.0).sum()) / n_liq * 100.0
     pct_up = up / n_liq * 100.0
-    median_qvol = float(pl.Series(qvols).median() or 0.0)
+    _mq = pl.Series(qvols).median()
+    median_qvol = float(_mq) if isinstance(_mq, (int, float)) else 0.0
     p40_qvol = _pctile(qvols, 40)
 
     regime = _classify_regime(median_chg=median_chg, p90_chg=p90_chg, pct_hot=pct_hot)
@@ -276,20 +279,21 @@ def load_regime_file(path: Any = MARKET_REGIME) -> MarketRegimeSnapshot | None:
     if not isinstance(raw, dict):
         return None
     p = raw.get("params") if isinstance(raw.get("params"), dict) else {}
+    _p = p or {}
     params = HuntCalibratedParams(
-        anomaly_min_chg_24h_pct=float(p.get("anomaly_min_chg_24h_pct", 8.0)),
-        anomaly_min_range_24h_pct=float(p.get("anomaly_min_range_24h_pct", 15.0)),
-        ignition_min_pct=float(p.get("ignition_min_pct", 2.5)),
-        ignition_min_qvol_usd=float(p.get("ignition_min_qvol_usd", 3_000_000)),
-        forming_min_score=float(p.get("forming_min_score", 45.0)),
-        confirm_min_score=float(p.get("confirm_min_score", 60.0)),
-        confirm_min_score_no_div=float(p.get("confirm_min_score_no_div", 68.0)),
-        adx_trend_block=float(p.get("adx_trend_block", 40.0)),
-        min_risk_reward=float(p.get("min_risk_reward", 1.0)),
-        pinned_min_risk_reward=float(p.get("pinned_min_risk_reward", 0.8)),
-        tp2_min_room_pct=float(p.get("tp2_min_room_pct", 6.0)),
-        source=str(p.get("source") or "file"),
-        regime=p.get("regime", "normal"),  # type: ignore[arg-type]
+        anomaly_min_chg_24h_pct=float(_p.get("anomaly_min_chg_24h_pct", 8.0)),
+        anomaly_min_range_24h_pct=float(_p.get("anomaly_min_range_24h_pct", 15.0)),
+        ignition_min_pct=float(_p.get("ignition_min_pct", 2.5)),
+        ignition_min_qvol_usd=float(_p.get("ignition_min_qvol_usd", 3_000_000)),
+        forming_min_score=float(_p.get("forming_min_score", 45.0)),
+        confirm_min_score=float(_p.get("confirm_min_score", 60.0)),
+        confirm_min_score_no_div=float(_p.get("confirm_min_score_no_div", 68.0)),
+        adx_trend_block=float(_p.get("adx_trend_block", 40.0)),
+        min_risk_reward=float(_p.get("min_risk_reward", 1.0)),
+        pinned_min_risk_reward=float(_p.get("pinned_min_risk_reward", 0.8)),
+        tp2_min_room_pct=float(_p.get("tp2_min_room_pct", 6.0)),
+        source=str(_p.get("source") or "file"),
+        regime=_p.get("regime", "normal"),
     )
     return MarketRegimeSnapshot(
         computed_at=str(raw.get("computed_at") or ""),

@@ -11,6 +11,10 @@ from hunt_core.data.universe import PINNED_SYMBOLS, save_pinned_cache
 from hunt_core.market import HuntCcxtClient
 from hunt_core.paths import ANALYST_TICKS_JSONL
 from hunt_core.data.tick_jsonl import serialize_tick_row
+from hunt_core.prizrak.engines.config import load_analyst_config
+from hunt_core.prizrak.engines.delivery_policy import pick_hero_row
+from hunt_core.prizrak.engines.signal_queue import load_signal_queue
+from hunt_core.runtime.emitter import SignalEmitter
 
 LOG = structlog.get_logger("hunt.analyst_assembly")
 
@@ -53,8 +57,10 @@ def material_deep_change(
     _ = symbol
     if prev is None:
         return True
-    prev_summary = prev.get("prizrak_summary") if isinstance(prev.get("prizrak_summary"), dict) else {}
-    summary = row.get("prizrak_summary") if isinstance(row.get("prizrak_summary"), dict) else {}
+    _p = prev.get("prizrak_summary")
+    prev_summary = _p if isinstance(_p, dict) else {}
+    _s = row.get("prizrak_summary")
+    summary = _s if isinstance(_s, dict) else {}
     if str(prev_summary.get("action") or "wait") != str(summary.get("action") or "wait"):
         return True
     if str(prev_summary.get("path") or "") != str(summary.get("path") or ""):
@@ -78,6 +84,7 @@ async def assemble_analyst_tick(
     *,
     stagger_ms: int = 200,
     ws_feed: Any | None = None,
+    allow_low_liquidity: bool = False,
 ) -> dict[str, Any]:
     """Full deep snapshot — no hunt fusion, structure-first enrichments."""
     import asyncio
@@ -149,6 +156,7 @@ async def assemble_analyst_tick(
             stagger_klines_ms=stagger_ms,
             tier="full",
             hunt_fusion=False,
+            allow_low_liquidity=allow_low_liquidity,
         )
     finally:
         if old_full is None:
@@ -236,8 +244,10 @@ async def assemble_analyst_tick(
     now = datetime.now(UTC)
     row["as_of"] = now.isoformat()
     dom_ts = None
-    cx = row.get("cross_microstructure") if isinstance(row.get("cross_microstructure"), dict) else {}
-    walls = cx.get("book_walls") if isinstance(cx.get("book_walls"), dict) else row.get("book_walls")
+    _cx = row.get("cross_microstructure")
+    cx = _cx if isinstance(_cx, dict) else {}
+    _book = cx.get("book_walls")
+    walls = _book if isinstance(_book, dict) else row.get("book_walls")
     if isinstance(walls, dict) and walls.get("fetched_at"):
         dom_ts = walls.get("fetched_at")
     row_ts = row.get("ts")
@@ -330,7 +340,8 @@ async def send_analyst_change_telegram(
     sym = str(row.get("symbol") or "").upper()
     if row.get("error"):
         return False
-    summary = row.get("prizrak_summary") if isinstance(row.get("prizrak_summary"), dict) else {}
+    _summ = row.get("prizrak_summary")
+    summary = _summ if isinstance(_summ, dict) else {}
     action = str(summary.get("action") or "wait").lower()
     if action not in {"long", "short"}:
         LOG.info("analyst_pinned_tg_skipped_wait", symbol=sym, action=action)
@@ -345,7 +356,8 @@ async def send_analyst_change_telegram(
     blocks: list[str] = []
     if lifecycle_event == "activated":
         sym_label = str(row.get("symbol") or "").upper().replace("USDT", "-USDT")
-        summary = row.get("prizrak_summary") if isinstance(row.get("prizrak_summary"), dict) else {}
+        _summ2 = row.get("prizrak_summary")
+        summary = _summ2 if isinstance(_summ2, dict) else {}
         rr = summary.get("rr_primary")
         rr_label = summary.get("rr_base_label") or "R:R (от входа)"
         blocks.append(
@@ -397,7 +409,8 @@ def _prizrak_row_variants(row: dict[str, Any]) -> list[tuple[dict[str, Any], str
     """
     sigs = row.get("prizrak_signals")
     if not isinstance(sigs, list) or len(sigs) <= 1:
-        summary = row.get("prizrak_summary") if isinstance(row.get("prizrak_summary"), dict) else {}
+        _summ3 = row.get("prizrak_summary")
+        summary = _summ3 if isinstance(_summ3, dict) else {}
         return [(row, str(summary.get("setup_kind") or "deep"))]
     best_by_kind: dict[str, dict[str, Any]] = {}
     for c in sigs:
@@ -431,14 +444,9 @@ async def analyst_pinned_loop(
     interval = interval_s if interval_s is not None else analyst_pinned_interval_s()
     LOG.info("analyst_pinned_loop_start", symbols=list(PINNED_SYMBOLS), interval_s=interval)
     while not should_stop():
-        from hunt_core.prizrak.engines.config import load_analyst_config
-        from hunt_core.prizrak.engines.delivery_policy import pick_hero_row
-        from hunt_core.prizrak.engines.signal_queue import load_signal_queue
-        from hunt_core.runtime.emitter import SignalEmitter
-
         v2cfg = load_analyst_config()
         emitter = SignalEmitter()
-        lifecycle_candidates: list[dict[str, Any]] = []
+        lifecycle_candidates: list[tuple[dict[str, Any], Any, str]] = []
         for sym in PINNED_SYMBOLS:
             if should_stop():
                 break

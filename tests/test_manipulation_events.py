@@ -85,10 +85,23 @@ def test_bullish_volume_above_threshold():
     df = ohlcv_to_df(rows)
     assert bullish_volume(df) is False  # flat volume, no spike
 
-    # Last bar: volume spike 3x vs steady 10.0
-    rows[-1][5] = 50.0
+    # Last bar: volume spike 3x vs steady 10.0, closing UP -> bullish volume.
+    # [ts, open, high, low, close, volume]
+    rows[-1] = [rows[-1][0], 100.0, 105.0, 99.5, 104.0, 50.0]
     df = ohlcv_to_df(rows)
     assert bullish_volume(df) is True
+
+
+def test_bullish_volume_rejects_spike_on_a_down_bar():
+    """A volume spike on a RED bar is distribution, not «бычьи объёмы».
+
+    In a post-pump window the highest-volume bar is the candle that absorbed the
+    pump; a direction-blind z-score reported it as bullish confirmation.
+    """
+    rows = _flat(25, price=100.0)
+    rows[-1] = [rows[-1][0], 100.0, 100.5, 95.0, 96.0, 50.0]  # red dump bar, huge volume
+    df = ohlcv_to_df(rows)
+    assert bullish_volume(df) is False
 
 
 def test_bullish_volume_below_threshold():

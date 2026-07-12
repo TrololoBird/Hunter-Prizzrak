@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import threading
+from typing import Any
 
 import polars as pl
 
@@ -113,7 +114,7 @@ def _swing_points(
     )
 
 
-def as_float(value: object, default: float = 0.0) -> float:
+def as_float(value: Any, default: float = 0.0) -> float:
     try:
         numeric = float(value) if value is not None else default
     except (TypeError, ValueError):
@@ -229,6 +230,7 @@ def with_spec_columns(frame: pl.DataFrame) -> pl.DataFrame:
             pl.col("atr14").cast(pl.Float64, strict=False).alias("spec_atr14")
         )
     else:
+        assert tr_series is not None
         spec_atr14_value = wilder_mean(tr_series, period=14, name="spec_atr14")
 
     if "atr20" in work.columns:
@@ -236,6 +238,7 @@ def with_spec_columns(frame: pl.DataFrame) -> pl.DataFrame:
             pl.col("atr20").cast(pl.Float64, strict=False).alias("spec_atr20")
         )
     else:
+        assert tr_series is not None
         spec_atr20_value = wilder_mean(tr_series, period=20, name="spec_atr20")
 
     pass1: list[pl.Expr | pl.Series] = [

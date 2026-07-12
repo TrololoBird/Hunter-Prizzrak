@@ -52,11 +52,16 @@ class AnalystReport:
         ps = self.row.get("prizrak_structure")
         if not isinstance(ps, dict) or not ps:
             return ""
-        struct_by_tier = ps.get("struct_by_tier") if isinstance(ps.get("struct_by_tier"), dict) else {}
-        struct_by_tf = ps.get("struct_by_tf") if isinstance(ps.get("struct_by_tf"), dict) else {}
-        htf = ps.get("htf_bias") if isinstance(ps.get("htf_bias"), dict) else {}
-        tier_trends = ps.get("tier_trends") if isinstance(ps.get("tier_trends"), dict) else {}
-        tf_trends = ps.get("tf_trends") if isinstance(ps.get("tf_trends"), dict) else {}
+        _raw_sbt = ps.get("struct_by_tier")
+        struct_by_tier = _raw_sbt if isinstance(_raw_sbt, dict) else {}
+        _raw_sbtf = ps.get("struct_by_tf")
+        struct_by_tf = _raw_sbtf if isinstance(_raw_sbtf, dict) else {}
+        _raw_htf = ps.get("htf_bias")
+        htf = _raw_htf if isinstance(_raw_htf, dict) else {}
+        _raw_tt = ps.get("tier_trends")
+        tier_trends = _raw_tt if isinstance(_raw_tt, dict) else {}
+        _raw_tft = ps.get("tf_trends")
+        tf_trends = _raw_tft if isinstance(_raw_tft, dict) else {}
 
         _TREND_RU = {"bull": "вверх", "bear": "вниз", "neutral": "боковик"}
         _BIAS_RU = {"long": "ЛОНГ", "short": "ШОРТ", "neutral": "нейтр", "unknown": "нет данных"}
@@ -70,7 +75,8 @@ class AnalystReport:
         # Per-TF breakdown (1w, 1d, 4h, 1h) from explicit prizrak structure.
         for tf_key in ("1w", "1d", "4h", "1h"):
             trend = str(tf_trends.get(tf_key) or "neutral")
-            s = struct_by_tf.get(tf_key) if isinstance(struct_by_tf.get(tf_key), dict) else {}
+            _raw_s = struct_by_tf.get(tf_key)
+            s = _raw_s if isinstance(_raw_s, dict) else {}
             slom_bits = []
             if s.get("bos_up"):
                 slom_bits.append("BOS↑")
@@ -85,7 +91,8 @@ class AnalystReport:
 
         # Legacy intraday tier (5m/15m) — not in the explicit per-TF set.
         intra_trend = str(tier_trends.get("intraday") or "neutral")
-        intra_s = struct_by_tier.get("intraday") if isinstance(struct_by_tier.get("intraday"), dict) else {}
+        _raw_intra_s = struct_by_tier.get("intraday")
+        intra_s = _raw_intra_s if isinstance(_raw_intra_s, dict) else {}
         intra_slom = []
         if intra_s.get("bos_up"):
             intra_slom.append("BOS↑")
@@ -159,6 +166,8 @@ class AnalystReport:
         "level_core": "уровень",
         "level_intraday_scalp": "внутридневной скальп",
         "zone_target_forward": "цель впереди (отложенная)",
+        "zone_target_deep": "глубокая зона (отложенная)",
+        "trap_flip": "ловушка/пробой (флип уровня)",
         "pp_break": "перелом ПП",
     }
     _TIER_TF_RU = {"intraday": "внутри дня", "meso": "первый трейд", "macro": "второй трейд"}
@@ -197,6 +206,12 @@ class AnalystReport:
         if action_raw in {"LONG", "SHORT"} and entry_lo is not None and entry_hi is not None:
             order_label = self._ORDER_LABEL.get(activation, "📍 Лимитный ордер")
             lines.append(f"{order_label}: <code>{fmt_price(float(entry_lo))}–{fmt_price(float(entry_hi))}</code>")
+            # Course стр.30: multi-order entry plan on a big base (зона + ПОК); a single
+            # order on a small one. Only show it when it's actually a 2-3 order split.
+            entry_orders = summary.get("entry_orders")
+            if isinstance(entry_orders, list) and len(entry_orders) >= 2:
+                orders_str = " · ".join(fmt_price(float(o)) for o in entry_orders)
+                lines.append(f"↳ Ордера (зона+ПОК): <code>{orders_str}</code>")
             if stop is not None:
                 lines.append(f"🛑 Стоп: <code>{fmt_price(float(stop))}</code>")
 
@@ -222,6 +237,12 @@ class AnalystReport:
             rr = summary.get("rr_primary")
             if rr is not None:
                 lines.append(f"R:R ≈ <code>{float(rr):.2f}</code> · <i>стоп за структуру, тейки — следующие реальные зоны впереди</i>")
+
+            # Course стр.19/16/10-11: manual position-management plan (take 50%, BU, re-add).
+            plan = summary.get("management_plan")
+            if isinstance(plan, list) and plan:
+                lines.append("<i>Управление:</i>")
+                lines.extend(f"<i>• {html.escape(str(step))}</i>" for step in plan)
 
         if summary.get("gates_failed"):
             gates = ", ".join(str(g) for g in summary["gates_failed"])
@@ -346,7 +367,8 @@ def build_analyst_report_from_row(
         "structural_up": up_fc,
         "structural_down": down_fc,
     }
-    fusion = work.get("manipulation_fusion") if isinstance(work.get("manipulation_fusion"), dict) else {}
+    _raw_fusion = work.get("manipulation_fusion")
+    fusion = _raw_fusion if isinstance(_raw_fusion, dict) else {}
 
     wd = would_deliver
     if wd is None and include_watch_appendix:

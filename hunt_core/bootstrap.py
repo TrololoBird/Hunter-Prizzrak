@@ -11,7 +11,7 @@ _FEATURE_STACK: tuple[str, ...] = (
     "polars_ta",
     "polars_ols",
     "polars_ds",
-    "polars_trading",
+    # polars-trading is optional (fallbacks in research_plugins.py)
 )
 
 
@@ -28,7 +28,7 @@ def _patch_aiohttp_resolver() -> None:
 
         if aiohttp.resolver.DefaultResolver is aiohttp.resolver.AsyncResolver:
             aiohttp.resolver.DefaultResolver = aiohttp.resolver.ThreadedResolver
-            aiohttp.resolver.AsyncResolver = aiohttp.resolver.ThreadedResolver
+            setattr(aiohttp.resolver, "AsyncResolver", aiohttp.resolver.ThreadedResolver)
     except (ImportError, AttributeError):
         pass
 
@@ -41,7 +41,21 @@ def bootstrap() -> Path:
             sys.path.insert(0, p)
     os.environ.setdefault("POLARS_STREAMING", "1")
     _patch_aiohttp_resolver()
+    _init_telemetry()
     return repo
+
+
+def _init_telemetry() -> None:
+    """Initialise opt-in OpenTelemetry tracing (no-op unless ``HUNT_OTEL`` is set).
+
+    Kept defensive: telemetry must never be able to break process startup.
+    """
+    try:
+        from hunt_core.runtime.telemetry import init_telemetry
+
+        init_telemetry("hunt_core")
+    except Exception:
+        pass
 
 
 def require_feature_stack() -> None:

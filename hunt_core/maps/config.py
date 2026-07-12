@@ -6,6 +6,9 @@ import os
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+_DEFAULT_LEVERAGE_WEIGHTS: tuple[float, ...] = (0.35, 0.30, 0.20, 0.10, 0.05)
+_DEFAULT_VP_PERIODS: tuple[str, ...] = ("1h", "4h", "1d", "1w")
+
 
 @dataclass(frozen=True, slots=True)
 class MapsConfig:
@@ -23,8 +26,8 @@ class MapsConfig:
     void_depth_pctile: float = 10.0
     forward_blend_ratio: float = 0.35
     forward_confidence_min: float = 0.25
-    leverage_weights: tuple[float, ...] = (0.35, 0.30, 0.20, 0.10, 0.05)
-    vp_periods: tuple[str, ...] = ("1h", "4h", "1d", "1w")
+    leverage_weights: tuple[float, ...] = _DEFAULT_LEVERAGE_WEIGHTS
+    vp_periods: tuple[str, ...] = _DEFAULT_VP_PERIODS
     # 24→60: display "Карта уровней" POC/VAH/VAL at trader-grade resolution (see prizrak
     # config vp_buckets note — 24 buckets is ~$150/bucket on BTC, too coarse to be useful).
     vp_buckets: int = 60
@@ -34,14 +37,14 @@ class MapsConfig:
     def from_defaults(cls, raw: Mapping[str, Any] | None = None) -> MapsConfig:
         section = dict(raw or {})
         lev_raw = section.get("leverage_weights")
-        lev: tuple[float, ...] = cls.leverage_weights
+        lev: tuple[float, ...] = _DEFAULT_LEVERAGE_WEIGHTS
         if isinstance(lev_raw, (list, tuple)):
             try:
                 lev = tuple(float(x) for x in lev_raw)
             except (TypeError, ValueError):
                 pass
         periods_raw = section.get("vp_periods")
-        periods: tuple[str, ...] = cls.vp_periods
+        periods: tuple[str, ...] = _DEFAULT_VP_PERIODS
         if isinstance(periods_raw, (list, tuple)):
             periods = tuple(str(x) for x in periods_raw if str(x).strip())
         return cls(
@@ -113,10 +116,12 @@ def _env_int(name: str, default: object) -> int:
             return int(raw)
         except ValueError:
             pass
-    try:
-        return int(default)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return 0
+    if isinstance(default, (int, float, str, bytes)):
+        try:
+            return int(default)
+        except (TypeError, ValueError):
+            pass
+    return 0
 
 
 def _env_float(name: str, default: object) -> float:

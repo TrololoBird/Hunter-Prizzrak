@@ -1,6 +1,7 @@
 """Watch tick Telegram / digest line formatters (cycle split)."""
 from __future__ import annotations
 
+import html
 from typing import Any
 
 def _fmt_price(value: float | None) -> str:
@@ -217,36 +218,34 @@ def _pct_str(a: float, b: float, direction: str) -> str:
     return pct_str(a, b, direction)
 
 
+_TRIGGER_LABELS: dict[tuple[str, ...], str] = {
+    ("volume", "vol"): "аномальный объём",
+    ("support", "break"): "пробой поддержки",
+    ("resistance",): "пробой сопротивления",
+    ("cascade", "liq"): "каскад ликвидаций",
+    ("rejection",): "отбой от уровня",
+    ("rsi", "div"): "RSI-дивергенция",
+    ("funding",): "перегрев фандинга",
+    ("oi",): "аномалия OI",
+    ("whale",): "крупный продавец",
+}
+
+
+def _classify_trigger(ts: str) -> str:
+    for keywords, label in _TRIGGER_LABELS.items():
+        if any(kw in ts for kw in keywords):
+            return label
+    return ts.replace("_", " ").split(":")[0]
+
+
 def _reason_human(setup: dict[str, Any], *, direction: str, lc_phase: str) -> str:
     """Build human-readable reason line from phase + triggers + fuel."""
     phase_txt = _phase_human(lc_phase) if lc_phase and lc_phase != "—" else _phase_human(
         str(setup.get("phase") or "")
     )
     triggers = setup.get("triggers") or []
-    trig_short: list[str] = []
-    for t in triggers[:3]:
-        ts = str(t)
-        if "volume" in ts or "vol" in ts:
-            trig_short.append("аномальный объём")
-        elif "support" in ts or "break" in ts:
-            trig_short.append("пробой поддержки")
-        elif "resistance" in ts:
-            trig_short.append("пробой сопротивления")
-        elif "cascade" in ts or "liq" in ts:
-            trig_short.append("каскад ликвидаций")
-        elif "rejection" in ts:
-            trig_short.append("отбой от уровня")
-        elif "rsi" in ts or "div" in ts:
-            trig_short.append("RSI-дивергенция")
-        elif "funding" in ts:
-            trig_short.append("перегрев фандинга")
-        elif "oi" in ts:
-            trig_short.append("аномалия OI")
-        elif "whale" in ts:
-            trig_short.append("крупный продавец")
-        else:
-            trig_short.append(ts.replace("_", " ").split(":")[0])
-    trig_txt = ", ".join(dict.fromkeys(trig_short))  # deduplicate, keep order
+    trig_short = [_classify_trigger(str(t)) for t in triggers[:3]]
+    trig_txt = ", ".join(dict.fromkeys(trig_short))
     if phase_txt and trig_txt:
         return f"{phase_txt} · {trig_txt}"
     return phase_txt or trig_txt or "—"

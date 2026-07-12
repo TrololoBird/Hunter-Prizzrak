@@ -27,7 +27,14 @@ BINANCE_FAPI_DATA_LIMIT_5M = 1000
 # /futures/data/* call now routes through invoke_fapi -> fapi_budget.acquire, so
 # this pace is the single enforced cap for that endpoint class. Tune down via
 # HUNT_BINANCE_FAPI_PACE if 418s recur under multi-process load.
-BINANCE_FAPI_DATA_PACE_5M = int(os.getenv("HUNT_BINANCE_FAPI_PACE", "850") or 850)
+#
+# 2026-07-11: lowered 850→450 default. The egress IP is a rotating private-NAT pool
+# (banned IPs 10.119.64.84 then 10.119.59.87), and a fresh IP's WAF is strict — the
+# cold-start futures-data burst (basis+OI+mark+index+funding across the whole universe)
+# tripped repeated 418 -1003 bans within minutes of restart. 450/300s ≈ 1.5 req/s halves
+# the cold-start rate; steady-state refresh volume (OI 600s / funding 300s / basis 7200s
+# TTLs over ~30 symbols) stays comfortably within it. Raise via HUNT_BINANCE_FAPI_PACE.
+BINANCE_FAPI_DATA_PACE_5M = int(os.getenv("HUNT_BINANCE_FAPI_PACE", "450") or 450)
 
 # Conservative per-symbol estimates (first tick / cold cache).
 EST_BATCH_OVERHEAD_WEIGHT = 65  # ticker_24h + premium + funding batch

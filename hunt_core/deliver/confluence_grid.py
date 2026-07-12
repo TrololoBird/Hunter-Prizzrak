@@ -40,10 +40,13 @@ def build_confluence_grid(row: dict[str, Any]) -> list[dict[str, Any]]:
         grid.append(entry)
 
     # --- Prizrak structural levels per-TF (4h, 1w, plus 1h/1d fallback) ---
-    ps = row.get("prizrak_structure") if isinstance(row.get("prizrak_structure"), dict) else {}
-    struct_by_tf = ps.get("struct_by_tf") if isinstance(ps.get("struct_by_tf"), dict) else {}
+    _ps = row.get("prizrak_structure")
+    ps: dict[str, Any] = _ps if isinstance(_ps, dict) else {}
+    _sbt = ps.get("struct_by_tf") if isinstance(ps, dict) else None
+    struct_by_tf: dict[str, Any] = _sbt if isinstance(_sbt, dict) else {}
     for tf_name in ("1w", "1d", "4h", "1h"):
-        s = struct_by_tf.get(tf_name) if isinstance(struct_by_tf.get(tf_name), dict) else {}
+        _s3 = struct_by_tf.get(tf_name)
+        s = _s3 if isinstance(_s3, dict) else {}
         if not s:
             continue
         kl = s.get("key_levels") or {}

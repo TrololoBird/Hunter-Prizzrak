@@ -9,7 +9,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+import logging
+
 from typing import Any, Literal
+
+LOG = logging.getLogger(__name__)
 
 # Scalar fallback for dead-code path — avoids importing runtime.state.
 _symbol_regime_local: dict[str, Any] = {}
@@ -69,6 +73,7 @@ def _f(value: Any, default: float = 0.0) -> float:
         v = float(value)
         return v if v == v else default
     except (TypeError, ValueError):
+        LOG.debug("_f float conversion failed value=%r", value, exc_info=True)
         return default
 
 
@@ -197,6 +202,7 @@ def _apply_transition(
     try:
         prev = Regime(latch.regime)
     except ValueError:
+        LOG.debug("_apply_transition invalid regime value=%r", latch.regime, exc_info=True)
         prev = Regime.RANGE
 
     if raw == prev:
@@ -233,8 +239,10 @@ def classify_regime(
     state: Any | None = None,
 ) -> RegimeResult:
     """Classify symbol regime with hysteresis stored in ``SymbolStateStore``."""
-    tf = prepared.get("timeframes") if isinstance(prepared.get("timeframes"), dict) else {}
-    session = prepared.get("session") if isinstance(prepared.get("session"), dict) else {}
+    _tf = prepared.get("timeframes")
+    tf: dict[str, Any] = _tf if isinstance(_tf, dict) else {}
+    _session = prepared.get("session")
+    session: dict[str, Any] = _session if isinstance(_session, dict) else {}
     mkt = market if isinstance(market, dict) else {}
 
     raw, confidence, reasons = _raw_regime_vote(
@@ -249,6 +257,7 @@ def classify_regime(
     try:
         previous = Regime(latch.regime) if isinstance(latch, _RegimeLatch) else None
     except (ValueError, AttributeError):
+        LOG.debug("classify_regime invalid previous regime value=%r", getattr(latch, "regime", None), exc_info=True)
         previous = None
 
     regime, transitioned = _apply_transition(sym, raw, state=store)
@@ -269,6 +278,7 @@ def regime_conflicts_direction(regime: Regime | str, direction: Direction) -> bo
     try:
         label = regime if isinstance(regime, Regime) else Regime(str(regime))
     except ValueError:
+        LOG.debug("regime_conflicts_direction invalid regime value=%r", regime, exc_info=True)
         return False
     d = direction.lower()
     if d == "short" and label in {Regime.TREND_UP, Regime.CAPITULATION}:

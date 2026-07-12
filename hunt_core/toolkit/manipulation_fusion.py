@@ -4,7 +4,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+import logging
+
 from hunt_core.maps.oi import OiRegime, oi_regime_from_row
+
+LOG = logging.getLogger(__name__)
 
 Archetype = Literal["predump_short", "prepump_long", "ignition_long", "none"]
 
@@ -66,6 +70,7 @@ def _f(row: dict[str, Any], *keys: str, default: float = 0.0) -> float:
             try:
                 return float(block[key])
             except (TypeError, ValueError):
+                LOG.debug("_f float conversion failed key=%s", key, exc_info=True)
                 continue
     return default
 
@@ -141,6 +146,7 @@ def _coil_prebreak_checks(row: dict[str, Any], market: dict[str, Any], price: fl
             distance = abs(price - vah_f) / vah_f
             price_near = distance < 0.02 and price < vah_f * 1.005
         except (TypeError, ValueError):
+            LOG.debug("vah_f float conversion failed in _coil_prebreak_checks", exc_info=True)
             pass
     vol_ratio = r5.get("vol_ratio")
     if vol_ratio is not None:
@@ -148,6 +154,7 @@ def _coil_prebreak_checks(row: dict[str, Any], market: dict[str, Any], price: fl
             # Volume drying up near VAH (<0.7× median = coil energy, not breakout)
             vol_dry = float(vol_ratio) < 0.7 and float(vol_ratio) > 0
         except (TypeError, ValueError):
+            LOG.debug("vol_ratio float conversion failed in _coil_prebreak_checks", exc_info=True)
             pass
     bid_abs = _bool_market(row, "map_accum_bid_absorption")
     return price_near, vol_dry, bid_abs
@@ -190,6 +197,7 @@ def evaluate_manipulation_fusion(row: dict[str, Any]) -> ManipulationAssessment:
         try:
             above_vah = price > float(vah)
         except (TypeError, ValueError):
+            LOG.debug("vah float conversion failed in evaluate_manipulation_fusion", exc_info=True)
             pass
     near_top = pos >= 0.85 or above_vah
     if _apply_check(checks, check_sources, "pos_near_high", near_top, "vp_range"):
@@ -269,6 +277,7 @@ def evaluate_manipulation_fusion(row: dict[str, Any]) -> ManipulationAssessment:
             sl = float(short_liq)
             liq_above = sl > price
         except (TypeError, ValueError):
+            LOG.debug("short_liq float conversion failed in evaluate_manipulation_fusion", exc_info=True)
             liq_above = False
     else:
         liq_above = False

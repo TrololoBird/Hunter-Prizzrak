@@ -60,10 +60,12 @@ def liquidity_skip_reason(
 
 def price_in_entry_zone(setup: dict[str, Any], *, price: float, direction: str = "", **_k: Any) -> bool:
     """True when live price is inside the setup's entry zone (geometry)."""
-    ez = setup.get("entry_zone")
+    ez = setup.get("entry_zone") or []
+    if not isinstance(ez, (list, tuple)) or len(ez) < 2:
+        return False
     try:
         lo, hi = float(ez[0]), float(ez[1])
-    except (TypeError, ValueError, IndexError):
+    except (TypeError, ValueError):
         return False
     if lo > hi:
         lo, hi = hi, lo
@@ -107,8 +109,8 @@ def run_gate_pipeline(*_a: Any, **_k: Any) -> GateResult:
     return GateResult(ok=True)
 
 
-def disabled_phase_pairs(*_a: Any, **_k: Any) -> frozenset[str]:
-    return frozenset()
+def disabled_phase_pairs(*_a: Any, **_k: Any) -> dict[tuple[str, str], Any]:
+    return {}
 
 
 # --- report helpers: surface the fusion gate reason -------------------------
@@ -134,12 +136,12 @@ def collect_report_blockers(setup: dict[str, Any] | None = None, **_k: Any) -> l
     return []
 
 
-def primary_block_for_report(setup: dict[str, Any] | None = None, **_k: Any) -> str | None:
+def primary_block_for_report(setup: dict[str, Any] | None = None, **_k: Any) -> GateResult | None:
     blockers = collect_report_blockers(setup)
-    return blockers[0].code if blockers else None
+    return blockers[0] if blockers else None
 
 
-def evaluate_stale_advice(*_a: Any, **_k: Any) -> None:
+def evaluate_stale_advice(*_a: Any, **_k: Any) -> str | None:
     return None
 
 

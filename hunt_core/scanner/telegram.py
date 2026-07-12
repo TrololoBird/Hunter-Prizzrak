@@ -109,7 +109,8 @@ def format_scanner_from_setup(symbol: str, setup: dict[str, Any], row: dict[str,
     direction = str(setup.get("direction") or setup.get("side") or "short")
     is_coil = phase == "coil" or "coil_bracket_armed" in reasons
     price = float(row.get("price") or 0)
-    m = row.get("market") if isinstance(row.get("market"), dict) else {}
+    m_raw = row.get("market")
+    m: dict[str, Any] = m_raw if isinstance(m_raw, dict) else {}
     ctx: list[str] = []
     if m.get("funding_rate") is not None:
         ctx.append(f"Фандинг: {float(m['funding_rate']):.4f}")

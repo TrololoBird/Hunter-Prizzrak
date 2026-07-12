@@ -122,8 +122,10 @@ def apply_cross_snapshot_to_market(
 ) -> None:
     """Promote merged REST+WS cross intel onto ``market`` (no null funding rates)."""
     merged = merge_ws_cross_into_snapshot(snap, ws_cross)
-    funding = sanitize_funding_map(merged.get("funding") if isinstance(merged.get("funding"), dict) else {})
-    oi_raw = merged.get("oi_usd") if isinstance(merged.get("oi_usd"), dict) else {}
+    _funding_raw = merged.get("funding")
+    funding = sanitize_funding_map(_funding_raw if isinstance(_funding_raw, dict) else {})
+    _oi_raw = merged.get("oi_usd")
+    oi_raw: dict[str, Any] = _oi_raw if isinstance(_oi_raw, dict) else {}
     oi_usd = {k: float(v) for k, v in oi_raw.items() if v is not None}
     secondary_funding = {k: v for k, v in funding.items() if k != "binance"}
     secondary_oi = dict(oi_usd)
@@ -388,6 +390,29 @@ async def fetch_exchange_order_book(
         return None
 
 
+def _reference_mid(snap: dict[str, Any] | None) -> float:
+    """Mid price of a venue snapshot, falling back to its best bid.
+
+    The depth-bin grid is centred on this, so a best-bid reference would offset
+    every bucket boundary by half a spread and push the bid bin adjacent to the
+    price across to the ask side.
+    """
+    if not isinstance(snap, dict):
+        return 0.0
+    bid = float(snap.get("bid_price") or 0.0)
+    asks = snap.get("asks") or []
+    ask = 0.0
+    if asks:
+        first = asks[0]
+        try:
+            ask = float(first.get("price", 0.0)) if isinstance(first, dict) else float(first[0])
+        except (TypeError, ValueError, IndexError, KeyError):
+            ask = 0.0
+    if bid > 0 and ask > bid:
+        return (bid + ask) / 2.0
+    return bid
+
+
 async def fetch_cross_exchange_book_walls(
     client: Any,
     symbol: str,
@@ -415,11 +440,15 @@ async def fetch_cross_exchange_book_walls(
     # whose snapshot is older than _CROSS_BOOK_STALE_MS behind the freshest one, rather
     # than blend stale depth into a live cross-book.
     excluded_stale: list[str] = []
-    stamped = {ex: s.get("fetched_at_ms") for ex, s in per_ex.items() if isinstance(s.get("fetched_at_ms"), (int, float))}
+    stamped: dict[str, float] = {}
+    for ex, s in per_ex.items():
+        ts = s.get("fetched_at_ms")
+        if isinstance(ts, (int, float)):
+            stamped[ex] = float(ts)
     if len(stamped) >= 2:
         newest = max(stamped.values())
         for ex, ts in stamped.items():
-            if newest - float(ts) > _CROSS_BOOK_STALE_MS:
+            if newest - ts > _CROSS_BOOK_STALE_MS:
                 excluded_stale.append(ex)
         for ex in excluded_stale:
             per_ex.pop(ex, None)
@@ -441,11 +470,11 @@ async def fetch_cross_exchange_book_walls(
         from hunt_core.maps.orderbook import merge_full_depth_bins
 
         maps_cfg = load_maps_config()
-        price = float(per_ex.get(_PRIMARY, {}).get("bid_price") or 0)
+        price = _reference_mid(per_ex.get(_PRIMARY))
         if price <= 0:
             for snap in per_ex.values():
-                if isinstance(snap, dict) and snap.get("bid_price"):
-                    price = float(snap["bid_price"])
+                price = _reference_mid(snap)
+                if price > 0:
                     break
         if price > 0:
             merged["depth_bins"] = merge_full_depth_bins(

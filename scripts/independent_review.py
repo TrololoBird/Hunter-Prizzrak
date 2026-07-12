@@ -143,15 +143,36 @@ def structural_check(rec):
 
 
 _EX = None
+_EX_MARKETS_LOADED = False
 
 
 def get_ex():
-    global _EX
+    global _EX, _EX_MARKETS_LOADED
     if _EX is None:
         import ccxt
 
-        _EX = ccxt.binanceusdm({"enableRateLimit": True, "timeout": 15000})
+        _EX = ccxt.binance(
+            {
+                "options": {"defaultType": "future"},
+                "enableRateLimit": True,
+                "timeout": 15_000,
+            }
+        )
+    if not _EX_MARKETS_LOADED:
+        _EX.load_markets()
+        _EX_MARKETS_LOADED = True
     return _EX
+
+
+def _resolve_ccxt_symbol(sym: str) -> str:
+    """Resolve Binance id (BTCUSDT) or partial (BTC/USDT) to CCXT futures unified symbol."""
+    raw = sym.strip().upper()
+    if not raw:
+        raise ValueError("empty symbol")
+    if "/" in raw:
+        raw = raw.replace("/USDT", "USDT").replace("/", "")
+    market = get_ex().market(raw)
+    return str(market.get("symbol") or raw)
 
 
 def market_check(rec):
@@ -160,8 +181,8 @@ def market_check(rec):
     price = None
     if not sym:
         return ["no_symbol"], None
-    ccxt_sym = sym.replace("USDT", "/USDT") if "/" not in sym else sym
     try:
+        ccxt_sym = _resolve_ccxt_symbol(sym)
         t = get_ex().fetch_ticker(ccxt_sym)
         price = t.get("last") or t.get("close")
     except Exception as e:

@@ -1,4 +1,4 @@
-"""Hunt package CLI — ``python -m hunt_core watch | proxy discover``."""
+"""Hunt package CLI — ``python -m hunt_core watch``."""
 from __future__ import annotations
 
 
@@ -18,18 +18,6 @@ def _cmd_watch(argv: list[str]) -> int:
     return 0
 
 
-def _cmd_proxy(argv: list[str]) -> int:
-    from hunt_core.bootstrap import bootstrap, require_feature_stack
-
-    bootstrap()
-    require_feature_stack()
-    from hunt_core._cli import main as _cli_main
-
-    sys.argv = ["hunt_core", "proxy", *argv]
-    _cli_main()
-    return 0
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="hunt_core", description="Crypto hunter runtime")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -39,10 +27,6 @@ def main(argv: list[str] | None = None) -> int:
     watch_p.add_argument("--interval", type=int, default=30)
     watch_p.add_argument("--once", action="store_true")
     watch_p.add_argument("--no-telegram", action="store_true")
-
-    proxy_p = sub.add_parser("proxy", help="Proxy management tools")
-    proxy_sub = proxy_p.add_subparsers(dest="proxy_command")
-    proxy_sub.add_parser("discover", help="Discover working proxies")
 
     args, rest = parser.parse_known_args(argv)
 
@@ -57,12 +41,6 @@ def main(argv: list[str] | None = None) -> int:
         if args.no_telegram:
             watch_argv.append("--no-telegram")
         return _cmd_watch(watch_argv)
-
-    if args.command == "proxy":
-        proxy_argv: list[str] = list(rest)
-        if args.proxy_command:
-            proxy_argv = [args.proxy_command, *proxy_argv]
-        return _cmd_proxy(proxy_argv)
 
     parser.print_help()
     return 2

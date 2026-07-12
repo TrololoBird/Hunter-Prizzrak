@@ -156,7 +156,7 @@ def maintenance_rates_from_tiers(tiers: list[dict[str, Any]]) -> tuple[float, ..
             continue
         mmr = tier.get("maintenance_margin_rate") or tier.get("maintenanceMarginRate")
         try:
-            val = float(mmr)
+            val = float(mmr or 0)
         except (TypeError, ValueError):
             continue
         if val <= 0 or val >= 1 or val in seen:
@@ -173,8 +173,10 @@ def leverage_tiers_from_brackets(tiers: list[dict[str, Any]]) -> tuple[int, ...]
         if not isinstance(tier, dict):
             continue
         raw = tier.get("max_leverage") or tier.get("maxLeverage")
+        if raw is None:
+            continue
         try:
-            lev = int(raw)
+            lev = int(raw or 0)
         except (TypeError, ValueError):
             continue
         if lev <= 0 or lev in seen:

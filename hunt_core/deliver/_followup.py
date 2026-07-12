@@ -134,7 +134,7 @@ def format_followup_telegram(followup: Any, row: dict[str, Any]) -> str:
         new_sl = fmt_price(payload.get("stop_loss"))
         protected = payload.get("protected_pnl_pct")
         try:
-            prot_str = f"+{float(protected):.1f}%"
+            prot_str = f"+{float(protected or 0):.1f}%"
         except (TypeError, ValueError):
             prot_str = "—"
         return (
@@ -148,7 +148,7 @@ def format_followup_telegram(followup: Any, row: dict[str, Any]) -> str:
     if event == "early_breakeven":
         new_sl = fmt_price(payload.get("stop_loss"))
         try:
-            mfe_str = f"{float(payload.get('mfe_pct')):.1f}%"
+            mfe_str = f"{float(payload.get('mfe_pct') or 0):.1f}%"
         except (TypeError, ValueError):
             mfe_str = "—"
         phase = str(payload.get("entry_lifecycle_phase") or "—")

@@ -14,7 +14,7 @@ Course discipline encoded directly here, not left to a downstream gate:
   "не вижу смысла открывать сделки в середине диапазона"). Abstain, don't emit weak.
 - Every level-finding step runs across all three scale tiers (see config.py) — the
   documented fix for the ONDO/BTC live-comparison mistake of checking one window.
-- Indicators/dominance only ever multiply strength; they never gate a candidate out.
+- Indicators only ever multiply strength; they never gate a candidate out.
 
 NOTE (Phase 6 dependency): this module's input contract is raw CCXT-shaped OHLCV rows
 per timeframe (``dict[str, list[list[float]]]``), the same shape used throughout this
@@ -26,14 +26,15 @@ testable against already-verified historical data.
 """
 from __future__ import annotations
 
+from contextvars import ContextVar
 from typing import Any, Literal
 
 from hunt_core.prizrak.invalidation import build_invalidation
 from hunt_core.prizrak.accumulation import _CLUSTER_TOL, _overlaps, find_accumulation_zone, find_accumulation_zones
 from hunt_core.prizrak.confluence import compute_confluence
 from hunt_core.prizrak.config import PrizrakConfig, ScaleTier
-from hunt_core.prizrak.dominance import dominance_confluence
 from hunt_core.prizrak.figures import tag_squeeze_pattern
+from hunt_core.prizrak.marketcap import compute_marketcap_factor
 from hunt_core.prizrak.pp import detect_pereprior
 from hunt_core.prizrak.poc import zone_poc
 from hunt_core.prizrak.stop_volume import find_stop_volume
@@ -41,14 +42,75 @@ from hunt_core.prizrak.structure import bars_from_ohlcv, multi_scale_structure, 
 from hunt_core.prizrak.traps import classify_level_touch
 
 _TIER_SETUP_KIND = {"intraday": "level_intraday_scalp", "meso": "level_core", "macro": "level_core"}
-_SL_BUFFER_PCT = 0.02  # course: "стоп за структуру с запасом 1-3%"
+
+# Per-tick market-cap series (Павел М. доп-фактор), set once by ``build_prizrak_signals``
+# and read by ``_apply_confluence`` — ambient context avoids threading a param through
+# every candidate builder. Async/thread-safe; defaults to None (factor reads neutral).
+_MARKETCAP_SERIES: ContextVar["list[list[float]] | None"] = ContextVar(
+    "prizrak_marketcap_series", default=None
+)
+# Course (стр.34): стоповый объём is "такое же накопление (база), но на более мелком ТФ,
+# чем основное движение" — a denser base one TF down (ТФ-1). Detecting it on the move's
+# own TF collapses it into a couple of candles and almost never fires (measured: 4% vs
+# 22% on the lower TF). This is the ТФ-1 step for the standard ladder.
+_LOWER_TF = {"15m": "5m", "1h": "15m", "4h": "1h", "1d": "4h", "1w": "1d"}
 _ENTRY_BAND_PCT = 0.002  # course: entries near POC ± a bit, not one exact tick
 _FORWARD_ZONE_MIN_DIST_PCT = 0.5  # below this, price is basically already there — reactive path owns it
 _FORWARD_ZONE_MAX_DIST_PCT = 20.0  # beyond this, targeting is too speculative to act on
+# The DEEP structural path (swing-low clusters far from recent action) needs a tighter
+# cap than the generic forward path: PrizrakTrade's own cited deep-zone example is
+# 60500–58550 with spot ~63–64k — a ~5–8% pullback, not 18%+. Reusing the generic 20%
+# surfaced pending limits ~18% away with an eye-watering fake R:R (e.g. SOL long @64 vs
+# 77.7 spot, R:R 10.66) — a level PrizrakTrade would wait to confirm at, not pre-place.
+_FORWARD_DEEP_MAX_DIST_PCT = 12.0
 
 
 def _entry_band(anchor: float) -> tuple[float, float]:
     return round(anchor * (1 - _ENTRY_BAND_PCT), 8), round(anchor * (1 + _ENTRY_BAND_PCT), 8)
+
+
+# Course стр.30: small base (5м-1ч) → one order at the level; big base (1Д-1Н-1М) → split
+# the entry across "зону и уровень ПОК" (2-3 orders). 4h leans to the big-base behaviour.
+_SMALL_BASE_TFS = frozenset({"5m", "15m", "1h"})
+
+
+def _management_plan(direction: Literal["long", "short"]) -> list[str]:
+    """Position-management plan per course — annotations for manual trading, not live
+    management (the generator is stateless and does not track an open position).
+
+    Course стр.19: reaction from the level → stop to break-even; take 50% (not 100%) at
+    the first target because the trend has priority; on a return to the level without
+    reversal factors → re-add the same 50% (стр.16 доливка). Course стр.10-11: a hedge is
+    only opened under an ALREADY-profitable position, never a losing one.
+    """
+    back = "нижней границе" if direction == "long" else "верхней границе"
+    return [
+        "Реакция от уровня → перенести стоп в БУ (стр.19)",
+        "На TP1: фиксировать 50%, не 100% — приоритет по тренду (стр.19)",
+        f"Возврат к {back} без факторов разворота → добор те же 50% (стр.16/19)",
+        "Хедж только под уже прибыльную позицию, ½ объёма (стр.10-11)",
+    ]
+
+
+def _entry_orders(entry: float, *, poc: float | None, zone: dict[str, Any], tf: str) -> list[float]:
+    """The manual entry plan: order price levels per course стр.30/32.
+
+    Small base → a single order at the level. Big base → the level plus the ПОК and/or
+    the nearest zone boundary, so the average ТВХ is spread across the зона ("закуп
+    делить на зону и на уровень"). Purely an annotation for manual placement; the
+    primary ``entry`` and its band are unchanged.
+    """
+    if str(tf).lower() in _SMALL_BASE_TFS:
+        return [round(entry, 8)]
+    levels = [entry]
+    if poc is not None and abs(float(poc) - entry) / max(entry, 1e-9) > _ENTRY_BAND_PCT:
+        levels.append(float(poc))
+    lo, hi = zone.get("lo"), zone.get("hi")
+    if len(levels) < 2 and lo is not None and hi is not None:
+        near_edge = float(lo) if abs(entry - float(lo)) <= abs(entry - float(hi)) else float(hi)
+        if abs(near_edge - entry) / max(entry, 1e-9) > _ENTRY_BAND_PCT:
+            levels.append(near_edge)
+    return sorted({round(x, 8) for x in levels})
 
 
 def _tf_lookback_map(cfg: PrizrakConfig) -> dict[str, int]:
@@ -90,11 +152,12 @@ def compute_interest_zones(
         zones = find_accumulation_zones(bars, tf=use_tf, cfg=cfg, max_zones=8)
         below = [z for z in zones if z.get("hi", 0) < price]
         above = [z for z in zones if z.get("lo", 0) > price]
-        # Pick the STRONGEST accumulation box (most touches), nearest as tie-break —
-        # that is the zone the trader actually marks as the level (LINK long 7.25-7.38
-        # with 7 touches, not the shallow 7.50 with 5), not merely the closest one.
-        long_zone = max(below, key=lambda z: (int(z.get("touches") or 0), z["hi"])) if below else None
-        short_zone = max(above, key=lambda z: (int(z.get("touches") or 0), -z["lo"])) if above else None
+        # Pick the STRONGEST accumulation box by traded VOLUME (course стр.22: сила
+        # уровня = ТФ + объём), nearest as tie-break — not the most-touched one. Measured
+        # on live data, volume ranking selects a different zone than touch ranking on 41%
+        # of multi-zone scans (e.g. ETH 1d: a 4-touch/3.8e8-vol base over a 6-touch/9.4e7).
+        long_zone = max(below, key=lambda z: (float(z.get("zone_volume") or 0), z["hi"])) if below else None
+        short_zone = max(above, key=lambda z: (float(z.get("zone_volume") or 0), -z["lo"])) if above else None
         if not long_zone and not short_zone:
             continue
         out: dict[str, Any] = {"tf": use_tf}
@@ -242,7 +305,16 @@ def _structural_targets(
 
     pool = _collect(min_rank)
     if min_rank > 0 and not _edges(pool):
-        pool = _collect(0)  # fallback: no in-scale target ahead → widen to all TFs
+        # Fallback widens DOWN by one TF only (ТФ-1), never to ТФ-2 and below. Course
+        # (стр.24): "Уровни ТФ-1 ... могут быть взяты как промежуточные цели", but "ТФ-2
+        # (15м и ниже) обычно не берутся в расчёт, т.к. на старшем ТФ их вообще 'нет'".
+        # Widening to all TFs (the old _collect(0)) made a 4h/1d trade take a tiny 15m/5m
+        # zone as TP1 on ~70% of live setups — a course-forbidden, fake-tight target.
+        # When even ТФ-1 has nothing ahead, there is no structural target and the caller
+        # abstains rather than fabricate one.
+        lower_tf = _LOWER_TF.get(str(min_tf))
+        floor = _tf_rank(lower_tf) if lower_tf else min_rank
+        pool = _collect(floor)
 
     zone_edges = _edges(pool)
 
@@ -254,6 +326,40 @@ def _structural_targets(
     )
 
 
+def _poc_entry(edge: float, *, zone: dict[str, Any], poc_info: dict[str, Any]) -> float:
+    """Anchor the entry to the zone's ПОК when it sits inside the box, else the edge.
+
+    Course стр.30: the reliable entry is the ПОК level, not the range boundary. But the
+    volume profile can peak just outside the zone's cluster-mean bounds (~39% of live
+    zones); there the ПОК is not a valid in-structure anchor and the edge is kept.
+    """
+    poc = poc_info.get("poc") if isinstance(poc_info, dict) else None
+    lo, hi = zone.get("lo"), zone.get("hi")
+    if poc is None or lo is None or hi is None:
+        return edge
+    return float(poc) if lo <= float(poc) <= hi else edge
+
+
+def _structural_stop(
+    direction: Literal["long", "short"], entry: float, zone: dict[str, Any] | None, *, buffer_pct: float
+) -> float:
+    """Stop behind the STRUCTURE with a 1-3% buffer (course стр.33: "Безопасный СТОП за
+    дно структуры с запасом 1-3%"), not a flat distance off the entry.
+
+    The setup's structure is the zone passed by the caller — the накопление for level
+    trades, the тень-свечи zone for ПП (стр.50), the стоповый объём for its own scalp
+    (стр.35). Long → behind the zone LOW; short → behind the zone HIGH. Falls back to a
+    buffer off the entry only when no usable zone boundary is available.
+    """
+    if zone:
+        lo, hi = zone.get("lo"), zone.get("hi")
+        if direction == "long" and lo is not None and float(lo) <= entry:
+            return float(lo) * (1 - buffer_pct)
+        if direction == "short" and hi is not None and float(hi) >= entry:
+            return float(hi) * (1 + buffer_pct)
+    return entry * (1 - buffer_pct) if direction == "long" else entry * (1 + buffer_pct)
+
+
 def _geometry_from_zone(
     *,
     direction: Literal["long", "short"],
@@ -262,32 +368,21 @@ def _geometry_from_zone(
     cfg: PrizrakConfig,
     swing_levels: list[float] | None = None,
     min_tf: str | None = None,
-) -> dict[str, float] | None:
-    """SL beyond the TRADED LEVEL (entry/catalyst) with a 1-3% buffer (course: "стоп
-    за структуру с запасом") — NOT beyond the zone's opposite boundary. Every caller
-    passes ``entry`` as exactly the near edge being traded (the level price is
-    actually testing); the zone's far edge is a different level the trade isn't
-    about at all. Anchoring the stop to that far edge instead produced absurdly
-    wide, R:R-destroying stops on any накопление wider than a percent or two (course
-    example: BTC's 1h base 61283-62879, 2.6% wide — a long retesting the 62879 top
-    as new support got a stop all the way down at ~60057, a ~4.5% risk for a trade
-    that's actually about defending the 62879 level, not the zone's far side).
-    TP1-3 are the next real structural targets ahead, searched across every
-    configured timeframe (course: targets are the next base/liquidity a move has to
-    travel through, not a generic R-multiple off entry). Returns None — no geometry,
-    no signal — when there's no real target ahead anywhere; this must never fall
-    back to distance-based TPs.
+    zone: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """SL behind the setup's STRUCTURE with a 1-3% buffer (course стр.33), TP1-3 the next
+    real structural targets ahead (стр.24, searched on the setup TF and higher). Returns
+    None — no geometry, no signal — when there's no real target ahead anywhere or the
+    structural risk leaves RR below ``cfg.min_rr``; never fabricates a distance-based TP,
+    and never widens/tightens the stop just to reach an RR (стр.33: если RR не набирается
+    структурно — сделки нет).
 
     If ``swing_levels`` are provided, an honest TP ladder is built with intermediate
     swing levels between entry and zone targets — prevents fake R:R where TP1 skips
     structural resistance ahead.
     """
-    if direction == "long":
-        stop = entry * (1 - _SL_BUFFER_PCT)
-        risk = entry - stop
-    else:
-        stop = entry * (1 + _SL_BUFFER_PCT)
-        risk = stop - entry
+    stop = _structural_stop(direction, entry, zone, buffer_pct=cfg.stop_buffer_pct)
+    risk = entry - stop if direction == "long" else stop - entry
     if risk <= 0:
         return None
     targets = _structural_targets(
@@ -339,21 +434,26 @@ def _base_summary(
     # single price ± a fixed band.
     entry_lo, entry_hi = entry_band if entry_band else _entry_band(entry)
     if direction == "wait":
-        geo: dict[str, Any] = {}
+        geo: dict[str, Any] | None = {}
     else:
-        geo = _geometry_from_zone(direction=direction, entry=entry, ohlcv_by_tf=ohlcv_by_tf, cfg=cfg, swing_levels=swing_levels, min_tf=tf)
+        geo = _geometry_from_zone(direction=direction, entry=entry, ohlcv_by_tf=ohlcv_by_tf, cfg=cfg, swing_levels=swing_levels, min_tf=tf, zone=zone)
         if geo is None:
             return None  # no real structural target ahead on any timeframe — abstain, never fabricate one
     return {
         "action": direction,
         "entry_lo": entry_lo,
         "entry_hi": entry_hi,
-        "stop": geo.get("stop"),
-        "tp1": geo.get("tp1"),
-        "tp2": geo.get("tp2"),
-        "tp3": geo.get("tp3"),
-        "tp_ladder": geo.get("tp_ladder", []),
-        "rr_primary": geo.get("rr_primary"),
+        "entry_orders": _entry_orders(
+            entry, poc=poc_info.get("poc") if isinstance(poc_info, dict) else None,
+            zone=zone if isinstance(zone, dict) else {}, tf=tf,
+        ),
+        "management_plan": _management_plan(direction) if direction in ("long", "short") else [],
+        "stop": (geo or {}).get("stop"),
+        "tp1": (geo or {}).get("tp1"),
+        "tp2": (geo or {}).get("tp2"),
+        "tp3": (geo or {}).get("tp3"),
+        "tp_ladder": (geo or {}).get("tp_ladder", []),
+        "rr_primary": (geo or {}).get("rr_primary"),
         "strength": 0.5,
         "path": f"{setup_kind}_{direction}",
         "fragility": 0.5,
@@ -378,7 +478,8 @@ def _structural_quality_multiplier(summary: dict[str, Any], *, cfg: PrizrakConfi
     had actually respected the zone, how dense a stop-volume pocket was, or whether a
     PP break was confirmed vs early/unconfirmed.
     """
-    zone = summary.get("zone") if isinstance(summary.get("zone"), dict) else {}
+    _zone_raw = summary.get("zone")
+    zone = _zone_raw if isinstance(_zone_raw, dict) else {}
     mult = 1.0
     evidence: list[str] = []
 
@@ -409,7 +510,8 @@ def _compute_fragility(summary: dict[str, Any], *, cfg: PrizrakConfig) -> float:
     at the bare minimum touch count (or an unconfirmed/early PP) is easy to sweep
     through; a well-tested base or a dense stop-volume pocket is sturdier.
     """
-    zone = summary.get("zone") if isinstance(summary.get("zone"), dict) else {}
+    _zone_raw = summary.get("zone")
+    zone = _zone_raw if isinstance(_zone_raw, dict) else {}
     frag = 0.5
     touches = zone.get("touches")
     if touches:
@@ -482,10 +584,10 @@ def _htf_bias(
 
     votes: dict[str, str] = {}
     for tf_key, _w, display_key in weights:
-        struct = struct_by_tf.get(tf_key)
-        if not struct:
+        tf_struct = struct_by_tf.get(tf_key)
+        if not tf_struct:
             continue
-        votes[display_key] = _tier_trend(struct)
+        votes[display_key] = _tier_trend(tf_struct)
 
     trend_4h = votes.get("4h", "neutral")
     trend_1w = votes.get("1w", "neutral")
@@ -502,14 +604,14 @@ def _htf_bias(
     net = 0.0
     weight_available = 0.0
     for tf_key, w, display_key in weights:
-        struct = struct_by_tf.get(tf_key)
-        if not struct:
+        tf_struct = struct_by_tf.get(tf_key)
+        if not tf_struct:
             continue
         trend = votes[display_key]
         if trend == "neutral":
             weight_available += w
             continue
-        if _is_bos_only_trend(struct, trend) and _higher_tf_neutral(struct_by_tf, tf_key, weights):
+        if _is_bos_only_trend(tf_struct, trend) and _higher_tf_neutral(struct_by_tf, tf_key, weights):
             w *= 0.5
         weight_available += w
         net += w if trend == "bull" else -w
@@ -621,8 +723,6 @@ def _apply_confluence(
     summary: dict[str, Any],
     *,
     ohlcv: list[list[float]],
-    btc_d_change_24h: float | None,
-    total3_change_24h: float | None,
     cfg: PrizrakConfig,
     htf_bias: dict[str, Any] | None = None,
     struct_by_tier: dict[str, dict[str, Any]] | None = None,
@@ -640,19 +740,32 @@ def _apply_confluence(
             return None
 
     conf = compute_confluence(ohlcv, direction=direction, cfg=cfg)
-    dom = dominance_confluence(
-        direction=direction, btc_d_change_24h=btc_d_change_24h, total3_change_24h=total3_change_24h, cfg=cfg,
-    )
     quality_mult, quality_evidence = _structural_quality_multiplier(summary, cfg=cfg)
 
+    # Market-cap доп-фактор (Павел М.): bounded, non-gating. Reads the per-tick cap series
+    # from ambient context; neutral (1.0) when disabled or unavailable, so the strength
+    # formula is unchanged unless the factor is explicitly enabled AND has data.
+    mcap = compute_marketcap_factor(
+        ohlcv, _MARKETCAP_SERIES.get(), direction=direction, cfg=cfg
+    )
+    mcap_mult = mcap["multiplier"]
+
     # Legacy flat strength for external consumers, and the driver breakdown.
-    strength = 0.5 * conf["multiplier"] * dom["multiplier"] * quality_mult * htf_mult
+    strength = 0.5 * conf["multiplier"] * quality_mult * htf_mult * mcap_mult
     summary["strength"] = round(max(0.0, min(1.0, strength)), 3)
     summary["fragility"] = _compute_fragility(summary, cfg=cfg)
     summary["trade_quality"] = "favorable" if summary["strength"] >= 0.55 else ("marginal" if summary["strength"] >= 0.4 else "poor")
 
     # Build structured confidence with driver breakdown.
-    drivers: list[dict[str, Any]] = _build_drivers(conf, dom, quality_mult, quality_evidence, htf_mult, htf_evidence, threshold=0.0)
+    drivers: list[dict[str, Any]] = _build_drivers(conf, quality_mult, quality_evidence, htf_mult, htf_evidence, threshold=0.0)
+    if abs(mcap_mult - 1.0) > 0.001:
+        drivers.append({
+            "name": "капитализация",
+            "delta": round(mcap_mult - 1.0, 3),
+            "description": ", ".join(mcap.get("evidence", [])) or "market-cap доп-фактор",
+        })
+    if mcap.get("evidence") and mcap["evidence"][0] not in ("marketcap_disabled", "marketcap_unavailable"):
+        summary["marketcap"] = {k: mcap[k] for k in ("multiplier", "cap_trend", "supply", "evidence") if k in mcap}
     total = sum(d["delta"] for d in drivers)
     # Aggregate of the driver-delta breakdown (0.50 base ± driver deltas). Diagnostic
     # only — `summary["strength"]` remains the authoritative score for ranking/delivery;
@@ -675,7 +788,6 @@ def _apply_confluence(
 
 def _build_drivers(
     conf: dict[str, Any],
-    dom: dict[str, Any],
     quality_mult: float,
     quality_evidence: list[str],
     htf_mult: float,
@@ -697,12 +809,6 @@ def _build_drivers(
     if abs(conf_mult - 1.0) > threshold:
         for ev in conf.get("evidence", []):
             drivers.append(_driver_from_evidence(ev, "конфлюэнс"))
-
-    # Dominance
-    dom_mult = dom.get("multiplier", 1.0)
-    if abs(dom_mult - 1.0) > threshold:
-        for ev in dom.get("evidence", []):
-            drivers.append(_driver_from_evidence(ev, "доминация"))
 
     # HTF alignment
     if abs(htf_mult - 1.0) > threshold:
@@ -747,8 +853,6 @@ def _zone_edge_candidate(
     tf: str,
     tier_name: str,
     cfg: PrizrakConfig,
-    btc_d_change_24h: float | None,
-    total3_change_24h: float | None,
     htf_bias: dict[str, Any] | None = None,
     struct_by_tier: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
@@ -812,7 +916,7 @@ def _zone_edge_candidate(
         return None
     summary["activation"] = "in_entry_zone"
     result = _apply_confluence(
-        summary, ohlcv=ohlcv, btc_d_change_24h=btc_d_change_24h, total3_change_24h=total3_change_24h,
+        summary, ohlcv=ohlcv,
         cfg=cfg, htf_bias=htf_bias, struct_by_tier=struct_by_tier,
     )
     if result is not None:
@@ -870,8 +974,6 @@ def _zone_candidate(
     tf: str,
     tier_name: str,
     cfg: PrizrakConfig,
-    btc_d_change_24h: float | None,
-    total3_change_24h: float | None,
     htf_bias: dict[str, Any] | None = None,
     struct_by_tier: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
@@ -922,7 +1024,7 @@ def _zone_candidate(
         summary["geometry_confidence"] = max(0.3, summary.get("geometry_confidence", 0.7) - 0.15 * worked)
         summary["strength"] = max(0.1, summary.get("strength", 0.5) - 0.15 * worked)
     result = _apply_confluence(
-        summary, ohlcv=ohlcv, btc_d_change_24h=btc_d_change_24h, total3_change_24h=total3_change_24h,
+        summary, ohlcv=ohlcv,
         cfg=cfg, htf_bias=htf_bias, struct_by_tier=struct_by_tier,
     )
     if result is not None:
@@ -947,8 +1049,6 @@ def _forward_zone_candidate(
     tf: str,
     tier_name: str,
     cfg: PrizrakConfig,
-    btc_d_change_24h: float | None,
-    total3_change_24h: float | None,
     exclude_zone: dict[str, Any] | None = None,
     htf_bias: dict[str, Any] | None = None,
     struct_by_tier: dict[str, dict[str, Any]] | None = None,
@@ -975,19 +1075,18 @@ def _forward_zone_candidate(
     below = [z for z in zones if z["hi"] < price]
 
     def _score(zone: dict[str, Any], dist_pct: float) -> float:
-        """Touch count alone favors old, wide macro накопления (many touches
-        accumulated over a long window) over a much closer, still-relevant base
-        that simply hasn't been sitting there as long — a zone from before a since-
-        confirmed large regime move (course example: REZ's daily 0.0036 base predating
-        a ~55% range decline) would otherwise always outrank a fresher, closer,
-        equally-valid meso/intraday zone. Recency (share of the lookback window since
-        this zone's last actual touch) and distance both temper raw touch strength so
-        "next strong base" means the next one still in play, not just whichever has
-        the longest touch history anywhere in the window.
+        """Strength = traded volume (course стр.22), tempered by recency and distance.
+
+        Volume is the course's measure of level strength, not touch count. Recency
+        (share of the lookback since this zone's last actual touch) and distance keep
+        "next strong base" meaning one still in play and reachable — a high-volume zone
+        from before a since-confirmed large regime move (course example: REZ's daily
+        0.0036 base predating a ~55% decline) should not outrank a fresher, closer,
+        equally-valid one just because more traded through it long ago.
         """
         recency_factor = 0.3 + 0.7 * zone.get("recency", 0.0)
         distance_factor = 1.0 + dist_pct / 10.0
-        return zone["touches"] * recency_factor / distance_factor
+        return float(zone.get("zone_volume") or 0.0) * recency_factor / distance_factor
 
     def _best(pool: list[dict[str, Any]], *, near_edge_key: str) -> tuple[dict[str, Any], float, float] | None:
         ranked = []
@@ -1012,13 +1111,20 @@ def _forward_zone_candidate(
     if resistance is not None and (support is None or resistance[2] >= support[2]):
         zone, dist_pct, _ = resistance
         direction: Literal["long", "short"] = "short"
-        catalyst = zone["lo"]
+        edge = zone["lo"]
     else:
+        if support is None:
+            return None
         zone, dist_pct, _ = support
         direction = "long"
-        catalyst = zone["hi"]
+        edge = zone["hi"]
 
     poc_info = zone_poc(ohlcv, zone=zone, cfg=cfg)
+    # Course стр.30: enter FROM the ПОК level ("надёжнее всего брать от уровня ПОК"),
+    # not the zone's near edge — the edge is just the range boundary. Anchor to ПОК when
+    # it resolves inside the box (61% of live zones); otherwise the profile peaked outside
+    # the cluster-mean bounds and the edge is the safer anchor.
+    catalyst = _poc_entry(edge, zone=zone, poc_info=poc_info)
     swing_levels = _extract_swing_levels(struct_by_tier, direction=direction, entry=catalyst)
     summary = _base_summary(
         direction=direction, entry=catalyst, zone=zone, setup_kind="zone_target_forward",
@@ -1030,7 +1136,7 @@ def _forward_zone_candidate(
     summary["activation"] = "approaching"
     summary["forward_target_distance_pct"] = round(dist_pct, 3)
     result = _apply_confluence(
-        summary, ohlcv=ohlcv, btc_d_change_24h=btc_d_change_24h, total3_change_24h=total3_change_24h,
+        summary, ohlcv=ohlcv,
         cfg=cfg, htf_bias=htf_bias, struct_by_tier=struct_by_tier,
     )
     if result is None:
@@ -1083,8 +1189,6 @@ def _forward_deep_candidate(
     tf: str,
     tier_name: str,
     cfg: PrizrakConfig,
-    btc_d_change_24h: float | None,
-    total3_change_24h: float | None,
     exclude_zone: dict[str, Any] | None = None,
     htf_bias: dict[str, Any] | None = None,
     struct_by_tier: dict[str, dict[str, Any]] | None = None,
@@ -1120,7 +1224,7 @@ def _forward_deep_candidate(
     # Score each zone: deeper clusters get priority (PrizrakTrade waits for deep levels).
     def _score(z: dict[str, Any]) -> float:
         dist_pct = (price - z["hi"]) / price * 100.0
-        if not (_FORWARD_ZONE_MIN_DIST_PCT <= dist_pct <= _FORWARD_ZONE_MAX_DIST_PCT):
+        if not (_FORWARD_ZONE_MIN_DIST_PCT <= dist_pct <= _FORWARD_DEEP_MAX_DIST_PCT):
             return -1.0
         return z["touches"] * (1.0 + dist_pct / 10.0)
 
@@ -1140,7 +1244,7 @@ def _forward_deep_candidate(
     direction: Literal["long", "short"] = "long"
     catalyst = best_zone["hi"]
     dist_pct = (price - catalyst) / price * 100.0
-    poc_info = {}
+    poc_info: dict[str, Any] = {}
     swing_levels = _extract_swing_levels(struct_by_tier, direction=direction, entry=catalyst)
     summary = _base_summary(
         direction=direction, entry=catalyst, zone=best_zone, setup_kind="zone_target_deep",
@@ -1152,8 +1256,8 @@ def _forward_deep_candidate(
     summary["activation"] = "approaching"
     summary["forward_target_distance_pct"] = round(dist_pct, 3)
     result = _apply_confluence(
-        summary, ohlcv=(ohlcv_by_tf.get(tf) or []), btc_d_change_24h=btc_d_change_24h,
-        total3_change_24h=total3_change_24h, cfg=cfg, htf_bias=htf_bias,
+        summary, ohlcv=(ohlcv_by_tf.get(tf) or []),
+        cfg=cfg, htf_bias=htf_bias,
         struct_by_tier=struct_by_tier,
     )
     if result is None:
@@ -1182,8 +1286,6 @@ def _pp_candidate(
     tf: str,
     tier_name: str,
     cfg: PrizrakConfig,
-    btc_d_change_24h: float | None,
-    total3_change_24h: float | None,
     htf_bias: dict[str, Any] | None = None,
     struct_by_tier: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
@@ -1210,7 +1312,7 @@ def _pp_candidate(
         bodies = int((pp.get("pp_true_long_bodies") if is_true else pp.get("pp_early_long_bodies")) or 0)
         if bodies < min_bodies:
             return None  # unconfirmed прокол — course: не берём позицию
-        level = pp.get("pp_true_long_level") if is_true else pp.get("pp_early_long_level")
+        level = float(pp.get("pp_true_long_level") or 0) if is_true else float(pp.get("pp_early_long_level") or 0)
         # Course стр.55: the ПП level is the whole тень-свечи zone. Entry band = that
         # zone; the traded/defended edge (for the stop) is its lower boundary.
         z_lo = pp.get("pp_true_long_zone_lo") if is_true else pp.get("pp_early_long_zone_lo")
@@ -1221,7 +1323,7 @@ def _pp_candidate(
         # entry yet — abstain until a retest brings price back.
         if z_lo and z_hi and not (float(z_lo) * (1 - _RETEST_TOL) <= price <= float(z_hi) * (1 + _RETEST_TOL)):
             return None
-        entry = float(z_lo) if z_lo else level
+        entry = float(z_lo) if z_lo is not None else level
         band = (float(z_lo), float(z_hi)) if (z_lo and z_hi) else None
         long_swing = _extract_swing_levels(struct_by_tier, direction="long", entry=entry)
         summary = _base_summary(
@@ -1235,7 +1337,7 @@ def _pp_candidate(
         summary["geometry_confidence"] = 0.7 if is_true else 0.6
         summary["pp_bodies"] = bodies
         result = _apply_confluence(
-            summary, ohlcv=ohlcv, btc_d_change_24h=btc_d_change_24h, total3_change_24h=total3_change_24h,
+            summary, ohlcv=ohlcv,
             cfg=cfg, htf_bias=htf_bias, struct_by_tier=struct_by_tier,
         )
         if result is not None:
@@ -1252,7 +1354,7 @@ def _pp_candidate(
         bodies = int((pp.get("pp_true_short_bodies") if is_true else pp.get("pp_early_short_bodies")) or 0)
         if bodies < min_bodies:
             return None  # unconfirmed прокол — course: не берём позицию
-        level = pp.get("pp_true_short_level") if is_true else pp.get("pp_early_short_level")
+        level = float(pp.get("pp_true_short_level") or 0) if is_true else float(pp.get("pp_early_short_level") or 0)
         z_lo = pp.get("pp_true_short_zone_lo") if is_true else pp.get("pp_early_short_zone_lo")
         z_hi = pp.get("pp_true_short_zone_hi") if is_true else pp.get("pp_early_short_zone_hi")
         # Course стр.50-51: entry = retest of the broken level. Emit only when
@@ -1260,7 +1362,7 @@ def _pp_candidate(
         # away, abstain until the retest.
         if z_lo and z_hi and not (float(z_lo) * (1 - _RETEST_TOL) <= price <= float(z_hi) * (1 + _RETEST_TOL)):
             return None
-        entry = float(z_hi) if z_hi else level
+        entry = float(z_hi) if z_hi is not None else level
         band = (float(z_lo), float(z_hi)) if (z_lo and z_hi) else None
         short_swing = _extract_swing_levels(struct_by_tier, direction="short", entry=entry)
         summary = _base_summary(
@@ -1274,7 +1376,7 @@ def _pp_candidate(
         summary["geometry_confidence"] = 0.7 if is_true else 0.6
         summary["pp_bodies"] = bodies
         result = _apply_confluence(
-            summary, ohlcv=ohlcv, btc_d_change_24h=btc_d_change_24h, total3_change_24h=total3_change_24h,
+            summary, ohlcv=ohlcv,
             cfg=cfg, htf_bias=htf_bias, struct_by_tier=struct_by_tier,
         )
         if result is not None:
@@ -1297,8 +1399,6 @@ def _trap_flip_candidate(
     tf: str,
     tier_name: str,
     cfg: PrizrakConfig,
-    btc_d_change_24h: float | None,
-    total3_change_24h: float | None,
     htf_bias: dict[str, Any] | None = None,
     struct_by_tier: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
@@ -1330,8 +1430,8 @@ def _trap_flip_candidate(
         if summary is not None:
             summary["pattern"] = "ловушка_пробой_флип"
             result = _apply_confluence(
-                summary, ohlcv=ohlcv, btc_d_change_24h=btc_d_change_24h,
-                total3_change_24h=total3_change_24h, cfg=cfg, htf_bias=htf_bias, struct_by_tier=struct_by_tier,
+                summary, ohlcv=ohlcv,
+                cfg=cfg, htf_bias=htf_bias, struct_by_tier=struct_by_tier,
             )
             if result is not None:
                 result["invalidation"] = build_invalidation(
@@ -1356,8 +1456,8 @@ def _trap_flip_candidate(
         if summary is not None:
             summary["pattern"] = "ловушка_пробой_флип"
             result = _apply_confluence(
-                summary, ohlcv=ohlcv, btc_d_change_24h=btc_d_change_24h,
-                total3_change_24h=total3_change_24h, cfg=cfg, htf_bias=htf_bias, struct_by_tier=struct_by_tier,
+                summary, ohlcv=ohlcv,
+                cfg=cfg, htf_bias=htf_bias, struct_by_tier=struct_by_tier,
             )
             if result is not None:
                 result["invalidation"] = build_invalidation(
@@ -1375,15 +1475,32 @@ def build_prizrak_signals(
     ohlcv_by_tf: dict[str, list[list[float]]],
     *,
     price: float,
-    btc_d_change_24h: float | None = None,
-    total3_change_24h: float | None = None,
     cfg: PrizrakConfig | None = None,
+    marketcap_series: list[list[float]] | None = None,
 ) -> list[dict[str, Any]]:
-    """0..N independent ScenarioVerdict-summary-compatible signals for one tick."""
+    """0..N independent ScenarioVerdict-summary-compatible signals for one tick.
+
+    ``marketcap_series`` is the optional CoinGecko cap series (``[[ts_ms, cap], ...]``)
+    for Павел М.'s доп-фактор — supplied only when ``cfg.marketcap_enabled`` and fetched
+    off the tick plane; ``None`` leaves the factor neutral.
+    """
     cfg = cfg or PrizrakConfig.load()
     if price <= 0:
         return []
 
+    token = _MARKETCAP_SERIES.set(marketcap_series)
+    try:
+        return _build_prizrak_signals_inner(ohlcv_by_tf, price=price, cfg=cfg)
+    finally:
+        _MARKETCAP_SERIES.reset(token)
+
+
+def _build_prizrak_signals_inner(
+    ohlcv_by_tf: dict[str, list[list[float]]],
+    *,
+    price: float,
+    cfg: PrizrakConfig,
+) -> list[dict[str, Any]]:
     tiers = {"intraday": cfg.intraday, "meso": cfg.meso, "macro": cfg.macro}
     out: list[dict[str, Any]] = []
 
@@ -1407,11 +1524,75 @@ def build_prizrak_signals(
                 continue
             _scan_tier_timeframe(
                 out, ohlcv_by_tf=ohlcv_by_tf, tier=tier, tf=tf, tier_name=tier_name, price=price,
-                cfg=cfg, btc_d_change_24h=btc_d_change_24h, total3_change_24h=total3_change_24h,
+                cfg=cfg,
                 htf_bias=htf_bias, struct_by_tier=struct_by_tier,
             )
 
-    return out
+    return _dedup_candidates(out)
+
+
+def _dedup_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse candidates that are the SAME trade idea to the strongest one.
+
+    Two candidates with the same direction and the same entry band ARE one trade —
+    the same limit at the same level with the same stop — even if they were produced
+    by different tiers/timeframes (they only differ in TP rounding). The
+    ``_forward_deep_candidate`` in particular pools the same macro+meso swing-low
+    clusters once per tier, so a single deep zone would otherwise emit up to three
+    near-identical "signals" (measured live: SOL deep-long 63.87–64.13 × 3). Keep the
+    strongest per (action, entry_lo, entry_hi); genuinely distinct levels are untouched.
+    """
+    best: dict[tuple[str, float, float], dict[str, Any]] = {}
+    order: list[tuple[str, float, float]] = []
+    for c in candidates:
+        key = (
+            str(c.get("action") or ""),
+            round(float(c.get("entry_lo") or 0.0), 8),
+            round(float(c.get("entry_hi") or 0.0), 8),
+        )
+        rank = (
+            float(c.get("strength") or 0.0),
+            float(c.get("geometry_confidence") or 0.0),
+            float(c.get("rr_primary") or 0.0),
+        )
+        prev = best.get(key)
+        if prev is None:
+            best[key] = c
+            order.append(key)
+        else:
+            prev_rank = (
+                float(prev.get("strength") or 0.0),
+                float(prev.get("geometry_confidence") or 0.0),
+                float(prev.get("rr_primary") or 0.0),
+            )
+            if rank > prev_rank:
+                best[key] = c
+    return [best[k] for k in order]
+
+
+def _stop_volume_bars(
+    zone: dict[str, Any],
+    *,
+    tf: str,
+    ohlcv: list[list[float]],
+    ohlcv_by_tf: dict[str, list[list[float]]],
+) -> list[list[float]]:
+    """Lower-TF bars over the zone's own time window (course: стоповый объём lives on ТФ-1).
+
+    Falls back to the move's own bars when the lower TF isn't available or the zone's
+    span can't be located — same-TF detection is weak but better than none.
+    """
+    low_tf = _LOWER_TF.get(tf)
+    low = ohlcv_by_tf.get(low_tf) if low_tf else None
+    fi, li = zone.get("first_touch_idx"), zone.get("last_touch_idx")
+    if not low or fi is None or li is None:
+        return ohlcv
+    lo_i, hi_i = int(fi), min(int(li), len(ohlcv) - 1)
+    if not (0 <= lo_i <= hi_i < len(ohlcv)):
+        return ohlcv
+    t0, t1 = ohlcv[lo_i][0], ohlcv[hi_i][0]
+    window = [r for r in low if t0 <= r[0] <= t1]
+    return window if len(window) >= 8 else ohlcv
 
 
 def _scan_tier_timeframe(
@@ -1423,8 +1604,6 @@ def _scan_tier_timeframe(
     tier_name: str,
     price: float,
     cfg: PrizrakConfig,
-    btc_d_change_24h: float | None,
-    total3_change_24h: float | None,
     htf_bias: dict[str, Any],
     struct_by_tier: dict[str, dict[str, Any]],
 ) -> None:
@@ -1440,7 +1619,6 @@ def _scan_tier_timeframe(
 
     zone_sig = _zone_candidate(
         ohlcv=ohlcv, ohlcv_by_tf=ohlcv_by_tf, price=price, tf=tf, tier_name=tier_name, cfg=cfg,
-        btc_d_change_24h=btc_d_change_24h, total3_change_24h=total3_change_24h,
         htf_bias=htf_bias, struct_by_tier=struct_by_tier,
     )
     if zone_sig:
@@ -1448,7 +1626,6 @@ def _scan_tier_timeframe(
 
     edge_sig = _zone_edge_candidate(
         ohlcv=ohlcv, ohlcv_by_tf=ohlcv_by_tf, price=price, tf=tf, tier_name=tier_name, cfg=cfg,
-        btc_d_change_24h=btc_d_change_24h, total3_change_24h=total3_change_24h,
         htf_bias=htf_bias, struct_by_tier=struct_by_tier,
     )
     if edge_sig:
@@ -1466,7 +1643,6 @@ def _scan_tier_timeframe(
     # a strict ownership claim on existence alone.
     forward_sig = _forward_zone_candidate(
         ohlcv=ohlcv, ohlcv_by_tf=ohlcv_by_tf, price=price, tf=tf, tier_name=tier_name, cfg=cfg,
-        btc_d_change_24h=btc_d_change_24h, total3_change_24h=total3_change_24h,
         exclude_zone=(zone if zone_sig else None), htf_bias=htf_bias, struct_by_tier=struct_by_tier,
     )
     if forward_sig:
@@ -1479,7 +1655,6 @@ def _scan_tier_timeframe(
     if tf == tier.timeframes[-1]:
         deep_sig = _forward_deep_candidate(
             ohlcv_by_tf=ohlcv_by_tf, price=price, tf=tf, tier_name=tier_name, cfg=cfg,
-            btc_d_change_24h=btc_d_change_24h, total3_change_24h=total3_change_24h,
             exclude_zone=(zone if zone_sig else None), htf_bias=htf_bias,
             struct_by_tier=struct_by_tier, existing_forward_zone=(forward_sig.get("zone") if forward_sig else None),
         )
@@ -1488,7 +1663,6 @@ def _scan_tier_timeframe(
 
     pp_sig = _pp_candidate(
         ohlcv=ohlcv, ohlcv_by_tf=ohlcv_by_tf, price=price, tf=tf, tier_name=tier_name, cfg=cfg,
-        btc_d_change_24h=btc_d_change_24h, total3_change_24h=total3_change_24h,
         htf_bias=htf_bias, struct_by_tier=struct_by_tier,
     )
     if pp_sig:
@@ -1496,15 +1670,16 @@ def _scan_tier_timeframe(
 
     flip_sig = _trap_flip_candidate(
         ohlcv=ohlcv, ohlcv_by_tf=ohlcv_by_tf, price=price, tf=tf, tier_name=tier_name, cfg=cfg,
-        btc_d_change_24h=btc_d_change_24h, total3_change_24h=total3_change_24h,
         htf_bias=htf_bias, struct_by_tier=struct_by_tier,
     )
     if flip_sig:
         out.append(flip_sig)
 
     # Stop-volume, when found inside this tier's zone, is its own scalp-scale candidate.
+    # Detected on ТФ-1 within the zone's time span (course стр.34), not the move's own TF.
     if zone:
-        sv = find_stop_volume(ohlcv, zone=zone, cfg=cfg)
+        sv_bars = _stop_volume_bars(zone, tf=tf, ohlcv=ohlcv, ohlcv_by_tf=ohlcv_by_tf)
+        sv = find_stop_volume(sv_bars, zone=zone, cfg=cfg)
         if sv and not (sv["lo"] <= price <= sv["hi"]):
             direction: Literal["long", "short"] = "long" if price > sv["hi"] else "short"
             catalyst = sv["hi"] if direction == "long" else sv["lo"]
@@ -1516,8 +1691,8 @@ def _scan_tier_timeframe(
             )
             if summary is not None:
                 sv_result = _apply_confluence(
-                    summary, ohlcv=ohlcv, btc_d_change_24h=btc_d_change_24h,
-                    total3_change_24h=total3_change_24h, cfg=cfg,
+                    summary, ohlcv=ohlcv,
+                    cfg=cfg,
                     htf_bias=htf_bias, struct_by_tier=struct_by_tier,
                 )
                 if sv_result is not None:

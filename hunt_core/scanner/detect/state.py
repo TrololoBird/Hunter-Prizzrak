@@ -34,8 +34,25 @@ PatternType = Literal["A", "A3", "B", "C"]
 # If a step doesn't advance within this many hours of the previous one being
 # confirmed, the tracked setup is stale — the trader's own rule ("если у нас
 # нету полноценного закрепа... цена может пойти дальше вниз") is to abandon
-# it rather than wait indefinitely.
+# it rather than wait indefinitely. Floor, used by the fast ladders.
 STEP_TIMEOUT_HOURS = 48.0
+
+_MESO_BAR_HOURS: dict[str, float] = {
+    "1w": 168.0, "1d": 24.0, "4h": 4.0, "1h": 1.0, "15m": 0.25, "5m": 1.0 / 12.0,
+}
+# A stage must be given time measured in the meso frame's OWN bars, not in wall
+# clock. detect_bokovik scans _BOKOVIK_WINDOW (30) bars, so a consolidation takes
+# ~5 days to form on a 4h frame and ~1 month on a 1d frame. A flat 48h timeout
+# reset those states long before the pattern could complete, so only 1h/15m-scale
+# setups ever emitted — which is why delivered manipulation trades had a
+# 16-minute median duration while the method targets multi-day moves.
+_STEP_TIMEOUT_BARS = 40
+
+
+def step_timeout_hours(meso_tf: str | None) -> float:
+    """Stage timeout for a ladder whose detection frame is ``meso_tf``."""
+    bar_hours = _MESO_BAR_HOURS.get(str(meso_tf or ""), 0.0)
+    return max(STEP_TIMEOUT_HOURS, bar_hours * _STEP_TIMEOUT_BARS)
 
 
 def new_symbol_state() -> dict[str, Any]:
@@ -48,7 +65,7 @@ def is_stale(state: dict[str, Any], *, now_ms: float) -> bool:
     if not anchor_ts:
         return False
     age_hours = (now_ms - anchor_ts) / 3_600_000.0
-    return age_hours > STEP_TIMEOUT_HOURS
+    return age_hours > step_timeout_hours(state.get("meso_tf"))
 
 
 def load_scanner_state(path: Path) -> dict[str, dict[str, Any]]:
@@ -67,7 +84,7 @@ def save_scanner_state(states: dict[str, dict[str, Any]], path: Path) -> None:
 
 
 __all__ = [
-    "Direction", "PatternType", "STEP_TIMEOUT_HOURS",
+    "Direction", "PatternType", "STEP_TIMEOUT_HOURS", "step_timeout_hours",
     "new_symbol_state", "is_stale",
     "load_scanner_state", "save_scanner_state",
 ]

@@ -1,0 +1,1 @@
+../../../.opencode/skills/deep-analysis/SKILL.md

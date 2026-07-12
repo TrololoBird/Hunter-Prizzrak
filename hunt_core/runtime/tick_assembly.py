@@ -42,7 +42,6 @@ from hunt_core.features.snapshot import (
     attach_pp_flags,
     btc_beta_1h,
     btc_corr_1h,
-    col as _col,
     data_quality_report,
     enrich_work_research_frames,
     impulse_context,
@@ -53,11 +52,16 @@ from hunt_core.features.snapshot import (
     regime_snapshot,
     session_stats,
     squeeze_watch,
+    stamp_derivative_zscores,
     tf_snapshot,
     tf_snapshot_for_symbol,
     tf_snapshot_lite,
 )
 from hunt_core.scanner.detect.delivery_support import liquidity_skip_reason
+from hunt_core.domain.snapshot import MarketSnapshot
+from hunt_core.features.structure import assess_market_structure
+from hunt_core.data.tick_jsonl import ensure_fusion_lifecycle_fields
+from hunt_core.features.factors import build_factor_panel
 from hunt_core.runtime.state import current_symbol_state
 from hunt_core.data.universe import PINNED_SYMBOLS
 
@@ -148,7 +152,7 @@ def _update_rolling_quote_vol_baseline(
         or (tf15 or {}).get("quote_volume")
     )
     try:
-        qv = float(quote_vol)
+        qv = float(quote_vol if quote_vol is not None else 0)
     except (TypeError, ValueError):
         return
     if qv <= 0:
@@ -257,7 +261,7 @@ def _ensure_kinematic_row_fields(
             try:
                 result["chg_24h_pct"] = round(float(raw), 2)
             except (TypeError, ValueError):
-                LOG.warning("kinematic_chg24_parse_failed", raw=raw)
+                LOG.warning("kinematic_chg24_parse_failed raw=%s", raw)
     tf = result.get("timeframes")
     if not isinstance(tf, dict):
         return
@@ -268,7 +272,8 @@ def _ensure_kinematic_row_fields(
         if block.get("change_pct") is not None or block.get("price_change_pct") is not None:
             continue
         try:
-            candle = block.get("candle") if isinstance(block.get("candle"), dict) else {}
+            _candle = block.get("candle")
+            candle = _candle if isinstance(_candle, dict) else {}
             o = float(candle.get("open") or block.get("open") or 0)
             c = float(candle.get("close") or block.get("close") or 0)
             if o > 0:
@@ -302,6 +307,7 @@ async def snapshot_symbol(
     btc_work_1m: Any | None = None,
     hunt_fusion: bool = True,
     intra_bar: Any | None = None,
+    allow_low_liquidity: bool = False,
 ) -> dict[str, Any]:
     readiness_result = None
     meta = exchange_by_sym.get(symbol)
@@ -325,6 +331,7 @@ async def snapshot_symbol(
             "symbol": symbol,
             "error": f"data.ticker_field_missing:{','.join(missing_fields)}",
         }
+    assert last_price is not None
     price = last_price
     market_row = {
         "symbol": symbol,
@@ -355,14 +362,13 @@ async def snapshot_symbol(
     )
     limits = kline_limits_override if kline_limits_override is not None else kline_limits(minimums, symbol)
     hot_tier = tier == "hot"
+    kline_map: dict[str, Any] = {}
+    fetch_errors: dict[str, str] = {}
     if kline_map_override is not None:
         kline_map = dict(kline_map_override)
-        fetch_errors: dict[str, str] = {}
     elif stagger_klines_ms > 0 and tier == "full":
         _base_tfs = ("1m", "5m", "15m", "1h", "4h", "1d")
         tf_order = _base_tfs + (("1w",) if "1w" in limits else ())
-        kline_map: dict[str, Any] = {}
-        fetch_errors: dict[str, str] = {}
         for name in tf_order:
             res = await safe_fetch(
                 lambda name=name: client.fetch_klines_cached(symbol, name, limit=limits[name]),
@@ -372,7 +378,6 @@ async def snapshot_symbol(
             kline_map[name] = res
             if res is None:
                 fetch_errors[name] = "fetch_failed"
-            await asyncio.sleep(stagger_klines_ms / 1000.0)
     else:
         snap_tier: SnapshotTier = "fast" if hot_tier else tier
         kline_map, fetch_errors = await resolve_kline_map(
@@ -404,16 +409,16 @@ async def snapshot_symbol(
         cached = get_frame_cache().kline_map(symbol)
         if cached:
             restored_errors = dict(fetch_errors)
-            for tf in REQUIRED_SIGNAL_KLINE_TFS:
-                df = kline_map.get(tf)
-                cdf = cached.get(tf)
+            for tf_key in REQUIRED_SIGNAL_KLINE_TFS:
+                df = kline_map.get(tf_key)
+                cdf = cached.get(tf_key)
                 thin = df is None or getattr(df, "is_empty", lambda: True)() or (
-                    tf == "1m" and df.height < 100
+                    tf_key == "1m" and df.height < 100
                 )
                 if thin and cdf is not None and not getattr(cdf, "is_empty", lambda: True)():
                     if cdf.height > (0 if df is None else int(df.height)):
-                        kline_map[tf] = cdf
-                        restored_errors.pop(tf, None)
+                        kline_map[tf_key] = cdf
+                        restored_errors.pop(tf_key, None)
             fetch_errors = restored_errors
 
     young_listing_bypass = should_bypass_kline_integrity(
@@ -456,15 +461,18 @@ async def snapshot_symbol(
         last_price=price,
         symbol=symbol,
     )
-    if liq_skip:
+    if liq_skip and not allow_low_liquidity:
         return {
             "ts": datetime.now(UTC).isoformat(),
             "symbol": symbol,
             "error": liq_skip,
             "liquidity_skip": True,
         }
+    if liq_skip:
+        market_row["liquidity_warning"] = liq_skip
     book = _book_from_pack(pack)
-    depth_raw = pack.get("book_depth") if isinstance(pack.get("book_depth"), dict) else {}
+    _book_depth = pack.get("book_depth")
+    depth_raw = _book_depth if isinstance(_book_depth, dict) else {}
     book_bids = normalize_depth_levels(depth_raw.get("bids") or depth_raw.get("bid_levels"))
     book_asks = normalize_depth_levels(depth_raw.get("asks") or depth_raw.get("ask_levels"))
     frames = SymbolFrames(
@@ -532,10 +540,18 @@ async def snapshot_symbol(
     else:
         work_1m = _prepare_frame(df_1m, active_groups=prep_groups)
     prepared.work_1m = work_1m
-    delta_raw = None
+    delta: float | None = None
     if prepared.work_15m is not None and not prepared.work_15m.is_empty():
-        delta_raw = _col(prepared.work_15m, "delta_ratio", None)
-    delta = None if delta_raw is None else float(delta_raw)
+        # delta is BEST-EFFORT optional (float | None; downstream handles None). Coins
+        # without agg-trade data (e.g. thin new listings in the wider universe) simply
+        # have no ``delta_ratio`` column → polars raises ColumnNotFoundError, which the
+        # old (TypeError, ValueError, IndexError) tuple missed, so the exception escaped
+        # and failed the WHOLE symbol snapshot (2026-07-11: ColumnNotFoundError traceback
+        # in run_tick). Any read failure here must degrade to None, not drop the symbol.
+        try:
+            delta = float(prepared.work_15m.item(-1, "delta_ratio"))
+        except Exception:
+            delta = None
     premium_row = premium_all.get(symbol) or premium_all.get(symbol.upper())
     funding_info = funding_info_all.get(symbol) or funding_info_all.get(symbol.upper())
     apply_rest_enrichments_local(
@@ -773,7 +789,6 @@ async def snapshot_symbol(
     if isinstance(pc, dict):
         market["pump_cycle"] = pc
     _update_rolling_quote_vol_baseline(market, tf=tf, session=session)
-    from hunt_core.features.snapshot import stamp_derivative_zscores
 
     stamp_derivative_zscores(
         market,
@@ -785,11 +800,9 @@ async def snapshot_symbol(
     )
     stamp_market_freshness(market, ws_snap, pack, client=client, symbol=symbol)
     stamp_market_derivatives_provenance(market)
-    from hunt_core.domain.snapshot import MarketSnapshot
 
     _market_snapshot = MarketSnapshot.from_market(market)
     market["_snapshot"] = _market_snapshot.to_dict()
-    from hunt_core.features.structure import assess_market_structure
 
     structure_ctx: dict[str, Any] = {**(market or {}), **(regime or {})}
     if hot_carry and isinstance(carry_cross, dict):
@@ -968,9 +981,9 @@ async def snapshot_symbol(
                 LOG.warning("maps_oi_bars_fetch_failed | symbol=%s error=%s", symbol, exc)
                 oi_bars = None
         if oi_bars is None and isinstance(liq_est, dict):
-            cached = liq_est.get("oi_bars")
-            if isinstance(cached, list):
-                oi_bars = cached
+            _oi_data = liq_est.get("oi_bars")
+            if isinstance(_oi_data, list):
+                oi_bars = _oi_data
         deep_bids: list[tuple[float, float]] | None = None
         deep_asks: list[tuple[float, float]] | None = None
         book_walls = result.get("book_walls") if isinstance(result.get("book_walls"), dict) else None
@@ -1016,8 +1029,6 @@ async def snapshot_symbol(
 
     apply_cross_exchange_flat(result)
 
-    from hunt_core.data.tick_jsonl import ensure_fusion_lifecycle_fields
-
     result["plane"] = "deep" if not hunt_fusion else "hunt"
     neutral_lc = ensure_fusion_lifecycle_fields({"phase": "neutral", "phase_fusion": "neutral"})
     result["lifecycle"] = neutral_lc
@@ -1044,9 +1055,11 @@ async def snapshot_symbol(
     try:
         from hunt_core.confluence.mtf import build_mtf_confluence
 
+        _timeframes = result.get("timeframes")
+        _timeframes = _timeframes if isinstance(_timeframes, dict) else {}
         mtf_obj = build_mtf_confluence(
             symbol,
-            result.get("timeframes") if isinstance(result.get("timeframes"), dict) else {},
+            _timeframes,
             float(result.get("price") or 0),
             market=market if isinstance(market, dict) else None,
             row=result,
@@ -1078,8 +1091,6 @@ async def snapshot_symbol(
             lifecycle_phase=str((result.get("lifecycle") or {}).get("phase") or "neutral"),
             market=market,
         )
-
-    from hunt_core.features.factors import build_factor_panel
 
     result["factor_panel"] = build_factor_panel(result)
 

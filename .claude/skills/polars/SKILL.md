@@ -1,0 +1,1 @@
+../../../.opencode/skills/polars/SKILL.md

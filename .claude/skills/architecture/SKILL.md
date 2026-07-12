@@ -1,0 +1,1 @@
+../../../.opencode/skills/architecture/SKILL.md

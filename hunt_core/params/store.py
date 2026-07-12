@@ -226,7 +226,7 @@ def universal_section(section: str) -> dict[str, Any]:
 def symbol_section(symbol: str, section: str) -> dict[str, Any]:
     sym = symbol.upper()
     per = (load_calibration().get("per_symbol") or {}).get(sym) or {}
-    block = per.get(section) if isinstance(per.get(section), dict) else {}
+    block = dict(per.get(section) or {})
     return dict(block)
 
 

@@ -12,11 +12,11 @@ requires-python = ">=3.14,<3.15"
 license = { text = "MIT" }
 authors = [{ name = "Crypto Signal Bot" }]
 dependencies = [
+    "orjson>=3.10",
     "python-dotenv>=1.2.2",
     "polars>=1.41.2",
     "polars-ols>=0.3.5",
     "polars_ta>=0.5.17",
-    "polars-trading>=0.1",
     "polars-ds>=0.12",
     "numpy>=2.4.6",
     "bottleneck>=1.4",
@@ -35,7 +35,13 @@ Homepage = "https://github.com/TrololoBird/Crypto-Analytic-Signal-Bot"
 Repository = "https://github.com/TrololoBird/Crypto-Analytic-Signal-Bot"
 
 [project.optional-dependencies]
-dev = ["ruff==0.15.16", "mypy>=2.1.0", "pytest>=8.4"]
+dev = ["ruff>=0.15", "mypy>=2.1.0", "pytest>=8.4", "pytest-asyncio>=0.25", "hypothesis>=6.100"]
+diagnostics = ["rich>=13.0"]
+monitoring = ["prometheus-client>=0.25", "prometheus-async>=26.0"]
+otel = [
+    "opentelemetry-sdk>=1.30",
+    "opentelemetry-exporter-otlp-proto-http>=1.30",
+]
 
 [tool.setuptools]
 include-package-data = true
@@ -51,7 +57,15 @@ exclude = [".git", ".venv", "_archive", "build", "dist"]
 
 [tool.ruff.lint]
 # Hunt uses lazy imports and scan split globals().update() facades.
-ignore = ["E402", "E741", "F811", "F821"]
+ignore = ["E402", "E741"]
+# TID251 (banned-api) mechanically enforces the "no pandas / no requests" rule that
+# previously lived only as prose in the AI instructions (docs/ai/rules/prohibited-apis.md).
+extend-select = ["TID251"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"pandas".msg = "No pandas — use the Polars Expression API / LazyFrame. See docs/ai/rules/prohibited-apis.md."
+"pandas.DataFrame".msg = "No pandas — use polars.DataFrame / LazyFrame. See docs/ai/rules/prohibited-apis.md."
+"requests".msg = "No requests — the stack is fully async; use aiohttp. See docs/ai/rules/prohibited-apis.md."
 
 [tool.ruff.lint.per-file-ignores]
 "hunt_core/runtime/_impl.py" = ["E402"]
@@ -59,3 +73,12 @@ ignore = ["E402", "E741", "F811", "F821"]
 "hunt_core/market/streams.py" = ["E741"]
 "hunt_core/runtime/cycle.py" = ["F841"]
 "hunt_core/data_readiness.py" = ["F841"]
+
+[tool.mypy]
+ignore_missing_imports = true
+warn_unused_ignores = false
+exclude = ["_archive", "build", "dist"]
+
+[[tool.mypy.overrides]]
+module = ["hunt_core.toolkit.*", "hunt_core.research.*"]
+ignore_errors = true

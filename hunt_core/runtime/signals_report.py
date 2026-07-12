@@ -253,7 +253,7 @@ def _format_active_block(
     extra = collect_report_blockers(
         setup, direction=direction, symbol=sym, lifecycle=lc, row=row
     )
-    secondary = [b for b in extra if b.code != primary][:2] if primary else extra[:2]
+    secondary = [b for b in extra if b.code != primary.code][:2] if primary else extra[:2]
     advice = evaluate_stale_advice(
         symbol=sym, direction=direction, lifecycle=lc, setup=setup, sig=sig
     )
@@ -310,7 +310,7 @@ def _format_active_block(
     realert_blockers = [
         b for b in extra if b.code not in {"not_confirmed"} or not sig.get("tp1_hit")
     ]
-    if primary.ok:
+    if primary is not None and primary.ok:
         lines.append("✅ <b>Re-alert</b> сейчас прошёл бы")
     elif realert_blockers:
         lines.append(

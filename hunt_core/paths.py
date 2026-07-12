@@ -56,6 +56,8 @@ EVIDENCE_TRACE_JSONL = DATA / "evidence_trace.jsonl"
 RECONCILE_PATH_SHADOW_JSONL = DATA / "reconcile_path_shadow.jsonl"
 CALIBRATION_CACHE = DATA / "calibration_cache.json"
 INFRA_SNAPSHOTS = DATA / "infra_snapshots"
+# Market-cap доп-фактор (Павел М.) — CoinGecko free supply/cap series, off the tick plane.
+MARKETCAP_CACHE = DATA / "marketcap_cache"
 
 __all__ = [
     "ADAPTIVE_THRESHOLDS",
@@ -81,6 +83,7 @@ __all__ = [
     "LAKE_DB",
     "LAKE_PARQUET",
     "MAPS_LAKE_JSONL",
+    "MARKETCAP_CACHE",
     "MARKET_REGIME",
     "OUTCOME_LEDGER",
     "PREP_SHADOW_EVENTS",

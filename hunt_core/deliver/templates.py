@@ -12,7 +12,8 @@ def format_advisory_early(row: dict[str, Any], *, note: str) -> str:
 
 def format_pinned_summary(row: dict[str, Any]) -> str:
     sym = str(row.get("symbol") or "").replace("USDT", "-USDT")
-    summary = row.get("prizrak_summary") if isinstance(row.get("prizrak_summary"), dict) else {}
+    _s = row.get("prizrak_summary")
+    summary: dict[str, Any] = _s if isinstance(_s, dict) else {}
     _ACTION_RU = {"long": "ЛОНГ", "short": "ШОРТ", "wait": "ЖДЁМ"}
     action = str(summary.get("action") or "wait").lower()
     direction = _ACTION_RU.get(action, "—")
@@ -91,7 +92,8 @@ def _squeeze_direction(
     elif phase_txt:
         evidence.append(f"Lifecycle: {html.escape(phase_txt)}")
 
-    structure = row.get("structure") if isinstance(row.get("structure"), dict) else {}
+    _s2 = row.get("structure")
+    structure: dict[str, Any] = _s2 if isinstance(_s2, dict) else {}
     struct_bias = str(
         structure.get("structure_bias")
         or lifecycle.get("structure_bias")

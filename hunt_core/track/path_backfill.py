@@ -56,13 +56,13 @@ def compute_derived_from_path(
         }
 
     best_favorable = 0.0
-    best_favorable_ts: int | None = None
+    best_favorable_ts: float | None = None
     worst_adverse = 0.0
-    worst_adverse_ts: int | None = None
+    worst_adverse_ts: float | None = None
     # First-touch tracking: for each ATR threshold, the first bar whose
     # high/low crosses it (adverse resolved first within a bar — loss-first
     # tie-break, see module docstring).
-    first_touch: dict[float, int | None] = {g: None for g in _FIRST_PASSAGE_ATR_GRID}
+    first_touch: dict[float, float | None] = {g: None for g in _FIRST_PASSAGE_ATR_GRID}
     ret_at_offsets: dict[str, float] = {}
     offsets_remaining = {m: (m, f"+{m}m" if m < 60 else f"+{m // 60}h") for m in _RET_OFFSETS_MIN}
 

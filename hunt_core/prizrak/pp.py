@@ -71,6 +71,20 @@ def confirmation_bodies(bars: list[dict[str, float]], *, level: float, side: Lit
     return count
 
 
+def pp_confirmed(pp: dict[str, Any], *, direction: Literal["long", "short"], min_bodies: int) -> bool:
+    """True if a detected ПП has closed enough bodies beyond its level to be a слом.
+
+    Course (стр.55): a ПП level "требует подтверждения (закрытия под/над уровнем 2-3
+    полных тел свечей ЭТОГО ТФ)". A single close beyond is a прокол, not a слом, and
+    the course is explicit that no position is taken on it. ``detect_pereprior`` flags
+    the structural pattern off one close; this is the confirmation gate on top.
+    """
+    for kind in ("true", "early"):
+        if pp.get(f"pp_{kind}_{direction}"):
+            return int(pp.get(f"pp_{kind}_{direction}_bodies") or 0) >= min_bodies
+    return False
+
+
 def detect_pereprior(bars: list[dict[str, float]]) -> dict[str, Any]:
     """Истинный/ранний ПП, both directions, on one bar list (already sliced to a tier's lookback)."""
     empty = {
@@ -81,7 +95,7 @@ def detect_pereprior(bars: list[dict[str, float]]) -> dict[str, Any]:
     if len(pivots) < 2 or not bars:
         return empty
     close = bars[-1]["close"]
-    out = dict(empty)
+    out: dict[str, Any] = dict(empty)
 
     # --- Short side: look for high -> low sequences ---
     hl_pairs = [
@@ -143,4 +157,4 @@ def detect_pereprior(bars: list[dict[str, float]]) -> dict[str, Any]:
     return out
 
 
-__all__ = ["detect_pereprior", "confirmation_bodies", "_wick_zone"]
+__all__ = ["detect_pereprior", "confirmation_bodies", "pp_confirmed", "_wick_zone"]

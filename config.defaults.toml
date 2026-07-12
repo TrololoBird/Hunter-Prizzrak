@@ -1,7 +1,8 @@
-# Hunt Watch — пороги (reference)
+# Hunt Watch — пороги (canonical source of truth)
 
-# Скопируй нужное в config.toml [universe] / env при кастомизации.
-# Основной runtime читает корневой config.toml.
+# Единственный источник порогов. config.toml мёржит поверх него только
+# [bot]/[bot.network] (см. load_settings() в hunt_core/domain/config.py) —
+# любые другие секции в config.toml не читаются.
 
 [hunter]
 min_quote_volume_usd = 10_000_000
@@ -83,50 +84,6 @@ analyst = { BTCUSDT = true, ETHUSDT = true, SOLUSDT = true, XRPUSDT = true, XAUU
 interval_s = 300
 tg_on_change = true
 tg_stale_hours = 4
-
-[hunt.expansion.runtime]
-# PRE-PUMP / PRE-DUMP engine — separate from Verdict V2 and fusion delivery.
-enabled = true
-mode = "production"
-watch_stamp = false
-# /expand TG operator commands — lab only until expansion_engine retired.
-operator_commands = false
-# Background expansion loops + row stamping — off in production watch.
-lab_runtime = false
-review_loop = false
-review_interval_s = 3600
-apply_calibration = true
-
-[hunt.expansion.persistence]
-history_persist = true
-history_persist_samples = 40
-history_persist_max_symbols = 64
-runtime_save_interval_s = 300
-
-[hunt.expansion.thresholds]
-delta_lookback_bars = 120
-persistence_threshold = 0.80
-forecast_min_quality = 0.55
-execution_min_trigger = 0.50
-fake_breakout_block = 0.55
-scan_top_n = 50
-state_strong_prob = 0.62
-state_dominance_ratio = 1.20
-state_pivot_prob = 0.45
-
-[hunt.expansion.telegram]
-# Pinned TG alerts — lab only (HUNT_EXPANSION_LAB=1)
-tg_pinned_alerts = false
-tg_on_change = true
-tg_min_quality = 0.45
-tg_min_trigger = 0.50
-tg_stale_hours = 4
-tg_cooldown_min = 45
-# Watch-universe scan alerts — lab only
-tg_universe_scan = false
-tg_universe_interval_s = 900
-tg_universe_top_n = 5
-tg_universe_min_opp = 0.35
 
 [analyst]
 enabled = true

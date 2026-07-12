@@ -21,8 +21,8 @@ class ScaleTier(BaseModel):
 
 
 class PrizrakConfig(BaseModel):
-    """Reads ``[deep.prizrak]`` from config.defaults.toml/config.toml, same convention
-    as ``deep.pipeline.config.PipelineConfig``."""
+    """Reads ``[deep.prizrak]`` from config.defaults.toml only — config.toml is never
+    consulted (load_settings() merges only ``[bot]``/``[bot.network]`` from it)."""
 
     enabled: bool = True
 
@@ -57,17 +57,24 @@ class PrizrakConfig(BaseModel):
     # Stop-volume: sub-range width must be below this fraction of the parent range's ATR-normalized width.
     stop_volume_width_ratio_max: float = Field(default=0.35, ge=0.05, le=1.0)
 
-    # Minimum acceptable R:R against the nearest real structural target. Course:
-    # "RR золотой стандарт 1:3+" — this is a floor, not the target, to reject
-    # geometrically broken trades (stop far, nearest real target barely past entry)
-    # rather than deliver a "favorable"-looking signal that risks more than it can gain.
-    min_rr: float = Field(default=1.2, ge=0.5)
+    # Stop buffer BEYOND the structure boundary (course стр.19: "СТОП прятать с запасом за
+    # структуру (границы) 1-5%"; стр.33 safe: 1-3%). The stop sits this far below the zone
+    # low (long) / above the zone high (short), so a вик/сквиз into the structure does not
+    # take it out. Raise toward 0.03-0.05 for assets that squeeze past the boundary often.
+    stop_buffer_pct: float = Field(default=0.02, ge=0.01, le=0.05)
+
+    # Minimum acceptable R:R against the nearest real structural target. Course стр.9:
+    # "Золотым стандартом считаются сделки с РР 1к3 и выше" — 1:3 is the target. Once the
+    # stop is structural (behind the зона, not a flat 2% off entry), the RR distribution
+    # is honest: measured median ≈0.95, so the old 1.2 floor passed barely-positive
+    # geometry (42% of candidates). This floor requires the gain to be at least DOUBLE the
+    # structural risk — sub-standard setups abstain (стр.33: нет структурного RR → нет
+    # сделки) — while leaving 1:3 as the aspirational target and room for intermediate
+    # "по пути" takes (стр.19). Raise toward 3.0 for gold-standard-only delivery.
+    min_rr: float = Field(default=2.0, ge=0.5)
 
     # Squeeze proxy for вымпел/клин (figures v1): BB width percentile below this = squeeze.
     squeeze_bb_pctile_max: float = Field(default=0.20, ge=0.0, le=1.0)
-
-    # Dominance confluence: |btc_d_change_24h| below this = neutral/no confluence.
-    dominance_neutral_band_pct: float = Field(default=0.5, ge=0.0)
 
     # Multi-scale structure detection (HH/HL/LH/LL + BOS/CHoCH) — course "слом структуры".
     # Previously hardcoded in pipeline/structure.py; config-driven so it can track tiers.
@@ -100,6 +107,21 @@ class PrizrakConfig(BaseModel):
     # entry price in the middle fraction of the value area (VAH/VAL) are vetoed.
     # 0.0=no veto, 0.5=veto when price within middle 50% of the value area, etc.
     regime_range_veto_mid_fraction: float = Field(default=0.40, ge=0.0, le=1.0)
+
+    # Market-cap доп-фактор (Павел М., prizrak_marketcap_factor) — the cap chart as a
+    # calibration factor for true-value/price divergence. OFF by default: it needs a
+    # non-CCXT free supply source (CoinGecko), fetched off the critical tick plane and
+    # silently neutral when unavailable, so enabling it never risks the live path.
+    marketcap_enabled: bool = Field(default=False)
+    # Strength bonus when the cap trend confirms the trade direction (damped 0.5× when
+    # supply is unstable — a moving supply decouples cap from price).
+    marketcap_confirm_bonus: float = Field(default=0.10, ge=0.0, le=0.15)
+    # Penalty when the cap trend opposes the trade — the low-float-pump risk (price pushed
+    # one way while true value went the other). Not damped: instability is the mechanism.
+    marketcap_diverge_penalty: float = Field(default=0.12, ge=0.0, le=0.15)
+    # Recent price-vs-cap % drift below which supply is treated as stable (1:1 level
+    # transfer valid). Above it, supply is moving so the confirm bonus is damped.
+    marketcap_supply_drift_pct: float = Field(default=0.05, ge=0.0, le=0.5)
 
     _instance: ClassVar["PrizrakConfig | None"] = None
 

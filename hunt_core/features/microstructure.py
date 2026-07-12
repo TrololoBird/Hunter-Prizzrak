@@ -138,7 +138,7 @@ def add_microstructure_features(df: pl.DataFrame) -> pl.DataFrame:
         result = result.with_columns(
             (
                 pl.col("_taker_imbalance")
-                - pl.col("_taker_imbalance").ewm_mean(span=96, min_periods=1)
+                - pl.col("_taker_imbalance").ewm_mean(span=96, min_samples=1)
             ).alias("_taker_imbalance_dev")
         )
         result = result.with_columns(
@@ -156,15 +156,15 @@ def add_microstructure_features(df: pl.DataFrame) -> pl.DataFrame:
     # realized_vol_20 when the tail-metrics stage has already populated it, else
     # falls back to the rolling std of log returns so the column is always real.
     if "realized_vol_20" in result.columns:
-        vov_base = pl.col("realized_vol_20").fill_null(0.0).fill_nan(0.0)
+        vov_series = result["realized_vol_20"].fill_null(0.0).fill_nan(0.0)
     elif "close" in result.columns:
-        close = result["close"].cast(pl.Float64, strict=False)
-        log_ret = (close / close.shift(1)).log().fill_null(0.0).fill_nan(0.0)
-        vov_base = _rolling_std_series(log_ret, 20, ddof=1)
+        close_series = result["close"].cast(pl.Float64, strict=False)
+        log_ret = (close_series / close_series.shift(1)).log().fill_null(0.0).fill_nan(0.0)
+        vov_series = _rolling_std_series(log_ret, 20, ddof=1)
     else:
-        vov_base = None
-    if vov_base is not None:
-        result = result.with_columns(vov_base.alias("_vov_base"))
+        vov_series = None
+    if vov_series is not None:
+        result = result.with_columns(vov_series.alias("_vov_base"))
         result = result.with_columns(
             _rolling_std_series(result["_vov_base"], 20, ddof=1).alias("vol_of_vol_20")
         ).drop("_vov_base")
@@ -215,7 +215,7 @@ def add_microstructure_features(df: pl.DataFrame) -> pl.DataFrame:
 # ---------------------------------------------------------------------------
 
 
-def _finite_float(value: object, default: float | None = None) -> float | None:
+def _finite_float(value: Any, default: float | None = None) -> float | None:
     try:
         numeric = float(value)
     except (TypeError, ValueError):

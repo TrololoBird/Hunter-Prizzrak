@@ -1,6 +1,13 @@
 # SPEC v5.1 — 5 Module Pipeline Final Specification
 
-Статус: Утверждена
+> ⚠️ **DEPRECATED — do not align code to this document.** It describes an abandoned
+> systematic pipeline (KER, EMA-slope, funding percentile, OI rank, CoinMarketCap macro)
+> that contradicts `CLAUDE.md` ("no CoinMarketCap"). The live decision authority is the
+> PrizrakTrade Deep engine (`hunt_core/prizrak/`) and the manipulation scanner
+> (`hunt_core/scanner/`). See **`docs/ARCHITECTURE.md`** for the current target design.
+> Kept for historical reference only.
+
+Статус: ~~Утверждена~~ → **устарела**
 Дата: 2026-07-02
 
 ## Macro Filter

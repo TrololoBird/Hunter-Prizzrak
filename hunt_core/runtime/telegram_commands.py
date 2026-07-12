@@ -221,7 +221,7 @@ class HuntTelegramCommands:
             try:
                 await broadcaster.send_html(f"⏳ <b>/signal {sym_label}</b> — {note}")
                 await asyncio.wait_for(
-                    deliver_signal_probe(broadcaster, sym, live=live, client=self._client),
+                    deliver_signal_probe(broadcaster, sym, live=live, client=self._client, allow_low_liquidity=True),
                     timeout=_SIGNAL_PROBE_TIMEOUT_S,
                 )
             except asyncio.TimeoutError:
@@ -277,9 +277,11 @@ class HuntTelegramCommands:
             text = str(message.get("text") or message.get("caption") or "").strip()
             if not text:
                 continue
-            chat = message.get("chat") if isinstance(message.get("chat"), dict) else {}
+            _chat_raw = message.get("chat")
+            chat: dict[str, Any] = _chat_raw if isinstance(_chat_raw, dict) else {}
             chat_id = int(chat.get("id") or 0)
-            from_user = message.get("from") if isinstance(message.get("from"), dict) else {}
+            _from_raw = message.get("from")
+            from_user: dict[str, Any] = _from_raw if isinstance(_from_raw, dict) else {}
             user_id = int(from_user.get("id") or 0) or None
             return chat_id, user_id, text
         return None

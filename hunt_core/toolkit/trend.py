@@ -6,6 +6,7 @@ from __future__ import annotations
 import math
 from typing import Any, Literal
 
+from hunt_core.features.feature_engine import _coerce_float, _scalar_bool
 from hunt_core.toolkit.adx_thresholds import (
     ADX_BIAS_MIN,
     ADX_PANEL_NEUTRAL,

@@ -23,6 +23,18 @@
     ]
   },
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/tonyaleksandrov/Documents/HUNTER/.venv/bin/python /Users/tonyaleksandrov/Documents/HUNTER/scripts/guard_edit.py",
+            "statusMessage": "guard: prohibited APIs"
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "Edit|Write",

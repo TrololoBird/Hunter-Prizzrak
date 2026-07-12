@@ -146,7 +146,8 @@ def process_lifecycle_tick(
     commit: bool = True,
 ) -> LifecycleTransition:
     """Evaluate one tick — emit only on real setup state advance; WAIT → silence."""
-    summary = row.get("prizrak_summary") if isinstance(row.get("prizrak_summary"), dict) else {}
+    summary_raw = row.get("prizrak_summary")
+    summary: dict[str, Any] = summary_raw if isinstance(summary_raw, dict) else {}
     action = str(summary.get("action") or "wait").lower()
     sym = str(row.get("symbol") or "").upper()
     as_of = str(row.get("as_of") or row.get("ts") or datetime.now(UTC).isoformat())

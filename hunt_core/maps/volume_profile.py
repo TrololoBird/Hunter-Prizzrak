@@ -81,8 +81,10 @@ def _volume_histogram(
     if work.is_empty():
         return {}
     tail = work.tail(lookback) if lookback else work
-    price_min = float(tail["low"].min() or 0)
-    price_max = float(tail["high"].max() or 0)
+    _min = tail["low"].min()
+    price_min = float(_min) if isinstance(_min, (int, float)) else 0.0
+    _max = tail["high"].max()
+    price_max = float(_max) if isinstance(_max, (int, float)) else 0.0
     if price_max <= price_min:
         return {}
     bucket_size = (price_max - price_min) / max(1, buckets)
@@ -196,8 +198,10 @@ def build_period_profile(
         value_area_pct=value_area_pct,
     )
     tail = work.tail(lookback) if lookback else work
-    price_min = float(tail["low"].min() or 0)
-    price_max = float(tail["high"].max() or 0)
+    _min = tail["low"].min()
+    price_min = float(_min) if isinstance(_min, (int, float)) else 0.0
+    _max = tail["high"].max()
+    price_max = float(_max) if isinstance(_max, (int, float)) else 0.0
     bucket_size = (price_max - price_min) / max(1, buckets) if price_max > price_min else 1.0
     hist = _volume_histogram(work, lookback=lookback, buckets=buckets)
     hvn, lvn = _hvn_lvn_nodes(hist, price_min=price_min, bucket_size=bucket_size)

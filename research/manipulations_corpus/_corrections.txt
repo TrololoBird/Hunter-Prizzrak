@@ -1,0 +1,9 @@
+# Ticker/jargon mis-hearings from whisper. Format: wrong => right
+# Applied case-insensitively on word boundaries to every segment.
+ESPROC => ESPORTS
+Зеребро => ZEREBRO
+за ребро => ZEREBRO
+вельвет => VELVET
+плейс-аут => PLAY
+плейс аут => PLAY
+файдинг => фандинг

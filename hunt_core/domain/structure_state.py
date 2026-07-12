@@ -43,9 +43,12 @@ class StructureState:
 
 def structure_state_from_row(row: dict[str, Any]) -> StructureState:
     """Build StructureState from tick row structure + prepared regime fields."""
-    struct = row.get("structure") if isinstance(row.get("structure"), dict) else {}
-    regime = row.get("regime") if isinstance(row.get("regime"), dict) else {}
-    lc = row.get("lifecycle") if isinstance(row.get("lifecycle"), dict) else {}
+    _struct = row.get("structure")
+    struct = _struct if isinstance(_struct, dict) else {}
+    _regime = row.get("regime")
+    regime = _regime if isinstance(_regime, dict) else {}
+    _lc = row.get("lifecycle")
+    lc = _lc if isinstance(_lc, dict) else {}
 
     htf_1h = str(regime.get("regime_1h_confirmed") or struct.get("structure_1h") or "ranging")
     htf_4h = str(regime.get("regime_4h_confirmed") or struct.get("regime_4h_confirmed") or "ranging")

@@ -49,8 +49,9 @@ def plain_delivery_reasons(
     phase = str(lc.get("phase") or "")
     if phase:
         reasons.append(f"Фаза: {phase_human(phase)}")
-    struct = row.get("structure") if isinstance(row.get("structure"), dict) else {}
-    sb = str(struct.get("structure_bias") or lc.get("structure_bias") or "")
+    _struct_raw = row.get("structure")
+    struct = _struct_raw if isinstance(_struct_raw, dict) else {}
+    sb = str(struct.get("structure_bias") or (lc or {}).get("structure_bias") or "")
     if sb in {"long", "short"}:
         reasons.append(f"Structure bias: {sb}")
     raw = confirm_reasons if confirm_reasons is not None else list(setup.get("confirm_hard") or [])
@@ -116,9 +117,9 @@ def format_mtf_section(
     def _hunt_confirmed_direction(r: dict[str, Any]) -> str:
         dump_s = r.get("dump") if isinstance(r.get("dump"), dict) else {}
         long_s = r.get("long") if isinstance(r.get("long"), dict) else {}
-        if dump_s.get("confirmed") or dump_s.get("intrabar_confirmed"):
+        if (dump_s or {}).get("confirmed") or (dump_s or {}).get("intrabar_confirmed"):
             return "short"
-        if long_s.get("confirmed") or long_s.get("intrabar_confirmed"):
+        if (long_s or {}).get("confirmed") or (long_s or {}).get("intrabar_confirmed"):
             return "long"
         return ""
 
@@ -261,15 +262,15 @@ def format_forecast_section(
 ) -> str:
     """Generalized forecast section for predump / coil / ignition."""
     fusion = row.get("manipulation_fusion") if isinstance(row.get("manipulation_fusion"), dict) else {}
-    arch = archetype or str(fusion.get("archetype") or "")
+    arch = archetype or str((fusion or {}).get("archetype") or "")
     forecasts = row.get("forecasts") if isinstance(row.get("forecasts"), dict) else {}
     fc = row.get("maps_forecast")
     if arch == "predump_short":
-        fc = forecasts.get("predump_short") or fc
+        fc = (forecasts or {}).get("predump_short") or fc
         title = "Pre-dump forecast"
         hint = "цели markdown ↓"
     elif arch == "ignition_long":
-        fc = forecasts.get("ignition_long") or fc
+        fc = (forecasts or {}).get("ignition_long") or fc
         title = "Ignition forecast"
         hint = "squeeze magnet ↑"
     else:
@@ -312,7 +313,7 @@ def format_accumulation_forecast_section(
 ) -> str:
     """Pre-pump forecast — long-only accumulation breakout; hide during dump lifecycle."""
     lc = row.get("lifecycle") if isinstance(row.get("lifecycle"), dict) else {}
-    lc_phase = str(lc.get("phase") or "")
+    lc_phase = str((lc or {}).get("phase") or "")
     if lc_phase in {
         "dump_initiating",
         "dump_active",
@@ -351,13 +352,14 @@ def format_accumulation_forecast_section(
     factors = fc.get("factors") or []
     if factors:
         lines.append("Fuel: " + ", ".join(html.escape(str(f)) for f in factors[:4]))
-    acc = market.get("map_vp_accumulation")
+    acc = (market or {}).get("map_vp_accumulation")
     if acc is not None:
         lines.append(f"VP accumulation: <code>{float(acc):.2f}</code>")
-    if market.get("map_accum_bid_absorption"):
+    if (market or {}).get("map_accum_bid_absorption"):
         lines.append("Bid absorption + sticky support")
-    if market.get("map_void_above"):
-        lines.append(f"Void path ↑ <code>{_fmt_price(float(market['map_void_above']))}</code>")
+    void_above = (market or {}).get("map_void_above")
+    if void_above:
+        lines.append(f"Void path ↑ <code>{_fmt_price(float(void_above))}</code>")
     return "\n".join(lines)
 
 
@@ -597,7 +599,7 @@ def format_book_walls_section(row: dict[str, Any]) -> str:
         return clusters[:3]
 
     freshness = row.get("freshness") if isinstance(row.get("freshness"), dict) else {}
-    dom_age = freshness.get("dom_age_s")
+    dom_age = (freshness or {}).get("dom_age_s")
     if dom_age is not None and float(dom_age) > 30:
         dom_label = f"DOM · {float(dom_age):.0f}с назад"
     else:
@@ -624,7 +626,14 @@ def format_book_walls_section(row: dict[str, Any]) -> str:
             return ""
         intensity = b.get("intensity")
         pct = f" · {float(intensity):.0%} от макс." if intensity is not None else ""
-        return f"{emoji} {side}: ≈{_fmt_price(float(center))} ({_fmt_usd_compact(float(depth or 0))}{pct})"
+        # A bin aggregates a price band ~0.5% wide; printing its centre alone reads
+        # as a single resting order at that exact price.
+        p_lo, p_hi = b.get("price_lo"), b.get("price_hi")
+        if p_lo is not None and p_hi is not None:
+            band = f"{_fmt_price(float(p_lo))}–{_fmt_price(float(p_hi))}"
+        else:
+            band = f"≈{_fmt_price(float(center))}"
+        return f"{emoji} {side}: {band} ({_fmt_usd_compact(float(depth or 0))}{pct})"
 
     if depth_bins and (depth_bins.get("bid_bins") or depth_bins.get("ask_bins")):
         for b in (depth_bins.get("bid_bins") or [])[:2]:

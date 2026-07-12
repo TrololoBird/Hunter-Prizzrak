@@ -243,10 +243,10 @@ def _backtest_snippet() -> str | None:
     summary = rep.get("summary") or rep
     confirmed = summary.get("confirmed") or summary.get("by_kind", {}).get("confirmed") or {}
     if isinstance(confirmed, dict) and confirmed:
-        w = confirmed.get("win", confirmed.get("wins", 0))
-        losses = confirmed.get("loss", confirmed.get("losses", 0))
+        w = int(confirmed.get("win", confirmed.get("wins", 0)) or 0)
+        losses_n = confirmed.get("loss", confirmed.get("losses", 0))
         flats = confirmed.get("flat", 0)
-        return f"<b>TG backtest (&lt;24h):</b> win {w} · loss {losses} · flat {flats}"
+        return f"<b>TG backtest (&lt;24h):</b> win {w} · loss {losses_n} · flat {flats}"
     return None
 
 

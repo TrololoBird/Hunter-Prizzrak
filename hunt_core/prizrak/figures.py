@@ -20,7 +20,7 @@ from typing import Any
 
 from hunt_core.prizrak.config import PrizrakConfig
 from hunt_core.prizrak.confluence import _bb_width_pctile, _closes
-from hunt_core.prizrak.pp import detect_pereprior
+from hunt_core.prizrak.pp import detect_pereprior, pp_confirmed
 from hunt_core.prizrak.structure import bars_from_ohlcv
 
 
@@ -70,13 +70,13 @@ def tag_figure(summary: dict[str, Any], *, ohlcv: list[list[float]], cfg: Prizra
 
     figure: str | None = None
 
-    # ГиП = частный случай ПП (стр.61)
-    if bars:
+    # ГиП = частный случай ПП (стр.61). Only tag it once the ПП is confirmed by 2-3
+    # closed bodies (стр.55) — an unconfirmed break is a прокол, and calling that a
+    # "слом структуры" asserts a reversal the course says has not happened yet.
+    if bars and direction in ("long", "short"):
         pp = detect_pereprior(bars)
-        if direction == "long" and (pp.get("pp_true_long") or pp.get("pp_early_long")):
-            figure = "гип/слом структуры (ПП лонг)"
-        elif direction == "short" and (pp.get("pp_true_short") or pp.get("pp_early_short")):
-            figure = "гип/слом структуры (ПП шорт)"
+        if pp_confirmed(pp, direction=direction, min_bodies=cfg.trap_proboy_min_bodies):
+            figure = f"гип/слом структуры (ПП {'лонг' if direction == 'long' else 'шорт'})"
 
     # Двойное/тройное дно-вершина = 2-3 касания границы накопления (стр.62)
     if figure is None and zone:

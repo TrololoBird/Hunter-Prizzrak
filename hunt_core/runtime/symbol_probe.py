@@ -379,6 +379,9 @@ async def probe_pinned_deep(
             if cache_is_fresh(sym):
                 out["_pinned_cache"] = load_pinned_cache(sym)
             return out
+    if client is None:
+        msg = f"probe_deep: no client for {sym}"
+        raise RuntimeError(msg)
     row = await assemble_analyst_tick(sym, client, stagger_ms=max(stagger_ms, 200))
     if cache_is_fresh(sym):
         row["_pinned_cache"] = load_pinned_cache(sym)
@@ -457,6 +460,7 @@ async def deliver_signal_probe(
     stagger_ms: int = _STAGGER_MS,
     live: bool = False,
     client: HuntCcxtClient | None = None,
+    allow_low_liquidity: bool = False,
 ) -> dict[str, Any]:
     """Reply with query result for ``symbol`` (store-first, full blocker explain).
 
@@ -472,9 +476,10 @@ async def deliver_signal_probe(
     )
 
     row, _source, from_store, age_s = await resolve_query_row(
-        sym, live=live, stagger_ms=stagger_ms, client=client
+        sym, live=live, stagger_ms=stagger_ms, client=client, allow_low_liquidity=allow_low_liquidity
     )
     audit = row.get("_signal_audit") or {}
+    liq_warn = row.get("liquidity_warning")
     if row.get("error"):
         extra = ""
         if audit.get("issues"):
@@ -491,6 +496,8 @@ async def deliver_signal_probe(
     text = format_query_telegram(
         query, added_watch=bool(row.get("_watchlist_added"))
     )
+    if liq_warn:
+        text = f"⚠️ <b>Низкая ликвидность:</b> <code>{html.escape(liq_warn)}</code>\n\n{text}"
     from hunt_core.deliver.confluence_grid import build_confluence_grid, format_grid_telegram
     from hunt_core.deliver._sections import format_intraday_maps_telegram
 

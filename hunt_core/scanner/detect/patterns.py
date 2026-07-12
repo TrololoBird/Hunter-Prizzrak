@@ -23,6 +23,11 @@ from typing import Any
 
 import polars as pl
 
+
+def _to_float(val: Any) -> float:
+    return float(val) if val is not None else 0.0
+
+
 from hunt_core.scanner.detect.events import (
     ohlcv_to_df, compute_features, atr,
     detect_impulse, detect_consecutive_impulse,
@@ -32,8 +37,8 @@ from hunt_core.scanner.detect.events import (
     two_bar_reversal,
     bos_up, bos_down, choch_bull, choch_bear,
     bullish_volume,
-    break_above_level_recent,
     is_ascending_channel, is_descending_channel,
+    _adaptive_buffer,
 )
 from hunt_core.scanner.detect.state import Direction, PatternType, new_symbol_state, is_stale
 from hunt_core.scanner.detect.scoring import full_confirmation_score
@@ -53,10 +58,20 @@ _BOKOVIK_WINDOW = 30
 # runs every ladder per symbol, each with its own persisted state, so a setup at
 # any scale is caught by its matching ladder.
 _TF_LADDERS: tuple[tuple[str, str, str], ...] = (
+    ("1w", "1d", "4h"),
     ("1d", "4h", "15m"),
     ("4h", "1h", "15m"),
     ("1h", "15m", "5m"),
 )
+
+# Macro context needs enough bars to hold a real extreme, but _MACRO_LOOKBACK_BARS//2
+# (90 bars) means 90 WEEKS on a 1w frame — nearly two years of listing history.
+# Measured on a 25-symbol watchlist sample: 10 symbols clear 90 weeks, 2 more sit in
+# 40-89 (PAXG, MORPHO) and would be excluded for no structural reason, and 13 recent
+# listings clear neither. 40 weeks (~9 months) is enough weekly context to place a
+# macro extreme and stops the guard from being about listing age.
+_MACRO_MIN_BARS: dict[str, int] = {"1w": 40}
+_MACRO_MIN_BARS_DEFAULT = _MACRO_LOOKBACK_BARS // 2
 
 
 @dataclass
@@ -131,8 +146,8 @@ def _macro_extreme(df: pl.DataFrame, *, direction: Direction) -> float | None:
     if window.height == 0:
         return None
     if direction == "short":
-        return float(window["high"].max())
-    return float(window["low"].min())
+        return _to_float(window["high"].max())
+    return _to_float(window["low"].min())
 
 
 def _prior_swing_high(df: pl.DataFrame, lookback: int = 60, *, exclude_last: int = 15) -> tuple[float, int] | None:
@@ -365,13 +380,14 @@ def _build_setup(
     entry_ref: float | None, evidence: list[str], total_steps: int,
     target_ladder: tuple[float, ...] = (),
     micro_confirmed: bool = False,
+    micro_tf: str = "15m",
 ) -> ManipulationSetup:
     return ManipulationSetup(
         direction=direction,
         pattern_type=pattern_type,
         score=full_confirmation_score(),
         meso_tf=meso_tf,
-        micro_tf="15m",
+        micro_tf=micro_tf,
         micro_confirmed=micro_confirmed,
         swept_level=swept_level,
         sweep_extreme=sweep_extreme,
@@ -394,6 +410,7 @@ def _advance_pattern_a(
     macro_df: pl.DataFrame, meso_df: pl.DataFrame, meso_tf: str,
     micro_15m: pl.DataFrame | None, state: dict[str, Any], now_ms: float,
     *,
+    micro_tf: str = "15m",
     htf_df: pl.DataFrame | None = None,
     htf_bias: str | None = None,
     funding_ctx: dict[str, Any] | None = None,
@@ -437,11 +454,13 @@ def _advance_pattern_a(
             return {**state, "stage": 3, "anchor_ts": now_ms, "data": data}, None
 
         if stage == 3:
-            # Type 1 (author's aggressive-dump long): the long is taken at
-            # the LOW of the consolidation the moment its low is swept
-            # ("вход у низа второй консолидации"), NOT after the 15m breaks up.
-            # bos_up/choch_bull is a STRENGTH upgrade only (ltf_confirmed vs
-            # ltf_pending). Stop below the swept low + averaging handle a deeper wick.
+            # The floor low was swept — now ARM and wait for the LTF слом that
+            # confirms the reversal. Emitting at the bare sweep (the old behaviour)
+            # is a falling knife: backtest (dataset_v8+v9) showed EVERY Type-1 floor
+            # entry was ltf_pending (by construction the 15m up-break cannot exist on
+            # the same bar the low is swept) and went 0W/25L/18timeout. The author's
+            # own reliable Type-1 entry is «когда у нас будет подтверждение слома
+            # структуры нисходящей» — so confirmation is a gate, taken on stage 4.
             bokovik = data.get("bokovik")
             if not bokovik:
                 return new_symbol_state(), None
@@ -453,41 +472,46 @@ def _advance_pattern_a(
             )
             if not sweep_ok:
                 return state, None
+            data["sweep_extreme"] = float(sweep_extreme)
+            return {**state, "stage": 4, "anchor_ts": now_ms, "data": data}, None
+
+        if stage == 4:
+            # Await the LTF слом confirmation before entering the floor long.
+            bokovik = data.get("bokovik")
+            if not bokovik:
+                return new_symbol_state(), None
+            sweep_extreme = float(data.get("sweep_extreme") or bokovik.get("lo") or 0.0)
+            swept_low = float(bokovik.get("lo") or 0.0)
+            # Floor decisively lost — the долгий thesis is dead, re-arm from scratch.
+            if swept_low > 0 and float(meso_df["close"][-1]) < swept_low * 0.95:
+                return new_symbol_state(), None
             micro_df = _micro_df(micro_15m, meso_df)
-            ltf_confirmed = bool(bos_up(micro_df) or choch_bull(micro_df))
-            # Volume confirmation gate (course: "если нету бычьих объёмов — лонг
-            # не валиден"). Soft gate: lower score + flag evidence instead of
-            # blocking entirely, so a valid geometry without a volume spike still
-            # gets delivered but at reduced confidence.
+            if not (bos_up(micro_df) or choch_bull(micro_df)):
+                return state, None  # no слом yet — keep waiting
             vol_ok = bullish_volume(meso_df) or (micro_15m is not None and bullish_volume(micro_15m))
-            # swept_level = лоу боковика (реально свипнутый уровень на meso ТФ),
-            # НЕ macro_low: тот — 1d-контекст, в сообщении читался как «свипнули
-            # 1d-уровень 0.89», хотя свипнут 0.92 на 15m.
             a_entry = _consolidation_long_entry(meso_df, bokovik)
             a_ladder = _target_ladder(macro_df, meso_df, entry=a_entry, direction="long", htf_df=htf_df,
                                       funding_mult=_funding_target_mult("long", funding_ctx))
-            evidence = ["impulse", "absorption", "bokovik", "sweep_below",
-                        "ltf_confirmed" if ltf_confirmed else "ltf_pending"]
+            evidence = ["impulse", "absorption", "bokovik", "sweep_below", "ltf_confirmed"]
             if not vol_ok:
                 evidence.append("volume_pending")
             if htf_bias:
                 evidence.append(f"htf_{htf_bias}")
             setup = _build_setup(
                 pattern_type="A", direction="long", meso_tf=meso_tf,
-                swept_level=float(bokovik.get("lo") or 0.0),
-                sweep_extreme=float(sweep_extreme),
-                target=(a_ladder[0] if a_ladder else float(meso_df["high"].max())),
+                swept_level=swept_low,
+                sweep_extreme=sweep_extreme,
+                target=(a_ladder[0] if a_ladder else _to_float(meso_df["high"].max())),
                 target_ladder=tuple(a_ladder),
                 entry_ref=a_entry,
                 evidence=evidence,
                 total_steps=_A_TOTAL_STEPS,
-                micro_confirmed=ltf_confirmed,
+                micro_confirmed=True,
+                micro_tf=micro_tf,
             )
-            base_score = 1.0 if ltf_confirmed else 0.7
-            setup.score = base_score * 0.6 if not vol_ok else base_score
-            setup.steps_covered = _A_TOTAL_STEPS if ltf_confirmed else _A_TOTAL_STEPS - 1
+            setup.score = 1.0
+            setup.steps_covered = _A_TOTAL_STEPS
             setup.macro_tf = meso_tf
-            # Skip if no structural target ≥ 20 % from entry
             if not a_ladder:
                 exp = _expected_move_pct("long", a_entry, sweep_extreme, bokovik=bokovik)
                 if exp < 0.20:
@@ -495,9 +519,12 @@ def _advance_pattern_a(
             return new_symbol_state(), setup
 
     if pattern == "A3" and stage == 1:
-        # A3 (accumulation, no prior impulse): predictive long at the accumulation
-        # FLOOR — emit only when price sits in the lower half of the боковик (buying
-        # the floor, not chasing mid-range), ltf break = upgrade.
+        # A3 (accumulation, no prior impulse): ARM at the accumulation FLOOR (price in
+        # the lower half of the боковик), then wait for the LTF слом on stage 2 before
+        # entering. Emitting on the bare floor was a falling knife — backtest showed
+        # A3 floor entries were 100% ltf_pending and went 0W/19L/12timeout. The
+        # author's reliable floor long needs the reversal confirmation, not just a
+        # price sitting low in the range.
         bokovik = data.get("bokovik") or {}
         lo = float(bokovik.get("lo") or 0.0)
         hi = float(bokovik.get("hi") or 0.0)
@@ -506,12 +533,21 @@ def _advance_pattern_a(
         cur = float(meso_df["close"][-1])
         if cur > (lo + hi) / 2.0:
             return state, None  # price mid/upper range — wait for a retest of the floor
+        return {**state, "stage": 2, "anchor_ts": now_ms, "data": data}, None
+
+    if pattern == "A3" and stage == 2:
+        bokovik = data.get("bokovik") or {}
+        lo = float(bokovik.get("lo") or 0.0)
+        hi = float(bokovik.get("hi") or 0.0)
+        if lo <= 0 or hi <= lo:
+            return new_symbol_state(), None
+        # Accumulation floor lost — reset.
+        if float(meso_df["close"][-1]) < lo * 0.95:
+            return new_symbol_state(), None
         micro_df = _micro_df(micro_15m, meso_df)
-        ltf_confirmed = bool(bos_up(micro_df) or choch_bull(micro_df))
-        # A3 is a QUIET accumulation floor entry — low volume is the EXPECTED
-        # state here (the "бычьи объёмы" confirm only on the later breakout).
-        # So volume is informational only; it does NOT penalize the score the
-        # way it does for impulse-driven Pattern A / C.
+        if not (bos_up(micro_df) or choch_bull(micro_df)):
+            return state, None  # no слом yet — keep waiting
+        ltf_confirmed = True
         vol_ok = bullish_volume(meso_df) or (micro_15m is not None and bullish_volume(micro_15m))
         a3_entry = _consolidation_long_entry(meso_df, bokovik)
         # A3 has no sweep — anchor sweep_extreme one full ATR below the bokovik
@@ -531,12 +567,13 @@ def _advance_pattern_a(
             pattern_type="A3", direction="long", meso_tf=meso_tf,
             swept_level=lo,
             sweep_extreme=sweep_extreme,
-            target=(a3_ladder[0] if a3_ladder else float(meso_df["high"].max())),
+            target=(a3_ladder[0] if a3_ladder else _to_float(meso_df["high"].max())),
             target_ladder=tuple(a3_ladder),
             entry_ref=a3_entry,
             evidence=evidence,
             total_steps=_A3_TOTAL_STEPS,
             micro_confirmed=ltf_confirmed,
+            micro_tf=micro_tf,
         )
         base_score = 1.0 if ltf_confirmed else 0.7
         setup.score = base_score  # A3: no volume penalty (quiet accumulation)
@@ -554,6 +591,19 @@ def _advance_pattern_a(
 
 # ── Pattern B (short): sweep of a prior high -> fade/rejection -> LTF break
 _B_TOTAL_STEPS = 3
+# Source-faithful selectivity (research/manipulations_corpus/, MANTA разбор):
+# the clean short is a "жирный" pump — the author explicitly dismisses 20–35% moves
+# ("мелочи … любим движение пожирнее") and skips no-formation pumps ("не ловить фому").
+# The pump amplitude (base→high) must clear this floor, else it is not the trade.
+# Backtest (dataset_v10): without this gate Pattern B fired 175 setups at 46% loss;
+# the deepest-pool target also manufactured 57 timeouts. The impulse-low target +
+# this magnitude gate cut timeouts 57→14 and setups to the hand-picked few the
+# method actually takes.
+_B_MIN_PUMP_PCT = 0.40  # pump base→high must be ≥ 40% (a real manipulation, not chop)
+# The take-profit is the IMPULSE-SET LOW = full absorption of the pump ("тяните сделку
+# на полное поглощение пампа … тейк чуть ниже лоя, поставленного импульсом — там всегда
+# сидит продавец / основные объёмы"). We target just inside that low, not a distant pool.
+_B_TP_INSIDE_FRAC = 0.02  # TP placed 2% above the pump-base low (course: "чуть ниже него")
 
 
 def _advance_pattern_b(
@@ -561,6 +611,7 @@ def _advance_pattern_b(
     micro_15m: pl.DataFrame | None, state: dict[str, Any], now_ms: float,
     macro_tf: str = _MACRO_TF,
     *,
+    micro_tf: str = "15m",
     htf_df: pl.DataFrame | None = None,
     htf_bias: str | None = None,
     funding_ctx: dict[str, Any] | None = None,
@@ -586,7 +637,7 @@ def _advance_pattern_b(
             return new_symbol_state(), None  # price nowhere near a trend high — not a Pattern B context
         # the recent meso top must be at/above the macro high (the trend really
         # peaked here), not a pullback high far below it
-        meso_top = float(meso_df["high"].tail(20).max())
+        meso_top = _to_float(meso_df["high"].tail(20).max())
         if meso_top < macro_high * 0.98:
             return new_symbol_state(), None
         sweep_target = macro_high
@@ -594,7 +645,7 @@ def _advance_pattern_b(
         sweep_ok, sweep_extreme, _ = detect_sweep_high(meso_df, sweep_target)
         if not sweep_ok:
             return new_symbol_state(), None
-        pump_high = float(meso_df["high"].tail(20).max())
+        pump_high = _to_float(meso_df["high"].tail(20).max())
         return {
             "pattern": "B", "stage": 1, "anchor_ts": now_ms, "first_ts": now_ms,
             "meso_tf": meso_tf,
@@ -611,23 +662,47 @@ def _advance_pattern_b(
         # The stop sits above the sweep high with a buffer and the delivery carries
         # an averaging zone, so a further squeeze past the high is handled by
         # scaling in (усреднение) — exactly the trader's own risk model.
-        pump_high = data.get("pump_high")
-        if pump_high is None:
+        ph = data.get("pump_high")
+        if ph is None:
             return new_symbol_state(), None
-        body_ratio, range_ratio = candle_fade_ratio(meso_df, n=8, peak_high=pump_high)
+        body_ratio, range_ratio = candle_fade_ratio(meso_df, n=8, peak_high=ph)
         fade_ok = body_ratio <= 0.50 and range_ratio <= 0.60
-        reject_ok = rejection_at_peak(meso_df, pump_high)
-        two_bar_ok = two_bar_reversal(meso_df, pump_high)
+        reject_ok = rejection_at_peak(meso_df, ph)
+        two_bar_ok = two_bar_reversal(meso_df, ph)
         if not (fade_ok or reject_ok or two_bar_ok):
             return state, None
         fade_kind = "candle_fade" if fade_ok else ("instant_rejection" if reject_ok else "two_bar_reversal")
+        pump_high_f = float(ph)
+        # Pump base = the impulse-set low the pump launched from ("лой, поставленный
+        # импульсом"). This is BOTH the take-profit (full absorption) AND the amplitude
+        # reference for selectivity. Use bar lows (not closes) over the pump window so
+        # the base is the true structural low a wick set, not a conservative close.
+        pump_window = meso_df.tail(min(60, len(meso_df)))
+        pump_low = _to_float(pump_window["low"].min())
+        pump_range = pump_high_f - pump_low
+        # ── Source-faithful gate 1: SELECTIVITY (magnitude). Skip small pumps —
+        # the method takes only "жирные" moves, dismisses 20–35% "мелочи". ──
+        pump_amp = pump_range / pump_high_f if pump_high_f > 0 else 0.0
+        if pump_amp < _B_MIN_PUMP_PCT:
+            return state, None
+        # ── Source-faithful gate 2: ABSORPTION. The clean signal is "предыдущий
+        # максимум обновили ИМПУЛЬСОМ и цену СРАЗУ поглотили" — a genuine up-impulse
+        # made the high AND price has since retraced (absorbed) it. A bare fade of a
+        # non-impulse high is the noisy short that gets stopped (dataset_v10: 46% B
+        # loss rate). detect_impulse(up) + detect_absorption is the exact primitive
+        # Pattern A already uses on the long side; wire it into B for symmetry. ──
+        imp_ok, imp_idx = detect_impulse(meso_df, lookback=30, direction="up")
+        absorbed = bool(imp_ok and imp_idx is not None and detect_absorption(meso_df, imp_idx))
+        if not absorbed:
+            return state, None
         micro_df = _micro_df(micro_15m, meso_df)
         ltf_confirmed = bool(bos_down(micro_df) or choch_bear(micro_df))
-        pump_high_f = float(pump_high)
-        pump_low = float(meso_df["close"].tail(min(60, len(meso_df))).min())
-        pump_range = pump_high_f - pump_low
-        # 30% retrace target (course: first take-profit zone)
-        target = pump_high_f - pump_range * 0.30 if pump_range > 0 else None
+        # TP = just inside the impulse-set low (full pump absorption), NOT a distant
+        # distance-ranked pool. This is the reachable level the method banks at; the
+        # deepest structural pool only inflated RR into fantasy (ZEC #18718: TP 220.5,
+        # −57%, RR 14.43, closed −3%) and manufactured timeouts. Keep any deeper pool
+        # BELOW the base as an optional runner rung, but the primary target is the base.
+        target = pump_low * (1.0 + _B_TP_INSIDE_FRAC)
         # Best short entry = near the peak. Price has already faded a bit, so anchor
         # to a pullback toward the swept high (a limit above current on the dead-cat
         # bounce), not the already-lower current close — a short fills better higher.
@@ -638,19 +713,25 @@ def _advance_pattern_b(
         # wick — the stop must sit above the whole pump ("стоп за хая с запасом"),
         # else it lands inside the noise and a re-sweep kills it before the dump.
         stop_anchor = max(sweep_ext, pump_high_f)
-        ladder = _target_ladder(macro_df, meso_df, entry=entry_ref, direction="short", htf_df=htf_df,
-                                funding_mult=_funding_target_mult("short", funding_ctx))
+        # Single target = the impulse-low (full pump absorption). We deliberately do
+        # NOT append deeper distance-ranked pools: `_geometry` sets primary_target =
+        # min(ladder) for shorts, so any deeper rung would pull the runner target back
+        # out to the distant pool and re-introduce the 57-timeout / fantasy-RR failure
+        # the impulse-low target fixed (dataset_v10: timeouts 57→14, RR sane).
+        ladder = [target]
         setup = _build_setup(
             pattern_type="B", direction="short", meso_tf=meso_tf,
             swept_level=float(data.get("swept_level") or 0.0),
             sweep_extreme=stop_anchor,
-            target=(ladder[0] if ladder else target),
+            target=target,
             target_ladder=tuple(ladder),
             entry_ref=entry_ref,
-            evidence=["sweep_above", fade_kind, "ltf_confirmed" if ltf_confirmed else "ltf_pending"]
+            evidence=["sweep_above", fade_kind, "absorption",
+                      "ltf_confirmed" if ltf_confirmed else "ltf_pending"]
                      + ([f"htf_{htf_bias}"] if htf_bias else []),
             total_steps=_B_TOTAL_STEPS,
             micro_confirmed=ltf_confirmed,
+            micro_tf=micro_tf,
         )
         # Honest confidence: a pre-break (ltf_pending) peak short is a FORECAST, not
         # a confirmed break — reflect that in score + steps so the message doesn't
@@ -677,75 +758,111 @@ def _advance_pattern_b(
 #    The author's type-2 long — "закреп выше предыдущего максимума" — a confirmed
 #    close/break above the prior swing high, validated by bullish volume.
 _C_TOTAL_STEPS = 2
+# закреп = a HELD reclaim, not a one-candle poke. The transcript is explicit that
+# without a full закреп «цена может пойти дальше вниз» — so require ≥2 consecutive
+# closes holding above the prior high before the reclaim counts. Backtest motive:
+# the old window=1 break entered at the extended breakout close with a far stop and
+# went 5W/50L (9%) — the biggest loss source on the 45-symbol set. Entering the
+# RETEST of the reclaimed level instead makes the stop structural (just under the
+# reclaimed high) and filters breakouts that run away and fail without ever holding.
+_C_ZAKREP_MIN_CLOSES = 2
+
+
+def _consecutive_closes_above(df: pl.DataFrame, level: float) -> int:
+    """Count trailing consecutive closes above ``level`` (adaptive buffer)."""
+    if len(df) < 1 or level <= 0:
+        return 0
+    df_c = compute_features(df)
+    buf = _adaptive_buffer(df_c)
+    thresh = level * (1.0 + buf)
+    count = 0
+    for c in reversed(df_c["close"].to_list()):
+        if c > thresh:
+            count += 1
+        else:
+            break
+    return count
 
 
 def _advance_pattern_c(
     macro_df: pl.DataFrame, meso_df: pl.DataFrame, meso_tf: str,
     micro_15m: pl.DataFrame | None, state: dict[str, Any], now_ms: float,
     *,
+    micro_tf: str = "15m",
     htf_df: pl.DataFrame | None = None,
     htf_bias: str | None = None,
     funding_ctx: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], ManipulationSetup | None]:
+    stage = int(state.get("stage", 0))
+
     prev = _prior_swing_high(meso_df, lookback=60, exclude_last=15)
     if prev is None:
         return new_symbol_state(), None
     prior_high, prior_idx = prev
 
-    break_ok = break_above_level_recent(meso_df, prior_high, window=1)
+    # ── Stage 0/1: wait for a HELD reclaim (закреп), not a one-candle poke ──
+    # The author's Type 2: ascending channel → peak → descending channel → bokovik
+    # → закреп above the prior high → 20-50% move. A single break that immediately
+    # rolls back is the fakeout he warns about; require ≥_C_ZAKREP_MIN_CLOSES
+    # consecutive closes holding above the level.
+    if stage == 0:
+        zakrep = _consecutive_closes_above(meso_df, prior_high)
+        if zakrep < _C_ZAKREP_MIN_CLOSES:
+            return {
+                "pattern": "C", "stage": 0, "anchor_ts": now_ms, "first_ts": now_ms,
+                "meso_tf": meso_tf, "data": {"prior_high": prior_high, "prior_idx": prior_idx},
+            }, None
+        # Require the Type 2 structure (ascending pre-peak, descending post-peak) and
+        # bullish volume behind the reclaim — the author's закреп discriminator.
+        pre_df = meso_df[:prior_idx] if prior_idx > 0 else meso_df.head(1)
+        post_df = meso_df[prior_idx:]
+        asc_ok = is_ascending_channel(pre_df, lookback=min(40, len(pre_df)), min_swings=2)
+        desc_ok = is_descending_channel(post_df, lookback=min(40, len(post_df)), min_swings=2)
+        if not asc_ok or not desc_ok:
+            return new_symbol_state(), None
+        vol_ok = bullish_volume(meso_df) or (micro_15m is not None and bullish_volume(micro_15m))
+        if not vol_ok:
+            return new_symbol_state(), None
 
-    if not break_ok:
-        return {
-            "pattern": "C", "stage": 1, "anchor_ts": now_ms, "first_ts": now_ms,
-            "meso_tf": meso_tf,
-            "data": {"prior_high": prior_high, "prior_idx": prior_idx},
-        }, None
+        # ── Enter on the закреп — this is the MANIPULATION module, NOT Prizrak. ──
+        # A held reclaim (≥2 closes) with volume is the entry event; we do NOT wait for a
+        # tight retest of the level (that is Prizrak-precision and leaves no room for the
+        # module's добор + пересиживание). The stop is WIDE: anchored below the LOW of the
+        # post-peak manipulation structure (the descending-channel / боковик низ), not just
+        # under the reclaimed high — so an adverse dip can be averaged into and sat through
+        # to a 20%+ pool, exactly the module's design. The _geometry RR gate filters out
+        # setups where that wide stop makes the 20% target un-payable.
+        struct_low = _to_float(post_df["low"].min()) if len(post_df) else float(meso_df["low"][-1])
+        entry_ref = float(meso_df["close"][-1])  # the закреп close
+        if struct_low <= 0 or struct_low >= entry_ref:
+            struct_low = prior_high  # degenerate — fall back to the reclaimed level
+        ladder = _target_ladder(macro_df, meso_df, entry=entry_ref, direction="long", htf_df=htf_df,
+                                funding_mult=_funding_target_mult("long", funding_ctx))
+        micro_df = _micro_df(micro_15m, meso_df)
+        ltf_confirmed = bool(bos_up(micro_df) or choch_bull(micro_df))
+        evidence = ["prior_swing_high", "zakrep_reclaim", "wide_stop_dobor",
+                    "ascending_channel_pre" if asc_ok else "",
+                    "descending_channel_post" if desc_ok else ""]
+        if htf_bias == "bull":
+            evidence.append("htf_bullish")
+        setup = _build_setup(
+            pattern_type="C", direction="long", meso_tf=meso_tf,
+            swept_level=prior_high,
+            sweep_extreme=struct_low,  # WIDE stop anchor: below the manipulation low
+            target=(ladder[0] if ladder else _to_float(meso_df["high"].max())),
+            target_ladder=tuple(ladder),
+            entry_ref=entry_ref,
+            evidence=[e for e in evidence if e],
+            total_steps=_C_TOTAL_STEPS,
+            micro_confirmed=ltf_confirmed,
+            micro_tf=micro_tf,
+        )
+        setup.score = 1.0 if ltf_confirmed else 0.7
+        setup.steps_covered = _C_TOTAL_STEPS if ltf_confirmed else _C_TOTAL_STEPS - 1
+        setup.macro_tf = meso_tf
+        return new_symbol_state(), setup
 
-    # ── Type 2 channel context ──────────────────────────────────────
-    # The author's Type 2: ascending channel → peak → descending
-    # channel → bokovik → break above prior high → 20-50% move.
-    # Require ascending channel BEFORE the peak and descending channel
-    # AFTER the peak for a genuine trend-continuation break.
-    pre_df = meso_df[:prior_idx] if prior_idx > 0 else meso_df.head(1)
-    post_df = meso_df[prior_idx:]
-    asc_ok = is_ascending_channel(pre_df, lookback=min(40, len(pre_df)), min_swings=2)
-    desc_ok = is_descending_channel(post_df, lookback=min(40, len(post_df)), min_swings=2)
-    if not asc_ok or not desc_ok:
-        # Not a valid Type 2 structure — don't force through
-        return new_symbol_state(), None
-
-    vol_ok = bullish_volume(meso_df) or (micro_15m is not None and bullish_volume(micro_15m))
-    entry_ref = float(meso_df["close"][-1])
-    ladder = _target_ladder(macro_df, meso_df, entry=entry_ref, direction="long", htf_df=htf_df,
-                            funding_mult=_funding_target_mult("long", funding_ctx))
-    # HTF trend filter (TF hierarchy): Pattern C is a trend-following long
-    # — a break above prior high in a bearish HTF is a trap, not a signal.
-    if htf_bias == "bear":
-        return new_symbol_state(), None
-    evidence = ["prior_swing_high", "break_above_prior_high",
-                "ascending_channel_pre" if asc_ok else "",
-                "descending_channel_post" if desc_ok else ""]
-    if not vol_ok:
-        evidence.append("volume_pending")
-    if htf_bias == "bull":
-        evidence.append("htf_bullish")
-    ltf_confirmed = break_ok
-    setup = _build_setup(
-        pattern_type="C", direction="long", meso_tf=meso_tf,
-        swept_level=prior_high,
-        sweep_extreme=prior_high,
-        target=(ladder[0] if ladder else float(meso_df["high"].max())),
-        target_ladder=tuple(ladder),
-        entry_ref=entry_ref,
-        evidence=[e for e in evidence if e],
-        total_steps=_C_TOTAL_STEPS,
-        micro_confirmed=ltf_confirmed,
-    )
-    base_score = 1.0 if ltf_confirmed else 0.7
-    setup.score = base_score * 0.6 if not vol_ok else base_score
-    setup.steps_covered = _C_TOTAL_STEPS if ltf_confirmed else _C_TOTAL_STEPS - 1
-    setup.macro_tf = meso_tf
-    return new_symbol_state(), setup
+    return new_symbol_state(), None
 
 
 def advance_manipulation_state(
@@ -788,7 +905,7 @@ def advance_manipulation_state(
         state = new_symbol_state()
 
     macro_raw = ohlcv_by_tf.get(macro_tf)
-    if not macro_raw or len(macro_raw) < _MACRO_LOOKBACK_BARS // 2:
+    if not macro_raw or len(macro_raw) < _MACRO_MIN_BARS.get(macro_tf, _MACRO_MIN_BARS_DEFAULT):
         return state, None
     macro_df = ohlcv_to_df(macro_raw)
 
@@ -810,33 +927,33 @@ def advance_manipulation_state(
     pattern = state.get("pattern")
     if family == "A":
         return _advance_pattern_a(macro_df, meso_df, meso_tf, micro_15m, state, now_ms,
-                                  htf_df=htf_df, htf_bias=htf_bias, funding_ctx=funding_ctx)
+                                  micro_tf=micro_tf, htf_df=htf_df, htf_bias=htf_bias, funding_ctx=funding_ctx)
     if family == "B":
         return _advance_pattern_b(macro_df, meso_df, meso_tf, micro_15m, state, now_ms,
-                                  macro_tf=macro_tf, funding_ctx=funding_ctx, htf_df=htf_df,
+                                  macro_tf=macro_tf, micro_tf=micro_tf, funding_ctx=funding_ctx, htf_df=htf_df,
                                   htf_bias=htf_bias)
     if family == "C":
         return _advance_pattern_c(macro_df, meso_df, meso_tf, micro_15m, state, now_ms,
-                                  htf_df=htf_df, htf_bias=htf_bias, funding_ctx=funding_ctx)
+                                  micro_tf=micro_tf, htf_df=htf_df, htf_bias=htf_bias, funding_ctx=funding_ctx)
 
     # Legacy shared-state path (family=None): try A, B, C on one state. Kept for
     # the stateless detect_manipulation_setup wrapper; the multi-scale driver runs
     # A, B, C on independent states instead (see advance_manipulation_scales).
     if pattern in (None, "A", "A3"):
         new_state, setup = _advance_pattern_a(macro_df, meso_df, meso_tf, micro_15m, state, now_ms,
-                                              htf_df=htf_df, htf_bias=htf_bias, funding_ctx=funding_ctx)
+                                              micro_tf=micro_tf, htf_df=htf_df, htf_bias=htf_bias, funding_ctx=funding_ctx)
         if setup is not None or new_state.get("pattern") in ("A", "A3"):
             return new_state, setup
 
     if pattern in (None, "B") or state.get("pattern") in (None, "B"):
         new_state, setup = _advance_pattern_b(macro_df, meso_df, meso_tf, micro_15m, state, now_ms,
-                                              macro_tf=macro_tf, funding_ctx=funding_ctx, htf_df=htf_df,
+                                              macro_tf=macro_tf, micro_tf=micro_tf, funding_ctx=funding_ctx, htf_df=htf_df,
                                               htf_bias=htf_bias)
         return new_state, setup
 
     if pattern in (None, "C") or state.get("pattern") in (None, "C"):
         new_state, setup = _advance_pattern_c(macro_df, meso_df, meso_tf, micro_15m, state, now_ms,
-                                              htf_df=htf_df, htf_bias=htf_bias, funding_ctx=funding_ctx)
+                                              micro_tf=micro_tf, htf_df=htf_df, htf_bias=htf_bias, funding_ctx=funding_ctx)
         return new_state, setup
 
     return new_symbol_state(), None
@@ -866,7 +983,7 @@ def advance_manipulation_scales(
         #   (1d,4h,15m) → no higher TF, bias = None
         #   (4h,1h,15m) → bias from 1d
         #   (1h,15m,5m) → bias from 4h
-        bias_tf = {"1d": None, "4h": "1d", "1h": "4h"}.get(macro_tf)
+        bias_tf = {"1w": None, "1d": "1w", "4h": "1d", "1h": "4h"}.get(macro_tf)
         htf_bias = _htf_trend_bias(ohlcv_to_df(ohlcv_by_tf[bias_tf])) if bias_tf and ohlcv_by_tf.get(bias_tf) else None
         for family in ("A", "B", "C"):
             key = f"{meso_tf}:{family}"
@@ -878,16 +995,19 @@ def advance_manipulation_scales(
             states[key] = new_state
             if setup is not None:
                 completed.append(setup)
-    # Arbitrate when multiple scales/families complete on the same tick: a
-    # confirmed long accumulation/break (Pattern A/A3) outranks a short — the
-    # transcript's short setups are the shakeout INSIDE a larger pump, so when
-    # both fire the long is the real move. Within a family, the higher-TF (larger
-    # scale) setup wins as the more structural read.
+    # Arbitrate when multiple scales/families complete on the same tick. SCALE
+    # decides first: «лучше всего начинать анализ со старших таймфреймов и
+    # постепенно переходить к младшим» — the higher-TF setup is the structural
+    # read and the lower-TF one is usually a move inside it. Sorting by direction
+    # first (as this did) let a 15m long outrank a 4h short, inverting the very
+    # hierarchy the method is built on: the transcript's GTC short IS the higher-TF
+    # move, not a shakeout inside a pump. Long only breaks a tie at EQUAL scale,
+    # where a confirmed accumulation/break outranks the shakeout short.
     if not completed:
         return states, None
     _tf_rank = {"1w": 6, "1d": 5, "4h": 4, "1h": 3, "15m": 2, "5m": 1, "3m": 0}
     completed.sort(
-        key=lambda s: (0 if s.direction == "long" else 1, -_tf_rank.get(s.meso_tf, 0))
+        key=lambda s: (-_tf_rank.get(s.meso_tf, 0), 0 if s.direction == "long" else 1)
     )
     return states, completed[0]
 

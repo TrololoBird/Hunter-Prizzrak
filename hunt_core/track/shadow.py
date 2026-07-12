@@ -36,7 +36,8 @@ def shadow_record_from_delivery(
     symbol_state_tier: str | None = None,
 ) -> dict[str, Any]:
     lc = row.get("lifecycle") or {}
-    m = row.get("market") if isinstance(row.get("market"), dict) else {}
+    _market_val = row.get("market")
+    m: dict[str, Any] = _market_val if isinstance(_market_val, dict) else {}
     setup = setup or {}
     return {
         "symbol": symbol.upper(),

@@ -61,7 +61,7 @@ def aggregate_calibration(summaries: list[dict[str, Any]]) -> dict[str, Any]:
 
     for sym, rows in sorted(by_sym.items()):
         actions = Counter(str(r.get("action") or "wait") for r in rows)
-        gates = Counter()
+        gates: Counter[str] = Counter()
         strengths: list[float] = []
         rr_vals: list[float] = []
         for r in rows:

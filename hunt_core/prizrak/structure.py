@@ -18,10 +18,17 @@ def bars_from_ohlcv(ohlcv: list[list[float]]) -> list[dict[str, float]]:
     """CCXT-shaped rows [ts, o, h, l, c, v] -> {open, high, low, close} dicts.
 
     ``open`` is included so pp._wick_zone can compute a candle's тень-свечи zone
-    (course стр.55); _detect_structure and other consumers only read high/low/
-    close, so the extra key is harmless additive data.
+    (course стр.55); ``volume`` so накопление strength can be ranked by traded volume
+    (course стр.22: "Сила уровня определяется ТФ и объёмом"). Consumers that only read
+    high/low/close ignore the extra keys, so they are harmless additive data.
     """
-    return [{"open": float(r[1]), "high": float(r[2]), "low": float(r[3]), "close": float(r[4])} for r in ohlcv]
+    return [
+        {
+            "open": float(r[1]), "high": float(r[2]), "low": float(r[3]),
+            "close": float(r[4]), "volume": float(r[5]) if len(r) > 5 else 0.0,
+        }
+        for r in ohlcv
+    ]
 
 
 def multi_scale_structure(

@@ -23,6 +23,9 @@ jobs:
       - name: Ruff lint
         run: ruff check .
 
+      - name: Prohibited CCXT API scan + copilot-instructions drift guard
+        run: python scripts/check_prohibited_apis.py
+
       - name: mypy (non-blocking until backlog is cleared)
         run: mypy hunt_core || true
 

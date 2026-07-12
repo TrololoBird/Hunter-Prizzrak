@@ -1,0 +1,43 @@
+---
+description: Hunt — crypto futures signal-analytics project overview
+globs: ["*.py", "*.toml", "*.md"]
+---
+
+# Hunt project context
+
+This is a **crypto signal-analytics system**, NOT a trading bot.
+No order placement, no account management, no private API keys.
+
+## Stack
+- Python 3.14, uv, CCXT (async REST + WS), Polars, aiogram, Pydantic, Structlog, aiohttp
+- No pandas, no requests, no dataclasses for domain models
+
+## Architecture
+- `market/` — CCXT client, rate limiting, WS/REST transport
+- `prizrak/` — Deep engine (pinned majors), NEVER imports scanner
+- `scanner/` — Universe pre-pump/detection, NEVER imports prizrak
+- `signals/` — Shared Signal model, dedup, lifecycle
+- `deliver/` — Telegram formatting (zero business logic)
+- `features/` — Polars feature engineering (no architectural choices)
+- `domain/` — Pydantic models (no I/O, no CCXT)
+
+## CCXT rules (public only)
+**Allowed:** `fetchTicker(s)`, `fetchOHLCV`, `fetchOrderBook`, `fetchTrades`,
+`fetchOpenInterest`, `fetchFundingRate`, `fetchMarkets`, `fetchLeverageTiers`,
+`watchTicker(s)`, `watchOHLCV`, `watchOrderBook`, `watchTrades`
+**Forbidden:** `createOrder`, `cancelOrder`, `editOrder`, `fetchBalance`,
+`fetchPositions`, `fetchMyTrades`, `setLeverage`, `setMarginMode`, `withdraw`
+
+## Coding rules
+- Polars only, no pandas. Expression API > Python loops. LazyFrame preferred.
+- Entirely async (aiohttp). No requests, no blocking calls.
+- Structlog for all logging, no stdlib logging.
+- Pydantic BaseModel for domain models.
+- Every function: full type hints + Google-style docstring.
+- Ruff: line-length 100, py314. Ignores E402, E741, F811, F821.
+- No eval/exec, no magic numbers, no commented-out code.
+
+## CCXT AI skill
+Pre-installed at `~/.opencode/skills/ccxt-python/SKILL.md` and `~/.claude/skills/ccxt-python/SKILL.md`.
+Auto-refreshed on `uv sync`.
+Full reference: https://raw.githubusercontent.com/ccxt/ccxt/master/llms.txt

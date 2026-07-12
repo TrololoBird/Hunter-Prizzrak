@@ -141,7 +141,8 @@ def build_query_result(
     sniper_config: Any = None,
 ) -> QueryResult:
     sym = symbol.upper()
-    lc = row.get("lifecycle") if isinstance(row.get("lifecycle"), dict) else {}
+    _lc = row.get("lifecycle")
+    lc: dict[str, Any] = _lc if isinstance(_lc, dict) else {}
     if sniper_config is None:
         from hunt_core.runtime.state import SNIPER_CONFIG
 
@@ -170,6 +171,7 @@ async def resolve_query_row(
     live: bool = False,
     stagger_ms: int = 200,
     client: HuntCcxtClient | None = None,
+    allow_low_liquidity: bool = False,
 ) -> tuple[dict[str, Any], str, bool, float | None]:
     """Return ``(row, source, from_store, age_s)`` — DeepQueryStore first unless ``live``."""
     from hunt_core.runtime.analyst_assembly import assemble_analyst_tick
@@ -181,9 +183,10 @@ async def resolve_query_row(
     from_store = False
     age_s: float | None = None
     source = "live_rest"
+    _client: HuntCcxtClient = client if client is not None else HuntCcxtClient(timeout_ms=45_000)
 
     if live:
-        row = await assemble_analyst_tick(sym, client, stagger_ms=max(stagger_ms, 200))
+        row = await assemble_analyst_tick(sym, _client, stagger_ms=max(stagger_ms, 200), allow_low_liquidity=allow_low_liquidity)
         source = "deep_live"
     else:
         cached = deep_query_store().resolve(sym)
@@ -199,7 +202,7 @@ async def resolve_query_row(
                 row = None
 
     if row is None:
-        row = await assemble_analyst_tick(sym, client, stagger_ms=max(stagger_ms, 200))
+        row = await assemble_analyst_tick(sym, _client, stagger_ms=max(stagger_ms, 200), allow_low_liquidity=allow_low_liquidity)
         source = "analyst_assembly"
 
     if row.get("maps") and not row.get("maps_forecast"):

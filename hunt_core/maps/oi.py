@@ -47,8 +47,8 @@ def oi_bars_from_frames(
         ts = item.get("timestamp") or item.get("ts")
         oi_raw = item.get("openInterestAmount") or item.get("openInterest") or item.get("oi")
         try:
-            ts_i = int(ts)
-            oi_f = float(oi_raw)
+            ts_i = int(ts or 0)
+            oi_f = float(oi_raw or 0)
         except (TypeError, ValueError):
             continue
         if ts_i > 0 and oi_f > 0:
@@ -158,8 +158,10 @@ def classify_oi_regime(
 
 def oi_regime_from_row(row: dict[str, Any]) -> OiRegime:
     """Resolve regime from materialized row market/session fields."""
-    market = row.get("market") if isinstance(row.get("market"), dict) else {}
-    session = row.get("session") if isinstance(row.get("session"), dict) else {}
+    market_raw = row.get("market")
+    market: dict[str, Any] = market_raw if isinstance(market_raw, dict) else {}
+    session_raw = row.get("session")
+    session: dict[str, Any] = session_raw if isinstance(session_raw, dict) else {}
     oi_d = market.get("oi_change_pct") or market.get("oi_delta_pct") or session.get("oi_change_pct")
     px_d = (
         market.get("price_change_pct")

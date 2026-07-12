@@ -33,13 +33,31 @@ REST_WEIGHT_HEADER_STOP = 2000
 
 
 class SlidingWindowRateLimiter:
-    """Sliding-window limiter for request-count quotas (e.g. /futures/data/*)."""
+    """Sliding-window limiter for request-count quotas (e.g. /futures/data/*).
 
-    def __init__(self, *, max_requests: int, window_seconds: float) -> None:
+    ``smooth_burst`` additionally enforces a minimum spacing between admissions
+    equal to the sustained rate (``window / max``). Without it the window admits
+    a WHOLE window's quota instantaneously whenever it is empty — the cold-start
+    "thundering herd": on the first cycle every cache is cold, so hundreds of
+    ``/futures/data/*`` calls (basis/OI/long-short) fire in seconds. That stays
+    under the 1000-req/5min *budget* yet trips Binance's short-term request-rate
+    WAF (HTTP 418 ``-1003 "Way too many requests"``) and IP-bans us. Spacing to
+    the sustained rate makes a burst impossible, so the ban never happens —
+    instead of a reactive pause after the ban lands.
+    """
+
+    def __init__(
+        self, *, max_requests: int, window_seconds: float, smooth_burst: bool = False
+    ) -> None:
         self._max_requests = max(1, int(max_requests))
         self._window_seconds = max(1.0, float(window_seconds))
         self._times: deque[float] = deque()
         self._lock = asyncio.Lock()
+        # Minimum gap between consecutive admissions = sustained rate. 0 disables.
+        self._min_interval_s = (
+            self._window_seconds / self._max_requests if smooth_burst else 0.0
+        )
+        self._last_admit_mono = 0.0
 
     @property
     def max_requests(self) -> int:
@@ -47,16 +65,35 @@ class SlidingWindowRateLimiter:
 
     async def acquire(self, *, label: str) -> float:
         waited_s = 0.0
+        deadline = time.monotonic() + 300.0
         while True:
+            if time.monotonic() >= deadline:
+                LOG.warning(
+                    "futures-data request timeout | label=%s waited=%.0fs limit=%d",
+                    label, waited_s, self._max_requests,
+                )
+                raise asyncio.TimeoutError(f"rate limit acquire timeout: {label}")
             async with self._lock:
                 now = time.monotonic()
                 cutoff = now - self._window_seconds
                 while self._times and self._times[0] < cutoff:
                     self._times.popleft()
-                if len(self._times) < self._max_requests:
+                # Burst smoothing: hold each admission at least sustained-rate apart.
+                spacing_wait = 0.0
+                if self._min_interval_s > 0.0:
+                    spacing_wait = max(
+                        0.0, self._last_admit_mono + self._min_interval_s - now
+                    )
+                if len(self._times) < self._max_requests and spacing_wait <= 0.0:
                     self._times.append(now)
+                    self._last_admit_mono = now
                     return waited_s
-                sleep_s = max(0.0, (self._times[0] + self._window_seconds) - now) + 0.05
+                window_wait = 0.0
+                if len(self._times) >= self._max_requests:
+                    window_wait = max(0.0, (self._times[0] + self._window_seconds) - now) + 0.05
+                sleep_s = max(window_wait, spacing_wait)
+                if sleep_s <= 0.0:
+                    sleep_s = 0.01
                 log_fn = LOG.debug if sleep_s < 2.0 else LOG.info
                 log_fn(
                     "futures-data request pacing | sleeping=%.2fs label=%s used=%d limit=%d window=%.0fs",
@@ -112,7 +149,14 @@ class WeightBudgetManager:
         if normalized_weight <= 0:
             return 0.0
         waited_s = 0.0
+        deadline = time.monotonic() + 300.0
         while True:
+            if time.monotonic() >= deadline:
+                LOG.warning(
+                    "REST weight pacing timeout | label=%s waited=%.0fs weight=%d",
+                    label, waited_s, normalized_weight,
+                )
+                raise asyncio.TimeoutError(f"REST weight acquire timeout: {label}")
             async with self._lock:
                 now = time.monotonic()
                 cutoff = now - self._window_seconds

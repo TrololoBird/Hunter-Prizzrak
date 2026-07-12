@@ -1,0 +1,1 @@
+../../../.opencode/skills/testing/SKILL.md

@@ -70,7 +70,8 @@ def format_cycle_peers_footer(
         sym = str(row.get("symbol") or "").upper()
         if not sym or sym == hero_sym:
             continue
-        summary = row.get("prizrak_summary") if isinstance(row.get("prizrak_summary"), dict) else {}
+        _prizrak = row.get("prizrak_summary")
+        summary: dict[str, Any] = _prizrak if isinstance(_prizrak, dict) else {}
         _ACTION_RU = {"LONG": "ЛОНГ", "SHORT": "ШОРТ", "WAIT": "ЖДЁМ"}
         _ACT_RU = {
             "in_entry_zone": "в зоне",

@@ -91,10 +91,14 @@ def append_tick_universe_audit(row: dict[str, Any]) -> None:
     try:
         from hunt_core.data.jsonl_io import append_jsonl_lines
 
-        lc = row.get("lifecycle") if isinstance(row.get("lifecycle"), dict) else {}
-        prescan = row.get("prescan_outlier") if isinstance(row.get("prescan_outlier"), dict) else {}
-        dump = row.get("dump") if isinstance(row.get("dump"), dict) else {}
-        long_s = row.get("long") if isinstance(row.get("long"), dict) else {}
+        _lc = row.get("lifecycle")
+        lc = _lc if isinstance(_lc, dict) else {}
+        _prescan = row.get("prescan_outlier")
+        prescan = _prescan if isinstance(_prescan, dict) else {}
+        _dump = row.get("dump")
+        dump = _dump if isinstance(_dump, dict) else {}
+        _long_s = row.get("long")
+        long_s = _long_s if isinstance(_long_s, dict) else {}
         fusion_score = max(
             float(dump.get("fusion_score") or 0),
             float(long_s.get("long_score") or long_s.get("fusion_score") or 0),

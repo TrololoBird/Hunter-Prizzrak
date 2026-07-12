@@ -52,8 +52,10 @@ def resolve_volume_profile_from_parts(
       3. ``market.map_vp_{poc,vah,val}`` — map-plane representation.
     """
     cross = cross_micro if isinstance(cross_micro, dict) else {}
-    vp1h = cross.get("volume_profile_1h") if isinstance(cross.get("volume_profile_1h"), dict) else {}
-    vp15 = cross.get("volume_profile_15m") if isinstance(cross.get("volume_profile_15m"), dict) else {}
+    _vp1h = cross.get("volume_profile_1h")
+    vp1h: dict[str, Any] = _vp1h if isinstance(_vp1h, dict) else {}
+    _vp15 = cross.get("volume_profile_15m")
+    vp15: dict[str, Any] = _vp15 if isinstance(_vp15, dict) else {}
     reg = regime if isinstance(regime, dict) else {}
     market = market if isinstance(market, dict) else {}
 

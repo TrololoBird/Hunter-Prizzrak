@@ -160,11 +160,18 @@ def detect_pp(work: pl.DataFrame, *, closed: bool = False) -> dict[str, Any]:
     return out
 
 
-def structure_snapshot(df: pl.DataFrame, *, idx: int = -1) -> dict[str, Any]:
+def structure_snapshot(
+    df: pl.DataFrame,
+    *,
+    idx: int = -1,
+    price_column: str = "close",
+    indicator_column: str = "rsi14",
+    pivot: str = "high",
+) -> dict[str, Any]:
     """Merged pivot + chart-pattern structure block for TF snapshots."""
     if df.is_empty():
         return {"pivots": [], "chart": chart_pattern_snapshot(df)}
-    pivots = _pivot_rows(df, idx=idx)
+    pivots = _pivot_rows(df, price_column=price_column, indicator_column=indicator_column, pivot=pivot)
     end = df.height + idx + 1 if idx < 0 else idx + 1
     chart = chart_pattern_snapshot(df.slice(0, max(1, end)))
     return {"pivots": pivots, "chart": chart}

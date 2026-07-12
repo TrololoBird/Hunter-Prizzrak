@@ -34,6 +34,7 @@ def _hunter_thresholds() -> dict:
         from hunt_core.params.store import hunter_thresholds
         return hunter_thresholds()
     except Exception:
+        LOG.warning("hunter_thresholds load failed", exc_info=True)
         return {}
 
 
@@ -71,9 +72,14 @@ class PrescanHit:
 
 
 def _safe_float(value: Any, default: float | None = None) -> float | None:
+    # None is a normal "field absent" case (optional OI/cross overlays), not an
+    # error — fast-path it without the noisy traceback that spammed the live log.
+    if value is None:
+        return default
     try:
         v = float(value)
     except (TypeError, ValueError):
+        LOG.debug("_safe_float conversion failed value=%r", value)
         return default
     if not math.isfinite(v):
         return default
@@ -257,15 +263,21 @@ def prescan_late_chase_blocked(
     (long the capitulation). Only a CONTINUATION (move and forecast same direction,
     i.e. chasing a pump to go long / a dump to go short) is a genuine late chase.
     """
-    is_scalar = isinstance(hit, (int, float))
     try:
-        chg_signed = float(hit if is_scalar else getattr(hit, "change_pct", 0.0))
+        if isinstance(hit, (int, float)):
+            raw_chg = float(hit)
+        elif isinstance(hit, PrescanHit):
+            raw_chg = hit.change_pct
+        else:
+            raw_chg = float(getattr(hit, "change_pct", 0.0))
+        chg_signed = float(raw_chg) if raw_chg is not None else 0.0
     except (TypeError, ValueError):
+        LOG.debug("prescan_late_chase_blocked float conversion failed hit=%r", hit, exc_info=True)
         return False
     chg = abs(chg_signed)
     if chg <= max_change_pct:
         return False
-    rdir = None if is_scalar else getattr(hit, "readiness_direction", None)
+    rdir = None if isinstance(hit, (int, float)) else getattr(hit, "readiness_direction", None)
     if rdir == "bear" and chg_signed > 0:  # pumped → reversal short: the setup, not a chase
         return False
     if rdir == "bull" and chg_signed < 0:  # dumped → reversal long: the setup, not a chase
@@ -281,7 +293,7 @@ def prescan_late_chase_blocked(
     return True
 
 
-def prescan_merge_eligible(hit: PrescanHit, *, max_change_pct: float = 12.0) -> bool:
+def prescan_merge_eligible(hit: PrescanHit | Any, *, max_change_pct: float = 12.0) -> bool:
     """Reject prescan outliers that are already extended on 24h (late-chase universe bug)."""
     return not prescan_late_chase_blocked(hit, max_change_pct=max_change_pct)
 
@@ -630,16 +642,6 @@ class HuntCandidate:
     pos_in_range: float | None
     expansion_energy: float = 0.0
     readiness_direction: str = "undecided"
-
-
-def _safe_float(value: Any, default: float | None = None) -> float | None:
-    try:
-        numeric = float(value)
-    except (TypeError, ValueError):
-        return default
-    if not math.isfinite(numeric):
-        return default
-    return numeric
 
 
 def _range_stats(

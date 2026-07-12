@@ -9,6 +9,7 @@ from __future__ import annotations
 
 
 from collections.abc import Callable
+from typing import Any, cast
 
 import polars as pl
 import polars_ta.ta as plta
@@ -46,8 +47,10 @@ def _normalize_percent_scale(series: pl.Series, *, name: str) -> pl.Series:
     if finite.is_empty():
         return numeric.rename(name)
     try:
-        overall_max = float(finite.max())
-        overall_min = float(finite.min())
+        max_val = finite.max()
+        min_val = finite.min()
+        overall_max = float(cast("Any", max_val)) if max_val is not None else 0.0
+        overall_min = float(cast("Any", min_val)) if min_val is not None else 0.0
     except (TypeError, ValueError):
         return numeric.rename(name)
     if overall_max <= 1.5 and overall_min >= -0.01:
@@ -55,7 +58,7 @@ def _normalize_percent_scale(series: pl.Series, *, name: str) -> pl.Series:
     return numeric.rename(name)
 
 
-def _select_series(df: pl.DataFrame, expr: pl.Expr, *, name: str) -> pl.Series:
+def _select_series(df: pl.DataFrame, expr: pl.Expr | pl.Series, *, name: str) -> pl.Series:
     return materialize_series(expr, df=df, name=name)
 
 
@@ -95,7 +98,7 @@ def _try_scalar_expr(
     percent: bool = False,
     clip: tuple[float, float] | None = None,
     skip_prefix: str = "plta",
-) -> pl.Expr | None:
+) -> pl.Series | None:
     try:
         return _series_from_expr(
             df, builder(), name=name, fill=fill, percent=percent, clip=clip
@@ -187,7 +190,9 @@ def willr_from_polars_ta(df: pl.DataFrame, period: int = 14) -> pl.Series:
         name=f"willr{period}",
         percent=True,
     )
-    if raw.max() is not None and float(raw.max()) <= 0.0 and float(raw.min()) >= -1.5:
+    raw_max = raw.max()
+    raw_min = raw.min()
+    if raw_max is not None and float(cast("Any", raw_max)) <= 0.0 and raw_min is not None and float(cast("Any", raw_min)) >= -1.5:
         raw = raw * 100.0
     return _clean(raw, fill=-50.0).clip(-100.0, 0.0)
 
@@ -220,9 +225,9 @@ _EXTENDED_BUILDERS: list[tuple[str, str, Callable[[], pl.Expr], float, bool, tup
 ]
 
 
-def polars_ta_extended_exprs(df: pl.DataFrame) -> list[pl.Expr]:
+def polars_ta_extended_exprs(df: pl.DataFrame) -> list[pl.Series]:
     """Extra polars_ta.ta / tdx columns for pinned deep analysis."""
-    out: list[pl.Expr] = []
+    out: list[pl.Series] = []
     for prefix, name, builder, fill, percent, clip in _EXTENDED_BUILDERS:
         expr = _try_scalar_expr(
             df,
@@ -242,7 +247,7 @@ def polars_ta_extended_exprs(df: pl.DataFrame) -> list[pl.Expr]:
     return out
 
 
-def _kdj_exprs(df: pl.DataFrame) -> list[pl.Expr]:
+def _kdj_exprs(df: pl.DataFrame) -> list[pl.Series]:
     if df.is_empty():
         return []
     try:
@@ -268,11 +273,11 @@ def _kdj_exprs(df: pl.DataFrame) -> list[pl.Expr]:
         return []
 
 
-def polars_wq_exprs(df: pl.DataFrame) -> list[pl.Expr]:
+def polars_wq_exprs(df: pl.DataFrame) -> list[pl.Series]:
     """WorldQuant-style context features for pinned deep analysis."""
     close = pl.col("close")
     volume = pl.col("volume")
-    out: list[pl.Expr] = []
+    out: list[pl.Series] = []
     for skip, name, builder, fill, clip in (
         ("wq_ts_rank", "wq_ts_rank_close20", lambda: wq.ts_rank(close, 20), 0.5, (0.0, 1.0)),
         ("wq_ts_corr", "wq_ts_corr_close_vol20", lambda: wq.ts_corr(close, volume, 20), 0.0, (-1.0, 1.0)),
@@ -336,7 +341,7 @@ def macd_series(
     fast: int = 12,
     slow: int = 26,
     signal: int = 9,
-) -> tuple[pl.Series, pl.Series, pl.Series]:
+) -> tuple[pl.Series, ...]:
     struct_expr = plta.MACD(
         pl.col("close"),
         fastperiod=int(fast),
@@ -383,7 +388,7 @@ def bbands_series(
     *,
     period: int = 20,
     nbdev: float = 2.0,
-) -> tuple[pl.Series, pl.Series, pl.Series]:
+) -> tuple[pl.Series, ...]:
     struct_expr = plta.BBANDS(
         pl.col("close"), timeperiod=int(period), nbdevup=float(nbdev), nbdevdn=float(nbdev)
     )

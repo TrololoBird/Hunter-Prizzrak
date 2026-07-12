@@ -124,7 +124,7 @@ def missing_derivatives_context(enrichments: Mapping[str, Any]) -> list[str]:
     return [key for key in REQUIRED_DERIVATIVES_KEYS if enrichments.get(key) is None]
 
 
-def _finite_float(value: object) -> float | None:
+def _finite_float(value: Any) -> float | None:
     if value is None:
         return None
     try:

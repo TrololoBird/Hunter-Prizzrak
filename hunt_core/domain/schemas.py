@@ -189,7 +189,7 @@ class PreparedSymbol:
     val_15m: float | None = None
     nearest_bid_wall: dict[str, Any] | None = None
     nearest_ask_wall: dict[str, Any] | None = None
-    depth_zone_imbalance: float | None = None
+    depth_zone_imbalance: dict[str, float] = field(default_factory=dict)
     maps_snapshot: dict[str, Any] | None = None
     liq_forward_confidence: float | None = None
     map_stacked_imbalance: str | None = None

@@ -499,7 +499,7 @@ def register_signal_open(
     entry_hi = float(ez[1] if len(ez) > 1 else price)
     initial_phase = _initial_signal_phase(setup)
     orig_sl = setup.get("stop_loss")
-    sig: dict[str, Any] = {
+    signal: dict[str, Any] = {
         "status": "active",
         "phase": initial_phase.value,
         "setup_phase": setup.get("phase"),
@@ -550,11 +550,11 @@ def register_signal_open(
         "level_expired": False,
     }
     if isinstance(features_open, dict):
-        sig["features_open"] = features_open
+        signal["features_open"] = features_open
     if isinstance(book_walls, dict):
-        sig["book_walls"] = book_walls
-    sig["symbol"] = symbol.upper()
-    state.setdefault("signals", {})[k] = sig
+        signal["book_walls"] = book_walls
+    signal["symbol"] = symbol.upper()
+    state.setdefault("signals", {})[k] = signal
     record_confirm_burst(state, now=now)
 
 
@@ -808,6 +808,9 @@ def close_signal(
 
 # Auto-resolution threshold: close signals older than this (live price check).
 AUTO_RESOLVE_TIMEOUT_HOURS = 48.0
+# Manipulation runners hold to a structural pool, which on a 1d-scale setup is days
+# away. They exit on TP2 or stop, not on the clock; this is a runaway guard only.
+AUTO_RESOLVE_TIMEOUT_HOURS_LADDER = 24.0 * 14
 AUTO_RESOLVE_GRACE_MINUTES = 5.0  # ignore TP1/SL hits within first N min (entry still filling)
 
 
@@ -843,11 +846,27 @@ def auto_resolve_active_signals(
         if price is None or price <= 0:
             continue
 
+        tp1 = float(sig.get("tp1") or 0)
+        tp2 = float(sig.get("tp2") or 0)
+        sl = float(sig.get("stop_loss") or 0)
+
+        # A manipulation setup carries a pool ladder and is delivered as «тейки
+        # частями … держим до цели/стопа»: TP1 is a PARTIAL fix, the runner rides to
+        # the «среднесрочная цель». Closing the whole position on the first touch
+        # contradicted _trailing.py, which already exempts these signals from the
+        # trail for exactly that reason, and capped every manipulation trade at its
+        # nearest pool. Fall through to TP2/stop instead.
+        holds_ladder = str(sig.get("setup_phase") or "") == "manipulation" and tp2 > 0
+
         # Grace period: ignore TP1/SL hits during entry fill window
         age_min = _signal_age_min(sig, ts)
         if age_min < grace_minutes:
             continue
-        if age_min > timeout_hours * 60:
+        # The method's own horizon is multi-day («в среднесроке эта сделка показала
+        # 250%»); a 48h wall-clock timeout closed the runner before the structural
+        # target could be reached.
+        effective_timeout_h = AUTO_RESOLVE_TIMEOUT_HOURS_LADDER if holds_ladder else timeout_hours
+        if age_min > effective_timeout_h * 60:
             close_signal(
                 tracker_state,
                 symbol=sym,
@@ -859,11 +878,16 @@ def auto_resolve_active_signals(
             closed.append(key)
             continue
 
-        tp1 = float(sig.get("tp1") or 0)
-        sl = float(sig.get("stop_loss") or 0)
-
         if direction == "long":
-            if tp1 > 0 and price >= tp1:
+            if holds_ladder and tp2 > 0 and price >= tp2:
+                close_signal(
+                    tracker_state, symbol=sym, direction=direction,
+                    reason="tp2_hit", exit_price=price, now=ts,
+                )
+                closed.append(key)
+            elif holds_ladder and tp1 > 0 and price >= tp1:
+                sig["tp1_hit"] = True  # partial fix; keep the runner open
+            elif tp1 > 0 and price >= tp1:
                 close_signal(
                     tracker_state,
                     symbol=sym,
@@ -884,7 +908,15 @@ def auto_resolve_active_signals(
                 )
                 closed.append(key)
         elif direction == "short":
-            if tp1 > 0 and price <= tp1:
+            if holds_ladder and tp2 > 0 and price <= tp2:
+                close_signal(
+                    tracker_state, symbol=sym, direction=direction,
+                    reason="tp2_hit", exit_price=price, now=ts,
+                )
+                closed.append(key)
+            elif holds_ladder and tp1 > 0 and price <= tp1:
+                sig["tp1_hit"] = True  # partial fix; keep the runner open
+            elif tp1 > 0 and price <= tp1:
                 close_signal(
                     tracker_state,
                     symbol=sym,

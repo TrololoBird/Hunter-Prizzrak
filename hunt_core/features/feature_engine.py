@@ -333,7 +333,8 @@ def build_feature_vector(
     vector_kwargs["liquidation_score"] = _coerce_float(
         _prepared_value(prepared, row, "liquidation_score")
     )
-    market = row.get("market") if isinstance(row.get("market"), dict) else {}
+    _mkt = row.get("market")
+    market = _mkt if isinstance(_mkt, dict) else {}
     oi_slope = _coerce_float(_prepared_value(prepared, row, "oi_slope_5m"))
     oi_chg = _coerce_float(_prepared_value(prepared, row, "oi_change_pct"))
     if oi_slope is not None and oi_chg is not None:

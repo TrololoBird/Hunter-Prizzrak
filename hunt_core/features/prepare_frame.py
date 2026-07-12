@@ -4,7 +4,7 @@ from __future__ import annotations
 
 
 from datetime import UTC, date, datetime
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
 import polars as pl
@@ -184,12 +184,15 @@ def _is_temporal_dtype(dtype: pl.DataType | None) -> bool:
     return bool(dtype is not None and getattr(dtype, "is_temporal", lambda: False)())
 
 
-def _infer_epoch_time_unit(values: pl.Series) -> str | None:
+def _infer_epoch_time_unit(values: pl.Series) -> Literal['ns', 'us', 'ms', 's'] | None:
     values = values.drop_nulls()
     if values.is_empty():
         return None
     try:
-        max_abs = float(values.abs().max())
+        max_val = values.abs().max()
+        if max_val is None:
+            return None
+        max_abs = float(cast("Any", max_val))
     except (TypeError, ValueError):
         return None
     if max_abs >= 1_000_000_000_000_000_000:
@@ -263,7 +266,7 @@ def add_rolling_cvd_24h(df: pl.DataFrame) -> pl.DataFrame:
             .alias("rolling_cvd_24h")
         ).drop("_cvd_bar_delta")
     return df.with_columns(
-        filled_delta.rolling_sum(window_size=96, min_periods=1).alias("rolling_cvd_24h")
+        filled_delta.rolling_sum(window_size=96).alias("rolling_cvd_24h")
     )
 
 
@@ -640,7 +643,7 @@ def _kama(df: pl.DataFrame, period: int = 10, fast: int = 2, slow: int = 30) -> 
         kama_np[0] = close_np[0]
         for i in range(1, len(kama_np)):
             kama_np[i] = kama_np[i - 1] + sc_np[i] * (close_np[i] - kama_np[i - 1])
-    return pl.Series("kama10", kama_np).fill_nan(float("nan"))
+    return pl.Series("kama10", kama_np, dtype=pl.Float64).fill_nan(float("nan"))
 
 
 def _heikin_ashi(df: pl.DataFrame) -> pl.DataFrame:
@@ -929,9 +932,12 @@ def _classic_pivot_points(
     if df.is_empty() or not {"high", "low", "close"}.issubset(df.columns):
         return None, None, None, None, None
     tail = df.tail(min(df.height, 48))
-    prev_high = float(tail["high"].max() or 0.0)
-    prev_low = float(tail["low"].min() or 0.0)
-    prev_close = float(tail["close"][-1] or 0.0)
+    high_max = tail["high"].max()
+    prev_high = float(cast("Any", high_max)) if high_max is not None else 0.0
+    low_min = tail["low"].min()
+    prev_low = float(cast("Any", low_min)) if low_min is not None else 0.0
+    close_last = tail["close"][-1]
+    prev_close = float(cast("Any", close_last)) if close_last is not None else 0.0
     if prev_high <= 0.0 or prev_low <= 0.0 or prev_close <= 0.0:
         return None, None, None, None, None
     pp = (prev_high + prev_low + prev_close) / 3.0
@@ -1019,16 +1025,13 @@ def _prepare_frame(
         None,
     )
     vwap_window = max(20, min(96, df.height))
-    vwap_min_periods = max(10, vwap_window // 4)
     typical_price = (pl.col("high") + pl.col("low") + pl.col("close")) / 3.0
     vwap_expr = (
         (typical_price * pl.col("volume")).rolling_sum(
             window_size=vwap_window,
-            min_periods=vwap_min_periods,
         )
         / pl.col("volume").rolling_sum(
             window_size=vwap_window,
-            min_periods=vwap_min_periods,
         )
     ).forward_fill()
     if vwap_time_column is not None:

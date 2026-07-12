@@ -3,6 +3,10 @@ from __future__ import annotations
 
 from typing import Any
 
+import logging
+
+LOG = logging.getLogger(__name__)
+
 
 def collect_upward_targets(row: dict[str, Any], price: float) -> tuple[list[float], list[str]]:
     market = row.get("market") if isinstance(row.get("market"), dict) else {}
@@ -18,6 +22,7 @@ def collect_upward_targets(row: dict[str, Any], price: float) -> tuple[list[floa
                 targets.append(sl)
                 factors.append("short_liq_magnet")
         except (TypeError, ValueError):
+            LOG.debug("short_liq float conversion failed", exc_info=True)
             pass
 
     liq = maps.get("liquidation") if isinstance(maps.get("liquidation"), dict) else {}
@@ -34,6 +39,7 @@ def collect_upward_targets(row: dict[str, Any], price: float) -> tuple[list[floa
                 if "forward_zone" not in factors:
                     factors.append("forward_zone")
         except (TypeError, ValueError):
+            LOG.debug("forward_zones.price_center float conversion failed", exc_info=True)
             continue
 
     vp = maps.get("volume_profile") if isinstance(maps.get("volume_profile"), dict) else {}
@@ -51,6 +57,7 @@ def collect_upward_targets(row: dict[str, Any], price: float) -> tuple[list[floa
                 if fp > price:
                     targets.append(fp)
             except (TypeError, ValueError):
+                LOG.debug("hvn_nodes.price float conversion failed", exc_info=True)
                 continue
         naked = prof.get("naked_poc")
         if naked is not None:
@@ -61,6 +68,7 @@ def collect_upward_targets(row: dict[str, Any], price: float) -> tuple[list[floa
                     if "naked_poc" not in factors:
                         factors.append("naked_poc")
             except (TypeError, ValueError):
+                LOG.debug("naked_poc float conversion failed", exc_info=True)
                 pass
 
     void_above = market.get("map_void_above")
@@ -72,6 +80,7 @@ def collect_upward_targets(row: dict[str, Any], price: float) -> tuple[list[floa
                 if "void_path" not in factors:
                     factors.append("void_path")
         except (TypeError, ValueError):
+            LOG.debug("map_void_above float conversion failed", exc_info=True)
             pass
 
     # Deduplicate targets within 0.1% of each other (first added wins)
@@ -99,6 +108,7 @@ def collect_downward_targets(row: dict[str, Any], price: float) -> tuple[list[fl
                 targets.append(ll)
                 factors.append("long_liq_magnet")
         except (TypeError, ValueError):
+            LOG.debug("long_liq float conversion failed", exc_info=True)
             pass
 
     liq = maps.get("liquidation") if isinstance(maps.get("liquidation"), dict) else {}
@@ -115,6 +125,7 @@ def collect_downward_targets(row: dict[str, Any], price: float) -> tuple[list[fl
                 if "forward_liq_zone" not in factors:
                     factors.append("forward_liq_zone")
         except (TypeError, ValueError):
+            LOG.debug("forward_zones.price_center float conversion failed (down)", exc_info=True)
             continue
 
     vp = maps.get("volume_profile") if isinstance(maps.get("volume_profile"), dict) else {}
@@ -130,6 +141,7 @@ def collect_downward_targets(row: dict[str, Any], price: float) -> tuple[list[fl
                     if "val_magnet" not in factors:
                         factors.append("val_magnet")
             except (TypeError, ValueError):
+                LOG.debug("val float conversion failed", exc_info=True)
                 pass
 
     hunt_low = session.get("hunt_low") or session.get("low_24h")
@@ -141,6 +153,7 @@ def collect_downward_targets(row: dict[str, Any], price: float) -> tuple[list[fl
                 if "range_low" not in factors:
                     factors.append("range_low")
         except (TypeError, ValueError):
+            LOG.debug("hunt_low/low_24h float conversion failed", exc_info=True)
             pass
 
     void_below = market.get("map_void_below")
@@ -152,6 +165,7 @@ def collect_downward_targets(row: dict[str, Any], price: float) -> tuple[list[fl
                 if "void_path_down" not in factors:
                     factors.append("void_path_down")
         except (TypeError, ValueError):
+            LOG.debug("map_void_below float conversion failed", exc_info=True)
             pass
 
     cvd = str(market.get("map_cvd_divergence") or "")

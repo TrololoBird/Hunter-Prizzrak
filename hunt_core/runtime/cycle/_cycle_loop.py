@@ -40,6 +40,8 @@ from hunt_core.market import (
     apply_cross_exchange_env,
     create_hunt_market_plane_from_settings,
     fetch_secondary_ticker_overlay,
+    gate_symbol_dict_keys,
+    gate_symbol_list,
     load_cross_exchange_config,
     refresh_cross_exchange_cache,
 )
@@ -64,7 +66,35 @@ from hunt_core.track.pump_history import (
 )
 from hunt_core.track.tracker import iter_active_tracker_symbols, load_tracker_state
 from hunt_core.domain.config import load_settings
-from hunt_core.market.network import detect_local_proxies, run_proxy_refresh_daemon
+from hunt_core.market.network import detect_local_proxies
+
+
+_ORPHAN_WS_LOG_STATE: dict[str, float] = {"count": 0.0, "next_emit": 0.0}
+_ORPHAN_WS_LOG_INTERVAL_S = 60.0
+
+
+def _log_orphan_ws(exc: BaseException) -> None:
+    """Rate-limit the orphaned-WS transport error log.
+
+    When ``fstream.binance.com`` is unreachable, ccxt.pro's internal client retries
+    the aiohttp connection in a tight loop and every failed attempt surfaces as an
+    orphaned future exception routed here. Logging each one unbounded produced the
+    700 MB+ ``hunt_live.log`` seen in the field. We emit the first occurrence, then
+    at most one summary line per :data:`_ORPHAN_WS_LOG_INTERVAL_S` window carrying the
+    suppressed count — no third-party dependency, structlog only.
+    """
+    now = time.monotonic()
+    state = _ORPHAN_WS_LOG_STATE
+    state["count"] += 1
+    if now < state["next_emit"]:
+        return
+    suppressed = int(state["count"]) - 1
+    if suppressed > 0:
+        LOG.debug("asyncio_orphan_ws | %s | repeated_%d_times_suppressed", exc, suppressed)
+    else:
+        LOG.debug("asyncio_orphan_ws | %s", exc)
+    state["count"] = 0.0
+    state["next_emit"] = now + _ORPHAN_WS_LOG_INTERVAL_S
 
 
 def _build_digest_candidates(
@@ -84,7 +114,7 @@ def _build_digest_candidates(
         if chg_raw is None:
             chg_raw = row.get("price_change_pct")
         try:
-            chg = float(chg_raw)
+            chg = float(chg_raw if chg_raw is not None else 0)
         except (TypeError, ValueError):
             continue
         if not chg:
@@ -163,7 +193,7 @@ async def run_loop(
             from hunt_core.market import HuntCcxtStreams
 
             if HuntCcxtStreams._ws_transport_fatal(exc):
-                LOG.debug("asyncio_orphan_ws | %s", exc)
+                _log_orphan_ws(exc)
                 return
         if _prev_loop_handler is not None:
             _prev_loop_handler(loop, context)
@@ -239,11 +269,10 @@ async def run_loop(
         refresh_s=cross_cfg.refresh_interval_s,
         max_symbols=cross_cfg.max_symbols_per_refresh,
     )
-    # Startup network/DNS can be transiently down (e.g. right after the host
-    # wakes from sleep) — create_hunt_market_plane_from_settings already
-    # retries proxies internally, but one pass giving up killed the whole
-    # unattended run on a single blip. Retry the full attempt a few times
-    # with backoff before actually failing startup.
+    # Startup network/DNS can be transiently down (e.g. right after the host wakes
+    # from sleep). Binance is reached directly (no proxy pool), so a single blip is
+    # handled by retrying the full plane creation a few times with backoff before
+    # actually failing startup.
     plane = None
     _plane_exc: Exception | None = None
     for _attempt in range(1, 4):
@@ -264,6 +293,20 @@ async def run_loop(
     client = plane.client
     ws_feed = plane.streams
     spot_companion = plane.spot
+
+    # ── exchange health check ──────────────────────────────────
+    try:
+        st = await client.fetch_status()
+        if st:
+            status = str(st.get("status") or "")
+            if status and status not in ("ok", "open"):
+                LOG.warning(
+                    "hunt_exchange_status_unexpected | status=%s info=%s",
+                    status,
+                    str(st.get("info", {}))[:200],
+                )
+    except Exception:
+        LOG.exception("hunt_exchange_status_check_failed")
     ws_feed.set_symbols(list(cli_symbols))
     await ws_feed.start()
     # Persistent across ticks: kline/OI caches live in client; oi_flush/oi_build need prev tick.
@@ -391,19 +434,6 @@ async def run_loop(
         )
         LOG.info("path_backfill_scheduled", interval_s=900.0)
 
-    proxy_refresh_task: asyncio.Task[None] | None = None
-    if not once:
-        from hunt_core.paths import ROOT
-
-        proxy_refresh_task = asyncio.create_task(
-            run_proxy_refresh_daemon(
-                interval_s=900.0,
-                config_path=ROOT / "config.toml",
-            ),
-            name="proxy_refresh",
-        )
-        LOG.info("proxy_refresh_scheduled", interval_s=900.0)
-
     # Hang watchdog: if a cycle stalls (e.g. an unbounded loop in scan/levels on
     # degenerate data), faulthandler dumps every Python thread's stack — it works
     # even while the GIL is held by a tight loop — then hard-exits so the process
@@ -414,6 +444,7 @@ async def run_loop(
     LOG.info("hunt_watchdog_armed", timeout_s=_wd_timeout_s)
     _pinned_brief_sent = False
     _last_checkpoint = time.monotonic()
+    _degraded_streak = 0  # consecutive ticks the whole universe failed data assembly
     try:
         tick_ctx: dict[str, Any] | None = None
         while not should_stop():
@@ -455,16 +486,17 @@ async def run_loop(
 
                 settings = load_settings()
                 now = clock.now_utc()
-                await client.apply_pending_proxy_at_cycle()
-                ticker_raw = await safe_fetch(
-                    client.fetch_ticker_24h,
-                    context="ticker_24h",
-                    client=client,
+                ticker_raw = await asyncio.wait_for(
+                    safe_fetch(
+                        client.fetch_ticker_24h,
+                        context="ticker_24h",
+                        client=client,
+                    ),
+                    timeout=120.0,
                 ) or []
                 ticker_by_sym = {str(t.get("symbol")): t for t in ticker_raw if t.get("symbol")}
                 ignition_by_sym: dict[str, Any] = {}
                 ex = client.exchange
-                from hunt_core.market import gate_symbol_dict_keys, gate_symbol_list
 
                 ignition_by_sym = gate_symbol_dict_keys(
                     ignition_by_sym, exchange=ex, label="ignition"
@@ -558,12 +590,12 @@ async def run_loop(
                 pump_stats_by_sym = {
                     sym: st.to_public() for sym, st in pump_store.symbols.items()
                 }
+                prescan_pinned_ready: set[str] = set()
                 if once:
                     merged = list(dict.fromkeys(s.upper() for s in cli_symbols))
                     mode_map = {
                         s: SYMBOL_WATCH_MODES.get(s, "short") for s in merged
                     }
-                    prescan_pinned_ready: set[str] = set()
                 else:
                     full_symbols, mode_map = resolve_watch_universe(
                         settings,
@@ -628,7 +660,7 @@ async def run_loop(
                             merged=len(prescan_to_merge),
                             cap=prescan_merge_cap,
                         )
-                    prescan_pinned_ready: set[str] = set()
+                    prescan_pinned_ready = set()
                     for d in prescan_to_merge:
                         s = d.symbol.upper()
                         if s not in merged:
@@ -793,11 +825,80 @@ async def run_loop(
                         _breakers.execution.failures,
                         _breakers.execution.failure_threshold,
                     )
+                from hunt_core.runtime import telemetry
+
                 async with _TICK_LOCK:
-                    rows = await run_tick(
-                        hunt_active,
-                        **{k: v for k, v in tick_ctx.items() if k != "active"},
-                    )
+                    with telemetry.span(
+                        "cycle.tick",
+                        **{
+                            "hunt.active_symbols": len(hunt_active),
+                            "hunt.send_telegram": send_telegram,
+                        },
+                    ):
+                        rows = await run_tick(
+                            hunt_active,
+                            **{k: v for k, v in tick_ctx.items() if k != "active"},
+                        )
+                        telemetry.set_attributes({"hunt.rows_emitted": len(rows or [])})
+                # ── universe data-plane health ─────────────────────────────
+                # Turn a SILENT mass data blackout (dead proxy → every symbol fails
+                # the staleness gate, no signal can form) into a loud, escalating
+                # signal instead of letting it run until the watchdog hard-kills a
+                # hung loop hours later (2026-07-11 incident).
+                if not once and rows:
+                    from hunt_core.diagnostics.universe_health import assess_universe_health
+
+                    _health = assess_universe_health(rows)
+                    if _health.degraded:
+                        _degraded_streak += 1
+                        LOG.warning(
+                            "hunt_universe_degraded",
+                            streak=_degraded_streak,
+                            **_health.telemetry(),
+                        )
+                        # Escalate to an ops alert once the blackout persists (not a
+                        # one-off blip) — near-total failure across several ticks.
+                        if (
+                            _health.critical
+                            and _degraded_streak >= 3
+                            and send_telegram
+                            and broadcaster is not None
+                        ):
+                            # Cause-aware guidance: the rotating proxy pool was REMOVED
+                            # (direct Binance connection), so the old "проверьте прокси"
+                            # text is stale and misleading. The dominant real cause of a
+                            # klines blackout is a Binance IP rate-limit ban (418/429)
+                            # that pauses the REST plane and starves the 4h refresh —
+                            # detect it and say so (it self-heals when the ban lifts).
+                            _guard = getattr(getattr(client, "rest_gate", None), "guard", None)
+                            try:
+                                _ban_pause = _guard.remaining_pause_s() if _guard is not None else 0.0
+                            except Exception:
+                                _ban_pause = 0.0
+                            _last_kind = getattr(getattr(_guard, "telemetry", None), "last_kind", None)
+                            if _ban_pause > 0 or _last_kind == "ip_ban":
+                                _cause_hint = (
+                                    f"⏳ Binance IP-бан/rate-limit — REST на паузе (~{_ban_pause:.0f}s). "
+                                    "Частота запросов уже снижена; ждём снятия, процесс восстановится сам."
+                                )
+                            else:
+                                _cause_hint = (
+                                    "Проверьте доступ к Binance (соединение прямое, без прокси) "
+                                    "или зависший фетч — сигналы не формируются."
+                                )
+                            try:
+                                await broadcaster.send_html(
+                                    "🚨 <b>Data blackout</b>: "
+                                    f"{_health.failures}/{_health.total} символов "
+                                    f"({_health.failure_frac * 100:.0f}%) не проходят проверку "
+                                    f"данных {_degraded_streak} тиков подряд.\n"
+                                    f"Причина: <code>{_health.dominant_kind}</code>.\n"
+                                    f"{_cause_hint}"
+                                )
+                            except Exception:
+                                LOG.exception("hunt_universe_degraded_alert_failed")
+                    else:
+                        _degraded_streak = 0
                 if (
                     not once
                     and not _pinned_brief_sent
@@ -925,12 +1026,6 @@ async def run_loop(
             path_backfill_task.cancel()
             try:
                 await path_backfill_task
-            except asyncio.CancelledError:
-                pass
-        if proxy_refresh_task is not None:
-            proxy_refresh_task.cancel()
-            try:
-                await proxy_refresh_task
             except asyncio.CancelledError:
                 pass
         if tg_cmds is not None:

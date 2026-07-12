@@ -7,7 +7,6 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import ccxt
@@ -16,14 +15,7 @@ import ccxt.pro as ccxtpro
 import polars as pl
 
 from hunt_core import clock
-from hunt_core.market.network import (
-    ProxyPool,
-    filter_working_proxies_ccxt,
-    is_socks_proxy,
-    mask_proxy_url,
-    probe_ccxt_direct,
-    resolve_proxy_url,
-)
+from hunt_core.market.network import is_socks_proxy
 from hunt_core.market.symbols import to_ccxt_symbol
 
 if TYPE_CHECKING:
@@ -39,7 +31,7 @@ BINANCE_EXCHANGE_ID = "binance"
 FUTURES_DEFAULT_TYPE = "future"
 SPOT_DEFAULT_TYPE = "spot"
 
-_KLINE_FRAME_SCHEMA = {
+_KLINE_FRAME_SCHEMA: dict[str, Any] = {
     "time": pl.Datetime("us", "UTC"),
     "open": pl.Float64,
     "high": pl.Float64,
@@ -210,9 +202,21 @@ def create_sync_binance_future(
         timeout_ms=timeout_ms,
         default_type=FUTURES_DEFAULT_TYPE,
     )
+    # Sync ccxt uses `requests`, not aiohttp — the aiohttp_* keys are inert here.
     config.pop("aiohttp_proxy", None)
     config.pop("aiohttp_trust_env", None)
-    return ccxt.binance(config)
+    config.pop("wsSocksProxy", None)
+    config.pop("wssProxy", None)
+    ex = ccxt.binance(config)
+    # Route the sync client through the same proxy: without this, offline scripts
+    # (calibration/reconcile/tg_backtest) silently egress DIRECT even when a proxy
+    # was supplied — the aiohttp_* keys above never applied to the requests session.
+    if proxy_url:
+        if is_socks_proxy(proxy_url):
+            ex.socksProxy = proxy_url
+        else:
+            ex.httpsProxy = proxy_url
+    return ex
 
 
 def close_exchange_sync(ex: Any, *, label: str) -> None:
@@ -518,9 +522,8 @@ class HuntMarketPlane:
 
 async def _create_plane_once(
     *,
-    proxy_url: str | None,
+    proxy_url: str | None = None,
     trust_env: bool,
-    proxy_pool: ProxyPool | None = None,
 ) -> HuntMarketPlane:
     from hunt_core.market.client import HuntCcxtClient
     from hunt_core.market.spot import HuntCcxtSpotCompanion
@@ -531,7 +534,6 @@ async def _create_plane_once(
         trust_env=trust_env,
         timeout_ms=_PROBE_TIMEOUT_MS,
     )
-    client.attach_proxy_pool(proxy_pool)
     try:
         await client.load_markets()
     except Exception:
@@ -550,134 +552,20 @@ async def _create_plane_once(
     )
 
 
-async def _discover_and_refresh_proxies(config_path: Path) -> list[str]:
-    from hunt_core.market.network import auto_discover_proxies, write_proxies_to_config
-
-    urls = await auto_discover_proxies(include_public=False)
-    if not urls:
-        urls = await auto_discover_proxies(include_public=True)
-    if urls and config_path.is_file():
-        try:
-            await asyncio.to_thread(write_proxies_to_config, config_path, urls)
-        except Exception as exc:  # noqa: BLE001
-            LOG.warning("hunt_proxy_config_write_failed | error=%s", exc)
-    return urls
-
-
-async def _attempt_with_pool(
-    pool: ProxyPool | None,
-    *,
-    trust_env: bool,
-) -> HuntMarketPlane:
-    if pool is None:
-        if not await probe_ccxt_direct():
-            raise RuntimeError("hunt_market_plane_proxy_pool_exhausted")
-        return await _create_plane_once(proxy_url=None, trust_env=trust_env, proxy_pool=None)
-
-    last_exc: BaseException | None = None
-    tried: set[str] = set()
-    max_tries = max(len(pool.urls) * 2, 3)
-
-    for _ in range(max_tries):
-        proxy_url = pool.current()
-        if proxy_url in tried and len(tried) >= len(pool.urls):
-            break
-        tried.add(proxy_url)
-        try:
-            plane = await _create_plane_once(
-                proxy_url=proxy_url,
-                trust_env=trust_env,
-                proxy_pool=pool,
-            )
-            pool.mark_success(proxy_url)
-            LOG.info("hunt_market_plane_ready | proxy=%s", mask_proxy_url(proxy_url))
-            return plane
-        except Exception as exc:
-            last_exc = exc
-            nxt = pool.mark_failed(proxy_url, type(exc).__name__)
-            LOG.warning(
-                "hunt_market_plane_proxy_fail | proxy=%s error=%s",
-                mask_proxy_url(proxy_url),
-                type(exc).__name__,
-            )
-            if nxt is None:
-                break
-
-    if last_exc is not None:
-        raise last_exc
-    raise RuntimeError("hunt_market_plane_proxy_pool_exhausted")
-
-
 async def create_hunt_market_plane(
     *,
     proxy_url: str | None = None,
     trust_env: bool = True,
 ) -> HuntMarketPlane:
-    return await _create_plane_once(proxy_url=proxy_url, trust_env=trust_env, proxy_pool=None)
+    return await _create_plane_once(proxy_url=proxy_url, trust_env=trust_env)
 
 
 async def create_hunt_market_plane_from_settings(settings: Any) -> HuntMarketPlane:
-    net = getattr(settings, "network", settings)
-    urls: list[str] = []
-    effective = getattr(net, "effective_proxy_urls", None)
-    if callable(effective):
-        urls = list(effective())
+    """Create the market plane on a DIRECT Binance connection.
 
-    config_path = Path(getattr(settings, "config_path", "config.toml"))
-    # Seed standard proxy env vars (HTTPS_PROXY/ALL_PROXY/WSS_PROXY/BINANCE_PROXY_URL) into the
-    # primary pool so a user-supplied proxy is tried first — not only on the discovery fallback.
-    env_proxy = resolve_proxy_url(config_url=None, trust_env=True)
-    if env_proxy and env_proxy not in urls:
-        urls.insert(0, env_proxy)
-    raw_urls = list(urls)
-    if urls:
-        filtered = await filter_working_proxies_ccxt(urls)
-        if filtered:
-            urls = filtered
-            # Self-heal: persist the surviving working set so dead proxies are not
-            # re-probed every start (round-trips through [bot.network]).
-            if len(filtered) < len(raw_urls) and config_path.is_file():
-                from hunt_core.market.network import write_proxies_to_config
-
-                try:
-                    await asyncio.to_thread(write_proxies_to_config, config_path, filtered)
-                except Exception as exc:  # noqa: BLE001
-                    LOG.warning("hunt_proxy_prune_persist_failed | error=%s", exc)
-        else:
-            LOG.warning(
-                "hunt_proxy_filter_empty_keep_config | configured=%d",
-                len(raw_urls),
-            )
-            urls = raw_urls
-
-    pool = ProxyPool.from_urls(urls, cooldown_seconds=120.0) if urls else None
-
-    # Hold the failure outside the except block: Python 3 unbinds the `as`
-    # target once the block exits, so a later `raise first_exc` would itself
-    # raise NameError and mask the real cause.
-    first_exc: Exception
-    try:
-        return await _attempt_with_pool(pool, trust_env=False)
-    except Exception as exc:
-        first_exc = exc
-        LOG.warning(
-            "hunt_market_plane_initial_fail | error=%s — rediscovering proxies",
-            type(exc).__name__,
-        )
-
-    fresh = await _discover_and_refresh_proxies(config_path)
-    if not fresh:
-        if await probe_ccxt_direct():
-            LOG.info("hunt_market_plane_direct | reason=proxy_pool_exhausted_ccxt_direct_ok")
-            return await _create_plane_once(proxy_url=None, trust_env=False, proxy_pool=pool)
-        raise first_exc
-
-    fresh = await filter_working_proxies_ccxt(fresh)
-    if not fresh:
-        if await probe_ccxt_direct():
-            LOG.info("hunt_market_plane_direct | reason=no_ccxt_proxy_ccxt_direct_ok")
-            return await _create_plane_once(proxy_url=None, trust_env=False, proxy_pool=pool)
-        raise first_exc
-
-    fresh_pool = ProxyPool.from_urls(fresh, cooldown_seconds=120.0)
-    return await _attempt_with_pool(fresh_pool, trust_env=False)
+    Branch A: the rotating proxy pool / discovery / failover was removed after an
+    empirical probe showed Binance USDⓈ-M is reachable directly and stably from the
+    deploy host. No proxy is attached; a transient DNS/network blip at startup is
+    handled by the caller's bounded retry in the watch loop.
+    """
+    return await _create_plane_once(proxy_url=None, trust_env=False)

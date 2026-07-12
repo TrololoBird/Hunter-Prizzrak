@@ -29,7 +29,8 @@ def _dict_bars_to_rows(bars: list[dict[str, Any]]) -> list[list[float]]:
 def row_ohlcv_by_tf(row: dict[str, Any], *, cfg: PrizrakConfig | None = None) -> dict[str, list[list[float]]]:
     """Pull raw-row OHLCV for every timeframe any prizrak scale tier needs."""
     cfg = cfg or PrizrakConfig.load()
-    tf = row.get("timeframes") if isinstance(row.get("timeframes"), dict) else {}
+    _tf_raw = row.get("timeframes")
+    tf: dict[str, Any] = _tf_raw if isinstance(_tf_raw, dict) else {}
     needed: set[str] = set()
     for tier in (cfg.intraday, cfg.meso, cfg.macro):
         needed.update(tier.timeframes)
@@ -37,7 +38,7 @@ def row_ohlcv_by_tf(row: dict[str, Any], *, cfg: PrizrakConfig | None = None) ->
     out: dict[str, list[list[float]]] = {}
     for t in needed:
         for key in (f"{t}_closed", t):
-            block = tf.get(key)
+            block = tf.get(key) if isinstance(tf, dict) else None
             if not isinstance(block, dict):
                 continue
             bars = block.get("ohlcv")
@@ -47,17 +48,4 @@ def row_ohlcv_by_tf(row: dict[str, Any], *, cfg: PrizrakConfig | None = None) ->
     return out
 
 
-def row_dominance(row: dict[str, Any]) -> tuple[float | None, float | None]:
-    """BTC.D/TOTAL3 24h change — same fields the old macro gate already fetches, no new source."""
-    btc_ctx = row.get("btc_context") or {}
-    macro = row.get("_macro_snapshot")  # set by run_macro_filter's caller if available
-    btc_d_change = getattr(macro, "btc_d_change_24h", None) if macro is not None else None
-    total3_change = getattr(macro, "total3_change_24h", None) if macro is not None else None
-    if btc_d_change is None:
-        btc_d_change = btc_ctx.get("btc_d_change_24h")
-    if total3_change is None:
-        total3_change = btc_ctx.get("total3_change_24h")
-    return btc_d_change, total3_change
-
-
-__all__ = ["row_ohlcv_by_tf", "row_dominance"]
+__all__ = ["row_ohlcv_by_tf"]

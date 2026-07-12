@@ -225,7 +225,8 @@ def _update_registry(
             continue
         action = str(summary.get("action") or "wait")
         lifecycle: Lifecycle = "active" if action in {"long", "short"} else "waiting"
-        prev = registry.get(sym) if isinstance(registry.get(sym), dict) else {}
+        prev_raw = registry.get(sym)
+        prev = prev_raw if isinstance(prev_raw, dict) else {}
         promoted_at = prev.get("promoted_at")
         if str(prev.get("lifecycle") or "") == "waiting" and lifecycle == "active":
             promoted_at = now
@@ -264,7 +265,8 @@ def refresh_pinned_signal_queue(
             cached = store.get(sym)
             if isinstance(cached, dict) and not cached.get("error"):
                 rows[sym] = cached
-    prev_registry = prev.get("registry") if isinstance(prev.get("registry"), dict) else {}
+    prev_registry_raw = prev.get("registry")
+    prev_registry = prev_registry_raw if isinstance(prev_registry_raw, dict) else {}
     registry = _prune_registry(prev_registry, ttl_hours=ttl)
     registry = _update_registry(rows, registry)
     raw_top = build_top3(rows, top_n=top_n)
@@ -273,8 +275,11 @@ def refresh_pinned_signal_queue(
     top3: list[dict[str, Any]] = []
     for opp in raw_top:
         item = asdict(opp)
-        reg = registry.get(opp.symbol) if isinstance(registry.get(opp.symbol), dict) else {}
-        prev_reg = (prev.get("registry") or {}).get(opp.symbol) if isinstance(prev.get("registry"), dict) else {}
+        reg_raw = registry.get(opp.symbol)
+        reg = reg_raw if isinstance(reg_raw, dict) else {}
+        prev_raw = prev.get("registry")
+        prev_dict = prev_raw if isinstance(prev_raw, dict) else {}
+        prev_reg = prev_dict.get(opp.symbol) if isinstance(prev_dict, dict) else {}
         item["promoted"] = bool(
             reg.get("promoted_at")
             and reg.get("promoted_at") != (prev_reg or {}).get("promoted_at")

@@ -119,16 +119,20 @@ async def run_tick(
         "full" if any(_tier_for(s) == "full" for s in symbols) else tier
     )
     parallel = max(1, int(snapshot_parallel or HUNT_SNAPSHOT_PARALLEL))
+    _tick_success = False
     try:
         cache = batch_cache or TickBatchCache()
         need_btc = any(s != "BTCUSDT" for s in symbols)
-        await refresh_tick_batch_cache(
-            cache,
-            client,
-            safe_fetch=safe_fetch,
-            prepare_frame=_prepare_frame,
-            need_btc=need_btc,
-            tier=batch_tier,
+        await asyncio.wait_for(
+            refresh_tick_batch_cache(
+                cache,
+                client,
+                safe_fetch=safe_fetch,
+                prepare_frame=_prepare_frame,
+                need_btc=need_btc,
+                tier=batch_tier,
+            ),
+            timeout=120.0,
         )
         premium_all = cache.premium_all
         funding_info_all = cache.funding_info_all
@@ -136,10 +140,13 @@ async def run_tick(
         btc_work_1h = cache.btc_work_1h
         btc_work_1m = cache.btc_work_1m
         if ticker_by_sym is None:
-            ticker_raw = await safe_fetch(
-                client.fetch_ticker_24h,
-                context="ticker_24h",
-                client=client,
+            ticker_raw = await asyncio.wait_for(
+                safe_fetch(
+                    client.fetch_ticker_24h,
+                    context="ticker_24h",
+                    client=client,
+                ),
+                timeout=120.0,
             ) or []
             ticker_by_sym = {str(t.get("symbol")): t for t in ticker_raw if t.get("symbol")}
         if batch_tier == "full" and spot_companion is not None and symbols:
@@ -447,11 +454,13 @@ async def run_tick(
         from hunt_core.runtime.tick_state import hunt_scan_store
 
         hunt_scan_store().put_many(rows)
+        _tick_success = True
         return rows
     finally:
-        _save_state(state)
-        buffer_tracker_state(tracker_state)
-        flush_lake()
+        if _tick_success:
+            _save_state(state)
+            buffer_tracker_state(tracker_state)
+            flush_lake()
 
 
 

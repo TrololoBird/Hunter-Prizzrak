@@ -117,7 +117,8 @@ def build_data_plane_audit(
 ) -> dict[str, Any]:
     """Build audit record: per-field source and truthful age."""
     symbol = str(row.get("symbol") or "").upper()
-    market = row.get("market") if isinstance(row.get("market"), dict) else {}
+    _market = row.get("market")
+    market = _market if isinstance(_market, dict) else {}
     if ws_snap is None:
         ws_snap = _ws_snap_from_row(row, market)
     ws_age = _ws_age(ws_snap)
@@ -257,9 +258,11 @@ def build_data_plane_audit(
     )
 
     # Klines / structure (REST)
-    tf = row.get("timeframes") if isinstance(row.get("timeframes"), dict) else {}
+    _tf = row.get("timeframes")
+    tf = _tf if isinstance(_tf, dict) else {}
     for tf_key in ("15m_closed", "1h_closed", "4h_closed"):
-        block = tf.get(tf_key) if isinstance(tf.get(tf_key), dict) else {}
+        _block = tf.get(tf_key)
+        block = _block if isinstance(_block, dict) else {}
         close_ms = block.get("close_time_ms")
         k_age: float | None = None
         if close_ms is not None:
@@ -280,7 +283,8 @@ def build_data_plane_audit(
         )
 
     # Phase / CUSUM (scanner input)
-    lc = row.get("lifecycle") if isinstance(row.get("lifecycle"), dict) else {}
+    _lc = row.get("lifecycle")
+    lc = _lc if isinstance(_lc, dict) else {}
     fields.append(
         _field_entry(
             field="phase_cusum",

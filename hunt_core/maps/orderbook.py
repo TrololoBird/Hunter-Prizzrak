@@ -4,6 +4,7 @@ from __future__ import annotations
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from math import ceil, floor
 from typing import Any
 
 from hunt_core.maps.config import MapsConfig
@@ -448,6 +449,9 @@ def _detect_cvd_divergence(
     return None
 
 
+_BIN_EPS = 1e-9
+
+
 def merge_full_depth_bins(
     per_exchange: dict[str, dict[str, Any]],
     *,
@@ -493,7 +497,21 @@ def merge_full_depth_bins(
                     continue
                 if px <= 0 or qty <= 0 or px < lo or px > current_price + span:
                     continue
-                b = max(0, min(n_buckets - 1, int((px - lo) / bucket_size)))
+                # Cross-venue snapshots are not time-aligned, so one venue's bids can sit
+                # above (or its asks below) the reference price taken from another venue.
+                # Such levels are stale relative to the reference, not real liquidity on
+                # that side; binning them would render a bid wall above an ask wall.
+                if side == "bid" and px > current_price:
+                    continue
+                if side == "ask" and px < current_price:
+                    continue
+                # Bids own the upper edge of a bucket, asks the lower edge, so a level
+                # resting exactly on the reference price never bins to the far side.
+                # The epsilon absorbs float error at the boundary, where (px - lo) /
+                # bucket_size lands on 10.000000000000002 rather than exactly 10.
+                raw_b = (px - lo) / bucket_size
+                b = ceil(raw_b - _BIN_EPS) - 1 if side == "bid" else floor(raw_b + _BIN_EPS)
+                b = max(0, min(n_buckets - 1, b))
                 pool[b] = pool.get(b, 0.0) + px * qty
     max_d = max([*bid_bins.values(), *ask_bins.values()], default=1.0) or 1.0
 
@@ -501,6 +519,8 @@ def merge_full_depth_bins(
         return [
             {
                 "price_center": round(lo + (b + 0.5) * bucket_size, 6),
+                "price_lo": round(lo + b * bucket_size, 6),
+                "price_hi": round(lo + (b + 1) * bucket_size, 6),
                 "depth_usd": round(v, 2),
                 "intensity": round(v / max_d, 4),
             }

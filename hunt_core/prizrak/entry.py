@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from hunt_core.prizrak.adapter import row_dominance, row_ohlcv_by_tf
+from hunt_core.prizrak.adapter import row_ohlcv_by_tf
 from hunt_core.prizrak.config import PrizrakConfig
 from hunt_core.prizrak.orchestrator import build_prizrak_signals
 
@@ -40,9 +40,15 @@ def ensure_prizrak_verdict(
 
     if ohlcv_by_tf is None:
         ohlcv_by_tf = row_ohlcv_by_tf(row, cfg=cfg)
-    btc_d_change, total3_change = row_dominance(row)
+    # Market-cap доп-фактор (Павел М.): cache-only read on the tick path (zero network) —
+    # a separate off-process refresher warms the cache. Skipped entirely when disabled.
+    marketcap_series: list[list[float]] | None = None
+    if cfg.marketcap_enabled:
+        from hunt_core.prizrak.marketcap_source import read_cached_series
+
+        marketcap_series = read_cached_series(str(row.get("symbol") or ""))
     candidates = build_prizrak_signals(
-        ohlcv_by_tf, price=price, btc_d_change_24h=btc_d_change, total3_change_24h=total3_change, cfg=cfg,
+        ohlcv_by_tf, price=price, cfg=cfg, marketcap_series=marketcap_series
     )
     # Single structural source of truth for the display layer (📐 МТФ структура) — this is
     # exactly the multi-scale structure + HTF bias that gated the candidates above.

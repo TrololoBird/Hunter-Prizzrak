@@ -9,9 +9,13 @@ produced the summary.
 """
 from __future__ import annotations
 
+import logging
+
 from typing import Any, Literal
 
 from hunt_core.prizrak.engines._helpers import safe_float
+
+LOG = logging.getLogger(__name__)
 
 ActivationState = Literal["idle", "near_entry", "in_entry_zone", "near_catalyst", "at_catalyst"]
 
@@ -41,17 +45,20 @@ def assess_activation(
             elif dist_cat <= 0.55 and state == "idle":
                 state = "near_catalyst"
         except (TypeError, ValueError):
+            LOG.debug("catalyst_level float conversion failed", exc_info=True)
             pass
 
     lo = summary.get("entry_lo")
     hi = summary.get("entry_hi")
     try:
-        el, eh = float(lo), float(hi)
+        el, eh = safe_float(lo), safe_float(hi)
         if el > 0 and eh > 0:
             zone_mid = (el + eh) / 2.0
             at_resistance = False
-            struct = row.get("structure") if isinstance(row.get("structure"), dict) else {}
-            kl = struct.get("key_levels") if isinstance(struct.get("key_levels"), dict) else {}
+            raw_struct = row.get("structure")
+            struct = raw_struct if isinstance(raw_struct, dict) else {}
+            raw_kl = struct.get("key_levels")
+            kl = raw_kl if isinstance(raw_kl, dict) else {}
             resist = safe_float(kl.get("resistance") or kl.get("last_swing_high"))
             if resist > 0 and price >= resist * 0.997:
                 at_resistance = True
@@ -66,6 +73,7 @@ def assess_activation(
                 if dist_entry <= 0.35 and state in {"idle", "near_catalyst"}:
                     state = "near_entry"
     except (TypeError, ValueError):
+        LOG.debug("entry_lo/entry_hi zone assessment failed", exc_info=True)
         pass
 
     detail = ""

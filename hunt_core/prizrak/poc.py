@@ -26,6 +26,24 @@ def _frame_from_ohlcv(ohlcv: list[list[float]]) -> pl.DataFrame:
     )
 
 
+_MIN_STRUCTURE_BARS = 5
+
+
+def _structure_bars(
+    ohlcv: list[list[float]], zone: dict[str, Any] | None
+) -> list[list[float]]:
+    """Bars spanned by the zone's own structure, or the full window if it can't be located."""
+    if not zone:
+        return ohlcv
+    first, last = zone.get("first_touch_idx"), zone.get("last_touch_idx")
+    if first is None or last is None:
+        return ohlcv
+    lo_i, hi_i = int(first), int(last) + 1
+    if lo_i < 0 or hi_i > len(ohlcv) or hi_i - lo_i < _MIN_STRUCTURE_BARS:
+        return ohlcv
+    return ohlcv[lo_i:hi_i]
+
+
 def zone_poc(
     ohlcv: list[list[float]],
     *,
@@ -34,12 +52,16 @@ def zone_poc(
 ) -> dict[str, Any]:
     """POC/VAH/VAL over the given bars, optionally restricted to a found накопление zone.
 
-    ``ohlcv`` should already be sliced to the window the zone (from
-    ``accumulation.find_accumulation_zone``) was found on — POC is computed over the
-    same population, per course methodology ("натягиваем профиль на структуру").
+    ``ohlcv`` is the tier lookback the zone (from ``accumulation.find_accumulation_zone``)
+    was found on; the zone's ``first_touch_idx``/``last_touch_idx`` index into it. The
+    profile is fitted to those bars alone, per course methodology (с. 26: "натягивая
+    профиль на структуру — важно захватить все свечи структуры"). Profiling the whole
+    lookback instead put the POC outside the zone on a large share of candidates, which
+    is not a POC of that накопление at all.
     """
     cfg = cfg or PrizrakConfig.load()
-    frame = _frame_from_ohlcv(ohlcv)
+    bars = _structure_bars(ohlcv, zone)
+    frame = _frame_from_ohlcv(bars)
     poc, vah, val = volume_profile_levels(frame, buckets=cfg.vp_buckets, value_area_pct=cfg.vp_value_area_pct)
     if poc is None:
         return {}
@@ -48,12 +70,9 @@ def zone_poc(
         lo, hi = zone.get("lo"), zone.get("hi")
         if lo and hi and hi > lo:
             position = (poc - lo) / (hi - lo)  # 0=at support, 1=at resistance
-            # `ohlcv` in practice covers the full tier lookback, not strictly the zone's
-            # own bar window, so the volume POC often falls outside the zone entirely —
-            # the "position in zone" ratio is then meaningless (was showing values like
-            # 1.9 or -5.3 in ~44% of live candidates). Report it only when it's actually
-            # inside the zone; omit rather than show a number that looks like a fraction
-            # but isn't one.
+            # A profile fitted to the structure can still peak just outside the boundary
+            # band (the zone's hi/lo are cluster means, not hard extremes), so keep the
+            # guard rather than emit a ratio that isn't one.
             if 0.0 <= position <= 1.0:
                 out["poc_position_in_zone"] = round(position, 4)
     return out

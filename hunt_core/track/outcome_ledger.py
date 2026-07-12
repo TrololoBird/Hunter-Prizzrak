@@ -41,11 +41,13 @@ def build_authority_snapshot(
     """Per-boundary authority flags for invariant audits (fusion → delivery → TG)."""
     s = setup if isinstance(setup, dict) else {}
     r = row if isinstance(row, dict) else {}
-    lc = r.get("lifecycle") if isinstance(r.get("lifecycle"), dict) else {}
+    _lc = r.get("lifecycle")
+    lc = _lc if isinstance(_lc, dict) else {}
     codes = _blocker_codes(blockers)
 
     fusion_gate_open = bool(s.get("impulse_confirmed"))
-    mf = r.get("manipulation_fusion") if isinstance(r.get("manipulation_fusion"), dict) else {}
+    _mf = r.get("manipulation_fusion")
+    mf = _mf if isinstance(_mf, dict) else {}
     req_n = mf.get("required_n")
     pass_n = mf.get("pass_count")
     if req_n is not None:
@@ -56,7 +58,8 @@ def build_authority_snapshot(
     mission_pass = not _any_prefix(codes, _MISSION_BLOCK_PREFIXES)
     rr_pass = not _any_prefix(codes, _RR_BLOCK_PREFIXES)
     contract_pass = not _any_prefix(codes, _CONTRACT_BLOCK_PREFIXES)
-    pre_gate = s.get("pre_gate") if isinstance(s.get("pre_gate"), dict) else {}
+    _pre_gate = s.get("pre_gate")
+    pre_gate = _pre_gate if isinstance(_pre_gate, dict) else {}
 
     return {
         "fusion_gate_open": fusion_gate_open,
@@ -120,8 +123,10 @@ def build_ledger_record(
     fusion = {}
     if row and isinstance(row.get("manipulation_fusion"), dict):
         fusion = row["manipulation_fusion"]
-    lc = (row or {}).get("lifecycle") if isinstance((row or {}).get("lifecycle"), dict) else {}
-    forecast = (row or {}).get("maps_forecast") if isinstance((row or {}).get("maps_forecast"), dict) else {}
+    _lc = (row or {}).get("lifecycle")
+    lc = _lc if isinstance(_lc, dict) else {}
+    _forecast = (row or {}).get("maps_forecast")
+    forecast = _forecast if isinstance(_forecast, dict) else {}
     factors = fusion.get("factors") or []
     top5 = factors[:5] if isinstance(factors, list) else []
     quarantine = (setup or {}).get("quarantine_factors")

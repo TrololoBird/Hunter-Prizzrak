@@ -3,9 +3,7 @@ from __future__ import annotations
 
 
 
-import os
 import tomllib as _toml_lib
-from collections.abc import Mapping
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -53,32 +51,12 @@ class RuntimeConfig(_StrictModel):
 
 
 class NetworkConfig(_StrictModel):
-    proxy_url: str | None = None
-    proxy_urls: list[str] = Field(default_factory=list)
+    """Network settings. Binance is reached on a DIRECT connection — the rotating
+    egress proxy pool (proxy_urls / failover_*) was removed (Branch A). Any legacy
+    proxy_url / proxy_urls / failover_* keys still present in config.toml are ignored
+    (``extra="ignore"``)."""
 
-    @field_validator("proxy_url")
-    @classmethod
-    def _normalize_proxy(cls, value: str | None) -> str | None:
-        raw = str(value or "").strip()
-        return raw or None
-
-    @field_validator("proxy_urls", mode="before")
-    @classmethod
-    def _normalize_list(cls, value: object) -> list[str]:
-        out: list[str] = []
-        for raw in value or ():
-            item = str(raw or "").strip()
-            if item and item not in out:
-                out.append(item)
-        return out
-
-    def effective_proxy_urls(self) -> list[str]:
-        out: list[str] = []
-        for raw in (self.proxy_url, *self.proxy_urls):
-            item = str(raw or "").strip()
-            if item and item not in out:
-                out.append(item)
-        return out
+    trust_env: bool = True
 
 
 class FilterConfig(_StrictModel):
@@ -259,30 +237,6 @@ def _convert_toml_dict(d: dict[Any, Any]) -> dict[str, Any]:
     return result
 
 
-def _merge_hunt_defaults(payload: dict[str, Any], hunt_defaults: Mapping[str, Any]) -> None:
-    pinned = hunt_defaults.get("pinned", {}).get("defaults") if isinstance(hunt_defaults.get("pinned"), dict) else None
-    if not isinstance(pinned, dict):
-        pinned = hunt_defaults.get("pinned.defaults")
-    if isinstance(pinned, dict):
-        assets = payload.setdefault("assets", {})
-        if not isinstance(assets, dict):
-            assets = {}
-            payload["assets"] = assets
-        symbols = pinned.get("symbols") or []
-        deep = pinned.get("analyst") if isinstance(pinned.get("analyst"), dict) else {}
-        modes = pinned.get("modes") if isinstance(pinned.get("modes"), dict) else {}
-        for sym in symbols:
-            s = str(sym).strip().upper()
-            if not s:
-                continue
-            block = assets.setdefault(s, {})
-            if isinstance(block, dict):
-                if s in modes:
-                    block.setdefault("primary_timeframe", "15m")
-                if deep.get(s):
-                    block["analyst"] = True
-
-
 def _normalize_bot_payload(payload: dict[str, Any]) -> dict[str, Any]:
     normalized = _convert_toml_dict(cast("dict[Any, Any]", payload))
 
@@ -310,7 +264,8 @@ def load_settings(config_path: str | Path = "config.toml") -> HuntSettings:
     config_file = Path(config_path)
     resolved = _resolve_config_source(config_file)
     parsed = _load_toml(resolved)
-    bot_raw = parsed.get("bot") if isinstance(parsed.get("bot"), dict) else {}
+    _bot_raw = parsed.get("bot")
+    bot_raw: dict[str, Any] = _bot_raw if isinstance(_bot_raw, dict) else {}
     payload = _normalize_bot_payload(bot_raw)
     secrets = load_secrets()
     payload["tg_token"] = secrets.tg_token
@@ -318,15 +273,6 @@ def load_settings(config_path: str | Path = "config.toml") -> HuntSettings:
     payload["operator_user_ids"] = list(secrets.operator_user_ids)
     payload["config_path"] = resolved
     payload.setdefault("data_dir", Path("data") / "bot")
-
-    network_payload = payload.setdefault("network", {})
-    if isinstance(network_payload, dict):
-        env_proxy = str(os.getenv("BINANCE_PROXY_URL", "") or "").strip()
-        if env_proxy:
-            network_payload["proxy_url"] = env_proxy
-        env_list = str(os.getenv("BINANCE_PROXY_URLS", "") or "").strip()
-        if env_list:
-            network_payload["proxy_urls"] = [x.strip() for x in env_list.split(",") if x.strip()]
 
     return HuntSettings.model_validate(payload)
 
@@ -426,6 +372,10 @@ def load_config_defaults_toml() -> dict[str, Any]:
         block = raw.get(section)
         if isinstance(block, dict):
             out[section] = {k: v for k, v in block.items() if v is not None}
+
+    deep_prizrak = raw.get("deep", {}).get("prizrak") if isinstance(raw.get("deep"), dict) else None
+    if isinstance(deep_prizrak, dict):
+        out["deep"] = {"prizrak": {k: v for k, v in deep_prizrak.items() if v is not None}}
 
     return out
 

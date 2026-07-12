@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "bash": "ask",
+    "edit": "allow",
+    "read": "allow",
+    "web": "allow",
+    "skill": "allow"
+  },
+  "skills": [
+    ".opencode/skills"
+  ]
+}

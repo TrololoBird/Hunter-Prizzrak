@@ -27,7 +27,8 @@ def _resolve_ohlcv(row: dict[str, Any], tf_key: str) -> list[dict[str, float]]:
                     "htf_bars_from_prepared_failed", exc_info=True
                 )
 
-    tf = row.get("timeframes") if isinstance(row.get("timeframes"), dict) else {}
+    _tf_raw = row.get("timeframes")
+    tf: dict[str, Any] = _tf_raw if isinstance(_tf_raw, dict) else {}
     snap = tf.get(tf_key) or {}
     ohlcv_raw = snap.get("ohlcv")
     if isinstance(ohlcv_raw, list) and len(ohlcv_raw) >= 4:

@@ -43,6 +43,7 @@ def _cluster(points: list[tuple[int, float]], *, tol: float) -> list[dict[str, A
         {
             "price": sum(p for _, p in c) / len(c),
             "touches": len(c),
+            "first_touch_idx": min(idx for idx, _ in c),
             "last_touch_idx": max(idx for idx, _ in c),
         }
         for c in clusters
@@ -51,6 +52,7 @@ def _cluster(points: list[tuple[int, float]], *, tol: float) -> list[dict[str, A
 
 def _zone_from_clusters(hi: dict[str, Any], lo: dict[str, Any], *, tf: str, bar_count: int) -> dict[str, Any]:
     touches = hi["touches"] + lo["touches"]
+    first_touch_idx = min(hi["first_touch_idx"], lo["first_touch_idx"])
     last_touch_idx = max(hi["last_touch_idx"], lo["last_touch_idx"])
     denom = max(bar_count - 1, 1)
     return {
@@ -61,11 +63,24 @@ def _zone_from_clusters(hi: dict[str, Any], lo: dict[str, Any], *, tf: str, bar_
         "hi_touches": hi["touches"],
         "lo_touches": lo["touches"],
         "width_pct": round((hi["price"] - lo["price"]) / lo["price"] * 100, 4),
+        # Span of the structure's own bars, so a volume profile can be fitted to it
+        # rather than to the whole lookback ("натягиваем профиль на структуру").
+        "first_touch_idx": first_touch_idx,
         "last_touch_idx": last_touch_idx,
         # 0 = last touch was at the very start of the lookback window (stale/ancient
         # relative to what we can see), 1 = touched on the most recent bar available.
         "recency": round(last_touch_idx / denom, 4),
     }
+
+
+def _zone_volume(bars: list[dict[str, float]], first_idx: int, last_idx: int) -> float:
+    """Traded volume across the zone's own structure bars — the course's measure of
+    level strength (стр.22: "Сила уровня определяется ТФ и объёмом ... смотрим по VRVP")."""
+    lo_i = max(0, int(first_idx))
+    hi_i = min(len(bars) - 1, int(last_idx))
+    if hi_i < lo_i:
+        return 0.0
+    return sum(float(b.get("volume", 0.0)) for b in bars[lo_i:hi_i + 1])
 
 
 def _overlaps(a: dict[str, Any], b: dict[str, Any]) -> bool:
@@ -112,9 +127,17 @@ def find_accumulation_zones(
             zone = _zone_from_clusters(hi, lo, tf=tf, bar_count=len(bars))
             if zone["width_pct"] > cfg.accumulation_max_width_pct:
                 continue  # too wide to be a real flat — stitched-together pivots, not a box
+            zone["zone_volume"] = round(
+                _zone_volume(bars, zone["first_touch_idx"], zone["last_touch_idx"]), 4
+            )
             candidates.append(zone)
 
-    candidates.sort(key=lambda z: (z["touches"], -z["width_pct"]), reverse=True)
+    # Touch count (>= accumulation_min_touches) is the STRUCTURE gate — a base needs 4+
+    # boundary points to exist at all (стр.22-23). Among valid bases, strength is ranked
+    # by traded VOLUME, not touch count: the course explicitly prefers a smaller-touch,
+    # higher-volume наторговка over a wider-touched one (стр.22). Volume ties break to the
+    # tighter box (a denser base is more decisive).
+    candidates.sort(key=lambda z: (z["zone_volume"], -z["width_pct"]), reverse=True)
 
     kept: list[dict[str, Any]] = []
     for zone in candidates:

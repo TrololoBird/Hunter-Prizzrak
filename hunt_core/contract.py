@@ -847,8 +847,6 @@ def compute_rule_based_ev(
     structure: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Phase 6 shadow EV: P from structure+ignition+RR geometry (no ML)."""
-    from hunt_core.contract import compute_setup_risk_reward, worst_entry_edge
-
     rr = compute_setup_risk_reward(setup, direction=direction)
     entry = worst_entry_edge(setup, direction=direction)
     sl = _normalized_float(setup.get("stop_loss"))
@@ -1131,7 +1129,8 @@ def build_setup_delivery_contract(
         entry_hi = float(ez[1])
     except (TypeError, ValueError, IndexError):
         entry_lo = entry_hi = 0.0
-    lc = row.get("lifecycle") if isinstance(row.get("lifecycle"), dict) else {}
+    _lc_raw = row.get("lifecycle")
+    lc: dict[str, Any] = _lc_raw if isinstance(_lc_raw, dict) else {}
     fuel_key = "dump_fuel" if direction == "short" else "long_fuel"
     score_key = "dump_score" if direction == "short" else "long_score"
     tp1 = setup.get("tp1")

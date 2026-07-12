@@ -13,7 +13,8 @@ def _factor_confidence(factors: list[str], max_factors: int) -> float:
 
 
 def _oi_new_money_short(row: dict[str, Any]) -> bool:
-    market = row.get("market") if isinstance(row.get("market"), dict) else {}
+    _m = row.get("market")
+    market = _m if isinstance(_m, dict) else {}
     regime = str(market.get("oi_regime") or "")
     if regime == "new_money_short":
         return True
@@ -29,7 +30,8 @@ def build_structural_up_forecast(row: dict[str, Any]) -> dict[str, Any] | None:
     price = float(row.get("price") or 0)
     if price <= 0:
         return None
-    market = row.get("market") if isinstance(row.get("market"), dict) else {}
+    _m = row.get("market")
+    market = _m if isinstance(_m, dict) else {}
 
     targets, factors = collect_upward_targets(row, price)
     if market.get("map_accum_bid_absorption"):

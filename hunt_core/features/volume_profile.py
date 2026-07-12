@@ -7,6 +7,8 @@ from __future__ import annotations
 
 
 
+from typing import Any
+
 import polars as pl
 
 VP_BUCKETS_DEFAULT = 20
@@ -15,7 +17,7 @@ VP_LOOKBACK_1H = 48
 VP_VALUE_AREA_PCT = 0.70
 
 
-def _as_optional_float(value: object) -> float | None:
+def _as_optional_float(value: Any) -> float | None:
     if value is None:
         return None
     try:

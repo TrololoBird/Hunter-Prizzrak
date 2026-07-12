@@ -4,7 +4,12 @@ from __future__ import annotations
 import logging
 import math
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Literal, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from hunt_core.domain.schemas import SymbolFrames
+    from hunt_core.market.client import HuntCcxtClient
+    from hunt_core.market.streams import HuntCcxtStreams
 
 import polars as pl
 
@@ -43,6 +48,7 @@ def rsi14_from_ohlc(df: Any, *, idx: int = -1) -> float | None:
             return None
         value = float(series[pos])
     except (TypeError, ValueError, IndexError):
+        LOG.debug("rsi14_from_ohlc series access failed", exc_info=True)
         return None
     return value if math.isfinite(value) else None
 
@@ -162,6 +168,7 @@ def _series_z(values: Any) -> float | None:
     try:
         return round(series_z_strict([float(x) for x in values], field="series"), 2)
     except (DataIncompleteError, TypeError, ValueError):
+        LOG.debug("_series_z failed", exc_info=True)
         return None
 
 
@@ -186,6 +193,7 @@ def _series_ols_slope(values: Any, *, min_n: int = 8) -> float | None:
 
         return ols_slope(pl.Series([float(x) for x in values]), min_n=min_n)
     except (TypeError, ValueError):
+        LOG.debug("_series_ols_slope failed", exc_info=True)
         return None
 
 
@@ -246,6 +254,7 @@ def stamp_derivative_zscores(
         if ws.get("basis_ap_bps") is not None:
             market["basis_ap_bps"] = float(ws["basis_ap_bps"])
     except (TypeError, ValueError):
+        LOG.debug("ws basis_ap_bps float conversion failed", exc_info=True)
         pass
     for ws_key, mkey in (
         ("basis_bps_live", "basis_bps"),
@@ -258,11 +267,13 @@ def stamp_derivative_zscores(
             try:
                 market[mkey] = float(ws[ws_key])
             except (TypeError, ValueError):
+                LOG.debug("ws %s float conversion failed", ws_key, exc_info=True)
                 pass
     if ws.get("live_funding_rate") is not None and market.get("funding_pct") is None:
         try:
             market["funding_pct"] = round(float(ws["live_funding_rate"]) * 100.0, 4)
         except (TypeError, ValueError):
+            LOG.debug("ws live_funding_rate float conversion failed", exc_info=True)
             pass
 
     if prepared is not None:
@@ -281,11 +292,13 @@ def stamp_derivative_zscores(
         try:
             market["basis_bps"] = round(float(market["basis_pct"]) * 100.0, 2)
         except (TypeError, ValueError):
+            LOG.debug("basis_pct -> basis_bps conversion failed", exc_info=True)
             pass
     if market.get("basis_5m") is None and market.get("basis_pct") is not None:
         try:
             market["basis_5m"] = float(market["basis_pct"])
         except (TypeError, ValueError):
+            LOG.debug("basis_pct -> basis_5m conversion failed", exc_info=True)
             pass
 
     basis_pack = pack.get("basis_5m")
@@ -296,6 +309,7 @@ def stamp_derivative_zscores(
             market.setdefault("basis_5m", bp)
             market.setdefault("basis_bps", round(bp * 100.0, 2))
         except (TypeError, ValueError):
+            LOG.debug("basis_pack float conversion failed", exc_info=True)
             pass
 
     if client is not None and symbol:
@@ -374,6 +388,7 @@ def distribution_stats(df: Any, *, idx: int = -1) -> dict[str, float]:
         try:
             out["return_zscore"] = round(series_z_strict(ret_window, field="return_zscore"), 2)
         except (DataIncompleteError, TypeError, ValueError):
+            LOG.debug("distribution_stats return_zscore failed", exc_info=True)
             pass
 
     skew, kurt = _return_skew_kurt(ret_window)
@@ -492,6 +507,7 @@ def btc_beta_1h(sym_work_1h: Any, btc_work_1h: Any, *, lookback: int = 48) -> fl
         beta = float(result.get_column("x")[0])
         return round(beta, 4)
     except Exception:
+        LOG.debug("btc_beta_1h polars_ols failed", exc_info=True)
         return None
 
 
@@ -575,12 +591,14 @@ def _enrich_ker_ema_slope(out: dict[str, Any], df: Any) -> dict[str, Any]:
         closes = [float(x) for x in df["close"].to_list()]
         out["ker_10"] = round(_compute_ker(closes, 10), 4)
     except (pl.exceptions.PolarsError, TypeError, ValueError):
+        LOG.debug("_enrich_ker_ema_slope ker_10 failed", exc_info=True)
         pass
     try:
         if "ema50" in df.columns:
             ema50s = [float(x) for x in df["ema50"].to_list() if x is not None]
             out["ema50_slope_5"] = round(_compute_ema_slope(ema50s, 5), 4)
     except (pl.exceptions.PolarsError, TypeError, ValueError):
+        LOG.debug("_enrich_ker_ema_slope ema50_slope_5 failed", exc_info=True)
         pass
     return out
 
@@ -664,12 +682,15 @@ def apply_rest_enrichments_local(
         prepared.funding_recent_extreme_age_hours = float(extreme[1])
     basis_stats = client.get_cached_basis_stats(symbol, period="5m")
     if basis_stats:
-        if basis_stats.get("basis_pct") is not None:
-            prepared.basis_pct = float(basis_stats["basis_pct"])
-        if basis_stats.get("premium_zscore_5m") is not None:
-            prepared.premium_zscore_5m = float(basis_stats["premium_zscore_5m"])
-        if basis_stats.get("premium_slope_5m") is not None:
-            prepared.premium_slope_5m = float(basis_stats["premium_slope_5m"])
+        bp_val = basis_stats.get("basis_pct")
+        if bp_val is not None:
+            prepared.basis_pct = float(bp_val)
+        pz_val = basis_stats.get("premium_zscore_5m")
+        if pz_val is not None:
+            prepared.premium_zscore_5m = float(pz_val)
+        ps_val = basis_stats.get("premium_slope_5m")
+        if ps_val is not None:
+            prepared.premium_slope_5m = float(ps_val)
     basis_direct = pack.get("basis_5m")
     if basis_direct is not None and prepared.basis_pct is None:
         prepared.basis_pct = float(basis_direct)
@@ -790,6 +811,7 @@ def market_snapshot(
         if ask_px is not None and ask_qty is not None
         else None
     )
+    qv = ticker.get("quote_volume")
     return {
         "bid": bid_px,
         "ask": ask_px,
@@ -842,9 +864,7 @@ def market_snapshot(
         "agg_trade_delta": getattr(agg, "delta_ratio", None) if agg else None,
         "agg_buy_qty": getattr(agg, "buy_qty", None) if agg else None,
         "agg_sell_qty": getattr(agg, "sell_qty", None) if agg else None,
-        "vol_24h_m": round(float(ticker.get("quote_volume")) / 1e6, 1)
-        if ticker.get("quote_volume") is not None
-        else None,
+        "vol_24h_m": round(float(qv) / 1e6, 1) if qv is not None else None,
         "trade_count_24h": ticker.get("trade_count"),
         **(ws_snap or {}),
         **(spot_extra or {}),
@@ -925,6 +945,7 @@ def col(df: Any, name: str, default: float = 0.0, *, idx: int = -1) -> float:
     try:
         return float(df.item(idx, name))
     except (TypeError, ValueError, IndexError):
+        LOG.debug("col df.item failed idx=%s name=%s", idx, name, exc_info=True)
         return default
 
 
@@ -996,6 +1017,7 @@ def _bar_close_time_ms(df: Any, *, closed: bool = False) -> int | None:
     try:
         ts = df.item(idx, "close_time")
     except (TypeError, ValueError, IndexError):
+        LOG.debug("_bar_close_time_ms df.item failed idx=%s", idx, exc_info=True)
         return None
     if ts is None:
         return None
@@ -1004,6 +1026,7 @@ def _bar_close_time_ms(df: Any, *, closed: bool = False) -> int | None:
     try:
         return int(ts)
     except (TypeError, ValueError):
+        LOG.debug("_bar_close_time_ms int(ts) failed ts=%r", ts, exc_info=True)
         return None
 
 

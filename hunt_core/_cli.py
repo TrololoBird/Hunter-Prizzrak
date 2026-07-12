@@ -66,54 +66,8 @@ def _normalize_cli_symbols(raw: list[str] | tuple[str, ...] | None) -> tuple[str
     return tuple(out)
 
 
-async def _cmd_proxy_discover(args: argparse.Namespace) -> None:
-    from hunt_core.market.network import (
-        _PUBLIC_PROXY_SOURCES,
-        _lightweight_ping,
-        detect_local_proxies,
-        discover_and_persist,
-        proxy_cache_get_working,
-    )
-    from hunt_core.paths import ROOT
-
-    config_path = ROOT / "config.toml"
-    print(f"Proxy discovery — scanning from {len(_PUBLIC_PROXY_SOURCES)} public sources...")
-    print(f"Config: {config_path}")
-    print()
-
-    print("Phase 1: Local proxy scan (WARP, Clash, sing-box, Tor)...")
-    local = await detect_local_proxies()
-    if local:
-        for url in local:
-            print(f"  LOCAL WORKING: {url}")
-    else:
-        print("  No local proxies found")
-    print()
-
-    print("Phase 2: Public proxy scan (light ping + CCXT verify)...")
-    print("  This may take up to 2 minutes...")
-    urls = await discover_and_persist(config_path=config_path, include_public=True)
-
-    cache = proxy_cache_get_working()
-    print()
-    print(f"Results: {len(urls)} newly verified + {len(cache)} cached")
-    if urls:
-        print()
-        print("Newly discovered working proxies:")
-        for i, url in enumerate(urls, 1):
-            _, lat = await _lightweight_ping(url)
-            print(f"  {i}. {url}  ({lat:.0f}ms)")
-    if cache:
-        print()
-        print("Cached working proxies:")
-        for i, (url, lat) in enumerate(cache, 1):
-            print(f"  {i}. {url}  ({lat:.0f}ms)")
-    if not urls and not cache:
-        print("No working proxies found.")
-
-
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Hunter CLI — watch + proxy tools")
+    parser = argparse.ArgumentParser(description="Hunter CLI — watch")
     sub = parser.add_subparsers(dest="command")
 
     # watch (default)
@@ -128,18 +82,7 @@ def main() -> None:
     watch_parser.add_argument("--once", action="store_true")
     watch_parser.add_argument("--no-telegram", action="store_true", help="Log only, no Telegram sends")
 
-    # proxy
-    proxy_parser = sub.add_parser("proxy", help="Proxy management tools")
-    proxy_sub = proxy_parser.add_subparsers(dest="proxy_command")
-
-    proxy_discover = proxy_sub.add_parser("discover", help="Discover working proxies")
-    proxy_discover.set_defaults(func=_cmd_proxy_discover)
-
     args = parser.parse_args()
-
-    if args.command == "proxy" and hasattr(args, "func"):
-        asyncio.run(args.func(args))
-        return
 
     # Default: watch
     symbol_list = _normalize_cli_symbols(args.symbols) if hasattr(args, "symbols") else tuple(DEFAULT_SYMBOLS)

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import os
 import logging
 from datetime import datetime, timezone
 from typing import Any
@@ -32,14 +33,33 @@ from hunt_core.track.tracker import has_active_signal, register_signal_open
 _LOG = logging.getLogger(__name__)
 
 _MIN_RR = 1.2
-# We deliberately hunt VERY large manipulation moves (pump/dump of 40-80%+), so a
-# 20% target cap rejected exactly the biggest, most valuable setups. 60% keeps out
-# only physically absurd targets; RR (_MIN_RR) + the structural target still gate quality.
-_MAX_TARGET_PCT = 60.0
+# We deliberately hunt VERY large manipulation moves, so a 20% target cap rejected
+# exactly the biggest, most valuable setups; it was raised to 60%. But a single cap
+# cannot serve every scale: the method's own numbers are 100%, 160%, «больше 400%»
+# on DAILY structures («в среднесроке эта сделка показала 250%»), while a 15m-scale
+# manipulation is a few percent. A flat 60% silently discarded any setup whose
+# nearest structural pool sat further out — i.e. precisely the daily-scale trades the
+# (1w, 1d, 4h) ladder was added to find. Cap by the detection frame instead.
+# RR (_MIN_RR, measured to TP1) + the structural target still gate quality.
+_MAX_TARGET_PCT_BY_TF: dict[str, float] = {
+    "1d": 300.0,
+    "4h": 150.0,
+    "1h": 80.0,
+}
+_MAX_TARGET_PCT = 60.0  # floor for the fast frames (15m/5m) and unknown TFs
 
-_TIMEFRAMES = ("1d", "4h", "1h", "15m", "5m")
-_LOOKBACK_BY_TF = {"1d": 220, "4h": 120, "1h": 120, "15m": 700, "5m": 1000}
+
+def _max_target_pct(meso_tf: str | None) -> float:
+    return _MAX_TARGET_PCT_BY_TF.get(str(meso_tf or ""), _MAX_TARGET_PCT)
+
+# 1w is fetched as the macro context of the (1w, 1d, 4h) ladder: the author's
+# biggest manipulations («восходящий канал начиная с февраля», ESPORTS 160%,
+# BSB 250% «в среднесроке») are DAILY-scale structures, and a 1d meso needs a
+# weekly frame above it.
+_TIMEFRAMES = ("1w", "1d", "4h", "1h", "15m", "5m")
+_LOOKBACK_BY_TF = {"1w": 160, "1d": 220, "4h": 120, "1h": 120, "15m": 700, "5m": 1000}
 _MAX_STALE_MS_BY_TF = {
+    "1w": 604800_000 * 2,  # 2 weeks
     "1d": 86400_000 * 2,   # 2 days
     "4h": 14400_000 * 2,   # 8 hours
     "1h": 3600_000 * 2,    # 2 hours
@@ -50,6 +70,7 @@ _MAX_STALE_MS_BY_TF = {
 # (fetch_ohlcv_list bypasses finalize_kline_frame's incomplete-tail drop, so ccxt's
 # in-progress last kline would otherwise reach the detectors and repaint).
 _INTERVAL_MS = {
+    "1w": 604800_000,
     "1d": 86400_000,
     "4h": 14400_000,
     "1h": 3600_000,
@@ -67,6 +88,11 @@ _INTERVAL_MS = {
 # ("довор") level between entry and stop, and a market/limit order-type label
 # matching Prizrak's own format, instead of a single bare "entry price".
 _AVERAGING_FRACTION = 0.5  # how far from entry toward stop the averaging limit sits
+# Лесенка доборов (Prizrak/Влад SHORT: «доборы страховочные чуть ниже», «добирал…
+# усреднил… сместил средний»). Вместо одного добора на 50% к стопу — несколько
+# структурных доборов между входом и стопом. Доли отсчитываются от дистанции вход→стоп;
+# 0.5 сохранён для обратной совместимости (_AVERAGING_FRACTION == средний рунг).
+_DOBOR_FRACTIONS = (0.33, 0.66)  # два добора: треть и две трети пути к стопу
 
 
 def _stop_buffer(meso_bars: list[list[float]], *, pattern_a3: bool = False) -> float:
@@ -97,19 +123,23 @@ def _geometry(setup: ManipulationSetup, *, price: float, stop_buffer: float | No
     if setup.target is None:
         return None  # no real structural target — abstain, never fabricate one
     # Full structural ladder (course: пулы ликвидности снизу/сверху). R:R is measured
-    # to the DEEPEST reachable pool within _MAX_TARGET_PCT — the «среднесрочная цель»
-    # — while the nearer levels are shown as partial take-profits. A wide stop above
-    # the manipulation extreme only pays off against the whole move, not the first
-    # tiny bounce (that is why a single 30% retrace under-stated R and filtered the
-    # real EVAA short).
+    # to the DEEPEST reachable pool within the scale's target cap — the «среднесрочная
+    # цель» — while the nearer levels are shown as partial take-profits. A wide stop
+    # above the manipulation extreme only pays off against the whole move, not the
+    # first tiny bounce (that is why a single 30% retrace under-stated R and filtered
+    # the real EVAA short).
+    max_target_pct = _max_target_pct(setup.meso_tf)
     ladder = [t for t in (setup.target_ladder or ()) if t and t > 0]
     if setup.direction == "short":
-        ladder = [t for t in ladder if t < price and abs(price - t) / price * 100.0 <= _MAX_TARGET_PCT]
+        ladder = [t for t in ladder if t < price and abs(price - t) / price * 100.0 <= max_target_pct]
     else:
-        ladder = [t for t in ladder if t > price and abs(price - t) / price * 100.0 <= _MAX_TARGET_PCT]
+        ladder = [t for t in ladder if t > price and abs(price - t) / price * 100.0 <= max_target_pct]
     primary_target = (min(ladder) if setup.direction == "short" else max(ladder)) if ladder else setup.target
+    # Ближайшая цель = первая частичная фиксация (TP1). Именно она определяет,
+    # окупается ли риск на первом же снятии — R:R до дальнего пула этого не показывает.
+    nearest_target = (max(ladder) if setup.direction == "short" else min(ladder)) if ladder else setup.target
     target_dist_pct = abs(price - primary_target) / price * 100.0
-    if target_dist_pct > _MAX_TARGET_PCT:
+    if target_dist_pct > max_target_pct:
         return None  # цель нереалистично далеко — пропускаем
     # Стоп «за хая/лоу манипуляции С ЗАПАСОМ» (транскрипт). Бэктест на реальных барах
     # EVAA (памп 3.85 → дамп): фикс-2-3% от НАСТОЯЩЕГО экстремума манипуляции даёт
@@ -122,25 +152,70 @@ def _geometry(setup: ManipulationSetup, *, price: float, stop_buffer: float | No
         stop = setup.sweep_extreme * (1 + buf)
         risk = stop - price
         reward = price - primary_target
+        reward_tp1 = price - nearest_target
     else:
         stop = setup.sweep_extreme * (1 - buf)
         risk = price - stop
         reward = primary_target - price
-    if risk <= 0 or reward <= 0:
+        reward_tp1 = nearest_target - price
+    if risk <= 0 or reward <= 0 or reward_tp1 <= 0:
         return None
     rr = reward / risk
-    if rr < _MIN_RR:
+    rr_tp1 = reward_tp1 / risk
+    # Гейт качества считается по БЛИЖНЕЙ цели, а не по дальнему пулу. Тейки берутся
+    # частями: первая фиксация происходит на TP1, и именно она должна окупать риск.
+    # Гейт по дальней цели пропускал сетапы, у которых TP1 не отбивает стоп, — глубокий
+    # пул «вытягивал» проверку за геометрию, до которой сделка почти не доживает.
+    # rr_tp1 <= rr всегда, поэтому этот гейт строго строже прежнего (при одной цели
+    # ближняя == дальняя и поведение не меняется).
+    if rr_tp1 < _MIN_RR:
         return None
     averaging_price = price + (stop - price) * _AVERAGING_FRACTION
+    # Лесенка доборов между входом и стопом (широкий стоп «за структуру» остаётся общим
+    # для всей позиции). Аддитивно к геометрии — гейты rr/target выше не тронуты, поэтому
+    # набор живых сигналов не меняется, богаче только управление позицией.
+    dobor_ladder = [price + (stop - price) * f for f in _DOBOR_FRACTIONS]
     return {
         "entry_lo": min(price, averaging_price),
         "entry_hi": max(price, averaging_price),
         "averaging_price": averaging_price,
+        "dobor_ladder": dobor_ladder,
         "stop": stop,
         "rr": rr,
+        "rr_tp1": rr_tp1,
         "primary_target": primary_target,
+        "nearest_target": nearest_target,
         "ladder": ladder,
     }
+
+
+# Метки, которые описывают НЕДОСТАЮЩЕЕ подтверждение или встречный контекст.
+# Они не аргументы за вход и не должны попадать в строку «почему».
+_RISK_EVIDENCE: dict[str, str] = {
+    "ltf_pending": "разворот на младшем ТФ ещё не подтверждён",
+    "volume_pending": "нет бычьих объёмов",
+    "htf_bear": "старший ТФ медвежий (вход против тренда)",
+    "htf_bull": "старший ТФ бычий (вход против тренда)",
+}
+
+
+def _split_evidence(setup: ManipulationSetup) -> tuple[list[str], list[str]]:
+    """Разделить evidence на аргументы «за» и факторы риска.
+
+    ``htf_bull``/``htf_bear`` — риск только когда они ПРОТИВ направления входа;
+    по тренду это подтверждение.
+    """
+    supporting: list[str] = []
+    risks: list[str] = []
+    for tag in setup.evidence:
+        against_htf = (tag == "htf_bear" and setup.direction == "long") or (
+            tag == "htf_bull" and setup.direction == "short"
+        )
+        if tag in ("ltf_pending", "volume_pending") or against_htf:
+            risks.append(_RISK_EVIDENCE.get(tag, tag))
+        else:
+            supporting.append(tag)
+    return supporting, risks
 
 
 def _format_manipulation_signal(symbol: str, setup: ManipulationSetup, *, price: float, geo: dict[str, Any]) -> str:
@@ -152,6 +227,7 @@ def _format_manipulation_signal(symbol: str, setup: ManipulationSetup, *, price:
     if setup.micro_tf:
         tag = "подтверждён" if setup.micro_confirmed else "не найден"
         micro_line = f"Разворот на {setup.micro_tf}: <b>{tag}</b>\n"
+    supporting, risks = _split_evidence(setup)
     lines = [
         f"{emoji} <b>Манипуляция {pattern_label}</b> · <code>{sym}</code> · <b>{side_label}</b>",
         "━━━━━━━━━━━━━━━━━━━━━━",
@@ -160,15 +236,48 @@ def _format_manipulation_signal(symbol: str, setup: ManipulationSetup, *, price:
         f"экстремум <code>{fmt_price(setup.sweep_extreme)}</code> ({setup.meso_tf})",
         micro_line.rstrip("\n") if micro_line else "",
         f"📍 Вход (рыночный / лимит): <code>{fmt_price(geo['entry_lo'])} — {fmt_price(geo['entry_hi'])}</code>",
-        f"➕ Довор (если пойдёт против ещё): <code>{fmt_price(geo['averaging_price'])}</code>",
+        _dobor_ladder_line(geo),
         f"🛑 Стоп (за структуру): <code>{fmt_price(geo['stop'])}</code>",
         _tp_ladder_line(geo, setup),
-        f"R:R ≈ <code>{geo['rr']:.2f}</code> <i>(до среднесрочной {fmt_price(geo.get('primary_target') or setup.target)})</i>",
+        _rr_line(geo, setup),
         (f"⚡ Фандинг: {html.escape(setup.funding_note)}" if setup.funding_note else ""),
-        f"<i>почему: {html.escape(', '.join(setup.evidence))}</i>",
+        (f"<i>почему: {html.escape(', '.join(supporting))}</i>" if supporting else ""),
+        (f"⚠️ <i>риски: {html.escape('; '.join(risks))}</i>" if risks else ""),
         "<i>Тейки частями по лестнице, держим до цели/стопа — не микро-триггер</i>",
     ]
     return "\n".join(line for line in lines if line)
+
+
+def _rr_line(geo: dict[str, Any], setup: ManipulationSetup) -> str:
+    """R:R до ближней и до дальней цели.
+
+    Только дальний R:R завышает ожидаемую отдачу: дойти до самого глубокого пула
+    заметно менее вероятно, чем до первой частичной фиксации.
+    """
+    far = geo["rr"]
+    far_target = geo.get("primary_target") or setup.target
+    near = geo.get("rr_tp1") or 0.0
+    near_target = geo.get("nearest_target")
+    if near > 0 and near_target and near_target != far_target:
+        return (
+            f"R:R ≈ <code>{near:.2f}</code> <i>(до TP1 {fmt_price(near_target)})</i>"
+            f" · <code>{far:.2f}</code> <i>(до среднесрочной {fmt_price(far_target)})</i>"
+        )
+    return f"R:R ≈ <code>{far:.2f}</code> <i>(до среднесрочной {fmt_price(far_target)})</i>"
+
+
+def _dobor_ladder_line(geo: dict[str, Any]) -> str:
+    """Лесенка страховочных доборов между входом и стопом (усреднение по структуре).
+
+    Метод автора — не один довор, а несколько: усредняем позицию по мере хода против,
+    удерживая общий широкий стоп «за структуру». Fallback на одиночный ``averaging_price``.
+    """
+    rungs = [d for d in (geo.get("dobor_ladder") or ()) if d and d > 0]
+    if not rungs:
+        avg = geo.get("averaging_price")
+        return f"➕ Довор (если пойдёт против ещё): <code>{fmt_price(avg)}</code>" if avg else ""
+    tags = " · ".join(f"Д{i+1} <code>{fmt_price(d)}</code>" for i, d in enumerate(rungs))
+    return f"➕ Доборы (усреднение к стопу): {tags}"
 
 
 def _tp_ladder_line(geo: dict[str, Any], setup: ManipulationSetup) -> str:
@@ -268,7 +377,7 @@ async def deliver_manipulation_setups(
 
     for outcome in outcomes:
         if isinstance(outcome, BaseException):
-            _LOG.warning("manipulation_gather_exception", error=repr(outcome))
+            _LOG.warning("manipulation_gather_exception error=%s", repr(outcome))
             continue
         symbol, ohlcv_by_tf, funding_ctx = outcome
         if not ohlcv_by_tf.get("1d"):
@@ -286,6 +395,23 @@ async def deliver_manipulation_setups(
             # Stage advanced but no completed signal yet — persist the progress
             # immediately so it isn't lost (Bug 2: NON-completed path keeps its
             # current behavior and commits right away).
+            if new_state != prior_state:
+                scanner_states[symbol] = new_state
+                states_changed = True
+            continue
+
+        # SHORT selectivity gate (evidence-driven, source-faithful). The GTC transcript
+        # takes the short only AFTER the lower-TF reversal confirms ("увидели подтверждение
+        # на младшем таймфрейме"). Empirically (dataset_v10) the UNconfirmed (ltf_pending)
+        # shorts are the loss engine: 61 setups at −0.71R; the confirmed subset is the only
+        # non-losing one. Longs are the real edge (+0.54R) and are unaffected. So suppress
+        # delivery of pre-confirmation shorts — persist state so the ladder keeps tracking
+        # and can still fire once the LTF break lands. Override: HUNT_MANIP_SHORT_REQUIRE_LTF=0.
+        if (
+            setup.direction == "short"
+            and not getattr(setup, "micro_confirmed", False)
+            and os.getenv("HUNT_MANIP_SHORT_REQUIRE_LTF", "1") not in {"0", "false", "False"}
+        ):
             if new_state != prior_state:
                 scanner_states[symbol] = new_state
                 states_changed = True
@@ -338,9 +464,17 @@ async def deliver_manipulation_setups(
             states_changed = True
 
         if tracker_state is not None:
+            # The message shows the whole pool ladder and promises «тейки частями …
+            # держим до цели/стопа», but the tracker used to receive tp1 ONLY (the
+            # nearest pool) and no tp2 — so auto_resolve_active_signals closed the
+            # whole position on the first touch and the «среднесрочная цель» was
+            # never tracked. Hand the tracker the same ladder the operator sees.
+            tps = sorted(geo["ladder"] or [setup.target], reverse=(setup.direction == "short"))
             setup_dict = {
                 "stop_loss": geo["stop"],
-                "tp1": setup.target,
+                "tp1": tps[0],
+                "tp2": tps[1] if len(tps) > 1 else None,
+                "tp3": tps[2] if len(tps) > 2 else None,
                 "entry_zone": [geo["entry_lo"], geo["entry_hi"]],
                 "averaging_price": geo["averaging_price"],
                 "entry_type": f"manipulation_{setup.pattern_type}",

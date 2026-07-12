@@ -34,12 +34,6 @@ from hunt_core.market.symbol_gate import (
     gate_symbol_list,
     is_allowed_for_analysis,
 )
-from hunt_core.market.network import (
-    ProxyPool,
-    filter_working_proxies,
-    filter_working_proxies_ccxt,
-    probe_ccxt_direct,
-)
 from hunt_core.market.symbols import SymbolResolutionError
 from hunt_core.market.spot import HuntCcxtSpotCompanion
 from hunt_core.market.streams import HuntCcxtStreams
@@ -52,10 +46,6 @@ __all__ = [
     "HuntLoadPlanner",
     "ccxt_method_available",
     "ccxt_ws_method_available",
-    "ProxyPool",
-    "filter_working_proxies",
-    "filter_working_proxies_ccxt",
-    "probe_ccxt_direct",
     "create_async_binance_future",
     "create_async_binance_spot",
     "create_hunt_market_plane",

@@ -7,6 +7,7 @@ Versioned: each run bumps dataset_vN.
 """
 from __future__ import annotations
 
+import os
 import sys
 import time
 from dataclasses import dataclass
@@ -17,6 +18,7 @@ import polars as pl
 
 # ── shared paths ────────────────────────────────────────────
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+from research.fetch._ip_guard import assert_live_not_running  # noqa: E402
 from research.paths import (  # noqa: E402
     bump_version,
     cache_path,
@@ -41,7 +43,11 @@ TIMEFRAMES = [
 ]
 
 BINANCE_LIMIT = 1000  # max candles per request (Binance hard cap is 1000 for klines)
-RATE_LIMIT_MS = 50    # 20 req/s — safe
+# WAF-safe pacing. ccxt's default (50ms → 20 req/s) trips Binance's short-term
+# request-rate WAF (418 -1003) — that was the 2026-07-11 IP-ban trigger. This is a
+# raw ungated instance (does NOT use hunt's smooth_burst gate), so pace conservatively
+# on its own: ~4 req/s leaves ample WAF headroom. Override via HUNT_FETCH_RATE_MS.
+RATE_LIMIT_MS = int(os.getenv("HUNT_FETCH_RATE_MS", "250") or 250)
 
 
 # ── dataclass ───────────────────────────────────────────────
@@ -68,7 +74,9 @@ def _make_exchange() -> ccxt.binance:
         "enableRateLimit": True,
         "rateLimit": RATE_LIMIT_MS,
     }
-    return ccxt.binance(config)
+    ex = ccxt.binance(config)
+    ex.load_markets()
+    return ex
 
 
 # ── core fetcher ────────────────────────────────────────────
@@ -136,8 +144,6 @@ def fetch_full_history(
 
         if config.until_ms and since >= config.until_ms:
             break
-
-        time.sleep(RATE_LIMIT_MS / 1000)
 
     # ── nothing new ─────────────────────────────────────────
     if not all_bars:
@@ -221,6 +227,9 @@ def fetch_all(
     symbols = symbols or SYMBOLS
     timeframes = timeframes or TIMEFRAMES
 
+    # Architectural ban-guard: refuse to share the Binance IP with a running live watch.
+    assert_live_not_running(what="fetch_history")
+
     if version is None:
         version = bump_version()
 
@@ -229,27 +238,31 @@ def fetch_all(
     print(f"Dataset dir:     {vdir}\n")
 
     exchange = _make_exchange()
-    results: dict[tuple[str, str], pl.DataFrame] = {}
+    try:
+        results: dict[tuple[str, str], pl.DataFrame] = {}
 
-    total = len(symbols) * len(timeframes)
-    done = 0
+        total = len(symbols) * len(timeframes)
+        done = 0
 
-    for sym in symbols:
-        for tf in timeframes:
-            done += 1
-            print(f"\n[{done}/{total}] {sym} {tf}")
-            try:
-                df = fetch_full_history(
-                    FetchConfig(symbol=sym, timeframe=tf),
-                    exchange=exchange,
-                    version=version,
-                )
-                results[(sym, tf)] = df
-            except Exception as e:
-                print(f"  FAILED: {e}")
-                results[(sym, tf)] = pl.DataFrame()
+        for sym in symbols:
+            for tf in timeframes:
+                done += 1
+                print(f"\n[{done}/{total}] {sym} {tf}")
+                try:
+                    df = fetch_full_history(
+                        FetchConfig(symbol=sym, timeframe=tf),
+                        exchange=exchange,
+                        version=version,
+                    )
+                    results[(sym, tf)] = df
+                except Exception as e:
+                    print(f"  FAILED: {e}")
+                    results[(sym, tf)] = pl.DataFrame()
 
-    return results
+        return results
+    finally:
+        if hasattr(exchange, "close"):
+            exchange.close()
 
 
 # ── CLI entry ───────────────────────────────────────────────

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 
 
+from typing import Any
+
 import polars as pl
 import polars_ta.candles as ptc
 
@@ -100,7 +102,7 @@ def add_candle_pattern_columns(df: pl.DataFrame) -> pl.DataFrame:
     return df.with_columns(_candle_exprs(open_, high, low, close))
 
 
-def candle_snapshot_from_row(row: dict[str, object]) -> dict[str, float]:
+def candle_snapshot_from_row(row: dict[str, Any]) -> dict[str, float]:
     """Extract candle pattern flags for delivery snapshots."""
     out: dict[str, float] = {}
     for key in _CANDLE_SNAPSHOT_KEYS:

@@ -10,7 +10,13 @@ import polars as pl
 import polars_ds
 import polars_ols
 import polars_ols.least_squares as polars_ols_ls
-import polars_trading as _polars_trading
+try:
+    import polars_trading as _polars_trading
+    _POLARS_TRADING_AVAILABLE = True
+except ImportError:
+    _polars_trading = None  # type: ignore[assignment]
+    _POLARS_TRADING_AVAILABLE = False
+
 import structlog
 
 from hunt_core.errors import DEFENSIVE_EXC
@@ -30,7 +36,7 @@ def polars_ols_available() -> bool:
 
 
 def polars_trading_available() -> bool:
-    return True
+    return _POLARS_TRADING_AVAILABLE
 
 
 def polars_ds_available() -> bool:

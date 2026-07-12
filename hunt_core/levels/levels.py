@@ -331,18 +331,26 @@ def _effective_short_leg_low(
     return local_support if local_support > 0 else 0.0
 
 
-def _short_min_sl_dist_pct(symbol: str) -> float:
+def short_min_sl_dist_pct(symbol: str) -> float:
+    """Minimum nominal stop distance (%) for a short. Public: also used by
+    ``confluence/mtf.py`` so both level builders share one floor."""
     sym = str(symbol or "").upper().replace("-", "").replace("/", "")
     if sym in _ANCHOR_SYMBOLS:
         return _ANCHOR_SHORT_MIN_SL_DIST_PCT
     return SHORT_MIN_SL_DIST_PCT
 
 
-def _long_min_sl_dist_pct(symbol: str) -> float:
+def long_min_sl_dist_pct(symbol: str) -> float:
+    """Minimum nominal stop distance (%) for a long. Public: see above."""
     sym = str(symbol or "").upper().replace("-", "").replace("/", "")
     if sym in _ANCHOR_SYMBOLS:
         return _ANCHOR_LONG_MIN_SL_DIST_PCT
     return LONG_MIN_SL_DIST_PCT
+
+
+# Back-compat aliases (internal call sites).
+_short_min_sl_dist_pct = short_min_sl_dist_pct
+_long_min_sl_dist_pct = long_min_sl_dist_pct
 
 
 def _apply_fast_flush_tp1_buffer(
@@ -1459,7 +1467,8 @@ def reanchor_setup_levels(
     price = float(live_price if live_price is not None else (row.get("price") or 0))
     if price <= 0:
         return False
-    tf = row.get("timeframes") if isinstance(row.get("timeframes"), dict) else {}
+    _tf = row.get("timeframes")
+    tf = _tf if isinstance(_tf, dict) else {}
     r15 = tf.get("15m_closed") or tf.get("15m") or {}
     r1h = tf.get("1h_closed") or tf.get("1h") or {}
     atr15 = float(r15.get("atr14") or 0)
@@ -1475,7 +1484,8 @@ def reanchor_setup_levels(
                 atr15 = max(atr15, rv)
         except (TypeError, ValueError):
             pass
-    lc = row.get("lifecycle") if isinstance(row.get("lifecycle"), dict) else {}
+    _lc = row.get("lifecycle")
+    lc = _lc if isinstance(_lc, dict) else {}
     lifecycle_phase = str(lc.get("phase") or setup.get("lifecycle_phase") or "")
     fall_from_high_pct = float(
         lc.get("fall_from_high_pct") or setup.get("fall_from_high_pct") or 0
@@ -1484,12 +1494,16 @@ def reanchor_setup_levels(
     impulse_low = float(row.get("impulse_low") or 0)
     if impulse_high <= 0:
         return False
-    fib_raw = row.get("fib") if isinstance(row.get("fib"), dict) else {}
-    fib = fib_raw.get("hunt") if isinstance(fib_raw.get("hunt"), dict) else fib_raw
+    _fib = row.get("fib")
+    fib_raw = _fib if isinstance(_fib, dict) else {}
+    _hunt = fib_raw.get("hunt")
+    fib = _hunt if isinstance(_hunt, dict) else fib_raw
     if not isinstance(fib, dict):
         fib = {}
-    regime = row.get("regime") if isinstance(row.get("regime"), dict) else {}
-    session = row.get("session") if isinstance(row.get("session"), dict) else {}
+    _regime = row.get("regime")
+    regime = _regime if isinstance(_regime, dict) else {}
+    _session = row.get("session")
+    session = _session if isinstance(_session, dict) else {}
     range_pct_24h = float(session.get("range_pct_24h") or 0)
     leg_gain_pct = 0.0
     if impulse_low > 0 and impulse_high > impulse_low:

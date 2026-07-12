@@ -19,11 +19,12 @@ from hunt_core.scanner.detect.patterns import ManipulationSetup
 
 def _setup(direction: str = "short") -> ManipulationSetup:
     # Geometry for a valid SHORT: entry 100, sweep extreme 110 (stop ~113.3, risk 13.3),
-    # target ladder 90/80 (primary 80, reward 20, R:R ~1.5 >= 1.2). For LONG, mirror.
+    # target ladder 80/70. The R:R gate measures the NEAREST target (TP1 = 80,
+    # reward 20, R:R ~1.5 >= 1.2), so TP1 alone must clear the gate. For LONG, mirror.
     if direction == "short":
-        sweep, target_ladder, target = 110.0, (90.0, 80.0), 80.0
+        sweep, target_ladder, target = 110.0, (80.0, 70.0), 70.0
     else:
-        sweep, target_ladder, target = 90.0, (110.0, 120.0), 120.0
+        sweep, target_ladder, target = 90.0, (120.0, 130.0), 130.0
     return ManipulationSetup(
         direction=direction,
         pattern_type="A",
@@ -155,3 +156,70 @@ def test_bug2_tg_failure_preserves_prior_state_for_retry():
     assert saved is None
     burst.assert_not_called()
     register.assert_not_called()
+
+
+def _geo_setup(direction: str, ladder: tuple[float, ...], target: float) -> ManipulationSetup:
+    return ManipulationSetup(
+        direction=direction,
+        pattern_type="A",
+        score=0.7,
+        macro_tf="1d",
+        meso_tf="1h",
+        micro_tf="5m",
+        micro_confirmed=False,
+        swept_level=95.0 if direction == "long" else 105.0,
+        sweep_extreme=90.0 if direction == "long" else 110.0,
+        target=target,
+        target_ladder=ladder,
+        entry_ref=100.0,
+        evidence=("ltf_pending", "htf_bear"),
+        steps_covered=4,
+        total_steps=5,
+    )
+
+
+def test_rr_gate_uses_nearest_target_not_deepest_pool():
+    """A distant pool must not rescue a TP1 that fails to repay the risk.
+
+    long: entry 100, stop 90*0.97=87.3 -> risk 12.7.
+    TP1 110 -> R:R 0.79 (< _MIN_RR); deepest 120 -> R:R 1.57 (>= _MIN_RR).
+    The old gate measured the deepest pool and emitted; the gate must reject.
+    """
+    bad = _geo_setup("long", (110.0, 120.0), 120.0)
+    assert md._geometry(bad, price=100.0) is None
+
+    # TP1 itself clears the gate -> emitted, and both R:R values are reported.
+    good = _geo_setup("long", (120.0, 130.0), 130.0)
+    geo = md._geometry(good, price=100.0)
+    assert geo is not None
+    assert geo["rr_tp1"] < geo["rr"]
+    assert geo["rr_tp1"] >= md._MIN_RR
+    assert geo["nearest_target"] == 120.0
+    assert geo["primary_target"] == 130.0
+
+
+def test_single_target_leaves_rr_gate_behavior_unchanged():
+    """With no ladder, nearest == primary, so rr_tp1 == rr (no behavior change)."""
+    s = _geo_setup("long", (), 120.0)  # risk 12.7, reward 20 -> R:R 1.57 >= _MIN_RR
+    geo = md._geometry(s, price=100.0)
+    assert geo is not None
+    assert geo["rr_tp1"] == geo["rr"]
+
+    # A single target that cannot repay the risk is still rejected, as before.
+    assert md._geometry(_geo_setup("long", (), 108.0), price=100.0) is None
+
+
+def test_risk_tags_are_not_rendered_as_supporting_evidence():
+    """ltf_pending / volume_pending / counter-trend htf are risks, not reasons to enter."""
+    s = _geo_setup("long", (120.0, 130.0), 130.0)
+    supporting, risks = md._split_evidence(s)
+    assert "ltf_pending" not in supporting
+    assert "htf_bear" not in supporting
+    assert len(risks) == 2
+
+    # htf_bull on a long is confirmation, not a risk.
+    s2 = _geo_setup("long", (120.0, 130.0), 130.0)
+    s2.evidence = ("bokovik", "htf_bull")
+    supporting2, risks2 = md._split_evidence(s2)
+    assert "htf_bull" in supporting2
+    assert risks2 == []

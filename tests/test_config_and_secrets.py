@@ -17,7 +17,7 @@ def test_load_settings_prefers_user_config_as_single_source(tmp_path, monkeypatc
 log_level = "WARNING"
 
 [bot.network]
-proxy_url = "https://default.example"
+trust_env = false
 """,
         encoding="utf-8",
     )
@@ -28,7 +28,7 @@ proxy_url = "https://default.example"
 log_level = "DEBUG"
 
 [bot.network]
-proxy_url = "https://user.example"
+trust_env = true
 """,
         encoding="utf-8",
     )
@@ -38,7 +38,7 @@ proxy_url = "https://user.example"
     settings = domain_config.load_settings(user_config)
 
     assert settings.runtime.log_level == "DEBUG"
-    assert settings.network.proxy_url == "https://user.example"
+    assert settings.network.trust_env is True
 
 
 def test_build_message_broadcaster_disables_when_telegram_unconfigured():

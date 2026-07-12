@@ -3,15 +3,18 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
-from hunt_core.params.store import tracker_thresholds
+from hunt_core.params.store import tracker_thresholds, tp1_partial_fix_pct as _tp1_pct
 from hunt_core.track._trailing import (
     _mfe_pct,
     _stop_in_profit_zone,
     _update_trailing_stop,
     _worst_entry,
 )
+
+if TYPE_CHECKING:
+    from hunt_core.track.tracker import HuntFollowUp
 
 _LOG = logging.getLogger(__name__)
 
@@ -35,7 +38,17 @@ def _tracker_ref():
     return tr
 
 SNIPER_HOLD_TO_TARGET = __import__("os").environ.get("HUNT_SNIPER_MODE", "1") not in {"0", "false", "False"}
-SIGNAL_TIMEOUT_HOURS = 48.0
+SIGNAL_TIMEOUT_HOURS = 48.0  # default / SHORT: pump-absorption is fast (hours–2-3 days)
+# The LONG manipulation types are MEDIUM-TERM (accumulation → 100-400% over WEEKS; the
+# trader "пересиживает" and holds — research/manipulations_corpus/long_manip_3types). A
+# 48h close cut those winners before they ran; the dataset_v10 backtest is net-NEGATIVE
+# with a 4-5 d horizon on longs but +0.54R/trade with a 21 d horizon. So give longs a
+# medium-term leash. Shorts keep the fast timeout.
+SIGNAL_TIMEOUT_HOURS_LONG = float(__import__("os").environ.get("HUNT_LONG_TIMEOUT_H", "504") or 504)  # 21 d
+
+
+def _signal_timeout_hours(direction: str) -> float:
+    return SIGNAL_TIMEOUT_HOURS_LONG if direction == "long" else SIGNAL_TIMEOUT_HOURS
 
 _BAR_MIN_AGE_MIN = {"1m": 0.0, "1m_closed": 2.0, "5m": 6.0, "5m_closed": 11.0}
 def _bar_extremes(
@@ -305,13 +318,21 @@ def evaluate_levels(
             )
         return events
 
-    stall_h = float(tr.get("mfe_stall_hours", 8.0))
+    # Longs accumulate and legitimately sit flat/red for days before the pump
+    # ("пересидеть") — the 8h/1%-MFE stall was a short-trade tuning that killed medium-
+    # term longs early. Scale the stall window for longs (env HUNT_LONG_STALL_H).
+    _stall_default = float(tr.get("mfe_stall_hours", 8.0))
+    if direction == "long":
+        stall_h = float(__import__("os").environ.get("HUNT_LONG_STALL_H", "120") or 120)  # 5 d
+    else:
+        stall_h = _stall_default
     stall_min_mfe = float(tr.get("mfe_stall_min_pct", 1.0))
+    signal_timeout_h = _signal_timeout_hours(direction)
     age_min = trk._signal_age_min(active, ts)
     if (
         not active.get("tp1_hit")
         and age_min >= stall_h * 60.0
-        and age_min < SIGNAL_TIMEOUT_HOURS * 60.0
+        and age_min < signal_timeout_h * 60.0
         and _mfe_pct(active, direction=direction) < stall_min_mfe
     ):
         trk.close_signal(
@@ -343,7 +364,7 @@ def evaluate_levels(
             )
         return events
 
-    if age_min >= SIGNAL_TIMEOUT_HOURS * 60.0:
+    if age_min >= signal_timeout_h * 60.0:
         trk.close_signal(
             state, symbol=symbol, direction=direction,
             reason="timeout", exit_price=price, now=ts,
@@ -356,7 +377,7 @@ def evaluate_levels(
                     symbol=symbol,
                     direction=direction,
                     message_key=msg_key,
-                    detail=f"timeout {SIGNAL_TIMEOUT_HOURS:.0f}h без SL/TP",
+                    detail=f"timeout {signal_timeout_h:.0f}h без SL/TP",
                     price=price,
                     payload={
                         **trk._latched_levels_payload(active),

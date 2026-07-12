@@ -1,7 +1,7 @@
 """Hunt CCXT REST gate — weight pacing + Binance 418/429 handling (engine-aligned).
 
-Hunt cannot hot-swap CCXT clients mid-tick (concurrent gather). On IP-ban we only
-schedule proxy rotation for the next cycle boundary.
+On IP-ban / rate-limit we pause and back off on the single direct connection; there is
+no proxy rotation (the rotating pool was removed — Binance is reached directly).
 """
 from __future__ import annotations
 
@@ -36,11 +36,14 @@ LOG = logging.getLogger("hunt_core.market.ccxt_rest")
 _GLOBAL_WEIGHT_BUDGET = WeightBudgetManager(
     max_weight=REST_WEIGHT_PACE_LIMIT, window_seconds=60.0
 )
+# smooth_burst spaces admissions at the sustained rate so an empty window (cold
+# start, all caches cold) cannot release its whole quota at once and trip
+# Binance's short-term request-rate WAF (418 -1003). See SlidingWindowRateLimiter.
 _GLOBAL_REQUEST_BUDGET = SlidingWindowRateLimiter(
-    max_requests=REST_REQUESTS_PER_MIN, window_seconds=60.0
+    max_requests=REST_REQUESTS_PER_MIN, window_seconds=60.0, smooth_burst=True
 )
 _GLOBAL_FAPI_BUDGET = SlidingWindowRateLimiter(
-    max_requests=BINANCE_FAPI_DATA_PACE_5M, window_seconds=300.0
+    max_requests=BINANCE_FAPI_DATA_PACE_5M, window_seconds=300.0, smooth_burst=True
 )
 _GLOBAL_GUARD = CcxtGuard()  # ban/pause state is IP-wide → shared across clients
 _GLOBAL_SECONDARY_BUDGETS: dict[str, SlidingWindowRateLimiter] = {}
@@ -72,7 +75,7 @@ def _header_used_weight(headers: Any) -> int | None:
 
 @dataclass
 class HuntCcxtRestGate:
-    """Pace REST weight and record 418/429 pauses — no mid-tick proxy swap."""
+    """Pace REST weight and record 418/429 pauses on the single direct connection."""
 
     # Shared process-global budgets by default — one per-IP budget for ALL clients.
     guard: CcxtGuard = field(default_factory=lambda: _GLOBAL_GUARD)
@@ -83,7 +86,6 @@ class HuntCcxtRestGate:
         default_factory=lambda: _GLOBAL_SECONDARY_BUDGETS,
         repr=False,
     )
-    pending_proxy_failover: bool = False
 
     def _secondary_budget(self, exchange: str) -> SlidingWindowRateLimiter:
         key = exchange.lower()
@@ -93,6 +95,7 @@ class HuntCcxtRestGate:
             lim = SlidingWindowRateLimiter(
                 max_requests=max_req,
                 window_seconds=window,
+                smooth_burst=True,
             )
             self._secondary_budgets[key] = lim
         return lim
@@ -219,7 +222,6 @@ class HuntCcxtRestGate:
                 pause_s,
                 exc,
             )
-            self.pending_proxy_failover = True
         elif kind == "rate_limit":
             LOG.info(
                 "hunt_ccxt_rate_limit | context=%s pause_s=%.0f error=%s",
@@ -227,15 +229,6 @@ class HuntCcxtRestGate:
                 pause_s,
                 exc,
             )
-
-    def schedule_proxy_failover(self) -> None:
-        self.pending_proxy_failover = True
-
-    def consume_proxy_failover_flag(self) -> bool:
-        if not self.pending_proxy_failover:
-            return False
-        self.pending_proxy_failover = False
-        return True
 
 
 __all__ = ["HuntCcxtRestGate"]

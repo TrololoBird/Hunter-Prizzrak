@@ -4,6 +4,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+# Stop must clear the anchoring level by at least this much ATR, and never sit
+# closer than the nominal percentage floor shared with levels.py.
+_MIN_STOP_ATR = 1.0
+
+
+def _min_sl_pct(symbol: str, direction: str) -> float:
+    from hunt_core.levels.levels import long_min_sl_dist_pct, short_min_sl_dist_pct
+
+    return long_min_sl_dist_pct(symbol) if direction == "long" else short_min_sl_dist_pct(symbol)
+
 @dataclass
 class TFSignal:
     tf: str
@@ -40,6 +50,9 @@ class MTFConfluence:
     long_scenario: ScenarioScore
     short_scenario: ScenarioScore
     dominant: Literal["long", "short", "neutral"]
+
+    def to_dict(self) -> dict[str, Any]:
+        return mtf_confluence_to_dict(self)
 
 
 _DISPLAY_TFS = ["1w", "1d", "4h", "15m"]
@@ -192,26 +205,41 @@ def build_mtf_confluence(
             collect_upward_targets as _cut,
         )
 
-        structure = row.get("structure") if isinstance(row.get("structure"), dict) else {}
-        kl = structure.get("key_levels") if isinstance(structure.get("key_levels"), dict) else {}
-        pools = structure.get("liquidity_pools") if isinstance(structure.get("liquidity_pools"), dict) else {}
+        _structure = (row or {}).get("structure")
+        structure = _structure if isinstance(_structure, dict) else {}
+        _kl = structure.get("key_levels")
+        kl = _kl if isinstance(_kl, dict) else {}
+        _pools = (row or {}).get("liquidity_pools")
+        pools = _pools if isinstance(_pools, dict) else {}
+
+        # Minimum stop distance. Anchoring the stop straight onto the nearest
+        # support/resistance leaves no room when that level sits right under the
+        # price — which is the normal case, since the level is *why* price is
+        # there. Those signals stop out on noise: in signal_history.jsonl every
+        # entry whose nominal risk was under 0.5% closed stop_hit (26/26), a third
+        # of them without the price ever ticking in favour. Push the stop past the
+        # level by at least the same floor structural_long_levels/structural_short_levels
+        # already enforce; the percentage term also covers a degenerate ATR of 0.
+        min_dist = max(_MIN_STOP_ATR * atr, price * _min_sl_pct(symbol, direction) / 100.0)
 
         if direction == "long":
             entry_lo = price - 0.3 * atr
             entry_hi = price + 0.3 * atr
-            tgts, _ = _cut(row, price)
+            tgts, _ = _cut(row or {}, price)
             tp1 = tgts[0] if len(tgts) > 0 else 0.0
             tp2 = tgts[1] if len(tgts) > 1 else tp1
             sup = float(kl.get("support") or kl.get("last_swing_low") or pools.get("nearest_below") or 0)
-            stop = sup if sup > 0 and sup < price else price - 2.0 * atr
+            raw_stop = sup if sup > 0 and sup < price else price - 2.0 * atr
+            stop = min(raw_stop, price - min_dist)  # never closer than the floor
         else:
             entry_lo = price - 0.3 * atr
             entry_hi = price + 0.3 * atr
-            tgts, _ = _cdt(row, price)
+            tgts, _ = _cdt(row or {}, price)
             tp1 = tgts[0] if len(tgts) > 0 else 0.0
             tp2 = tgts[1] if len(tgts) > 1 else tp1
             res = float(kl.get("resistance") or kl.get("last_swing_high") or pools.get("nearest_above") or 0)
-            stop = res if res > 0 and res > price else price + 2.0 * atr
+            raw_stop = res if res > 0 and res > price else price + 2.0 * atr
+            stop = max(raw_stop, price + min_dist)
 
         if htf_total:
             evidence.insert(0, f"HTF {htf_aligned}/{htf_total}")
@@ -241,8 +269,10 @@ def build_mtf_confluence(
         dominant = "neutral"
 
     if row is not None:
-        dump = row.get("dump") if isinstance(row.get("dump"), dict) else {}
-        long_setup = row.get("long") if isinstance(row.get("long"), dict) else {}
+        _dump = row.get("dump")
+        dump = _dump if isinstance(_dump, dict) else {}
+        _long_setup = row.get("long")
+        long_setup = _long_setup if isinstance(_long_setup, dict) else {}
         short_ok = dump.get("levels_viable") is not False
         long_ok = long_setup.get("levels_viable") is not False
         if not short_ok or not long_ok:
@@ -345,5 +375,4 @@ def mtf_confluence_to_dict(mtf: MTFConfluence) -> dict[str, Any]:
     }
 
 
-# Bind method on dataclass for tick_jsonl mtf_to_json_dict().
-MTFConfluence.to_dict = mtf_confluence_to_dict  # type: ignore[method-assign]
+

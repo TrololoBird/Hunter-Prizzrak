@@ -7,6 +7,7 @@ import asyncio
 import logging
 import math
 import time
+from datetime import timedelta
 from typing import Any
 
 import ccxt.async_support as ccxt
@@ -23,7 +24,7 @@ from hunt_core.market.factory import (
     create_async_secondary_swap,
     create_pro_binance_future,
 )
-from hunt_core.market.network import ProxyPool, mask_proxy_url
+from hunt_core.market.network import mask_proxy_url
 from hunt_core.market.factory import ccxt_ohlcv_to_frame, finalize_kline_frame
 from hunt_core.market.symbols import (
     is_linear_usdt_swap_market,
@@ -50,7 +51,15 @@ _CACHE_TTL: dict[str, int] = {
     "funding_rate": 300,
     "funding_history": 1800,
     "funding_info": 3600,
-    "basis": 1800,
+    # basis (futures premium) is slow-moving ENRICHMENT — it is NOT read by the
+    # manipulation detector at all. Yet its fapiDataGetBasis REST calls are the
+    # dominant rate-limit sink: a burst of ~universe basis refetches trips Binance
+    # 429/418 (2026-07-11: a basis 429 extended the GLOBAL rest-gate pause, which
+    # starved the REST-only 4h-kline refresh → 93% klines.4h.stale → universe
+    # blackout). Widen the TTL 4× so basis refetches far less often (and its OHLCV
+    # fallback covers the gaps), cutting the 429 pressure that halts the critical
+    # klines plane. Override: cache is per-process, so this just paces REST.
+    "basis": 7200,
     "book_ticker": 5,
     "order_book_depth": 5,
     "ticker_24h": 15,
@@ -112,7 +121,7 @@ class HuntCcxtClient:
         self._basis_cache: dict[tuple[str, str], tuple[float, float]] = {}
         self._basis_stats_cache: dict[tuple[str, str], tuple[float, dict[str, float | None]]] = {}
         self._basis_api_unsupported: set[str] = set()
-        self._oi_series_cache: dict[tuple[str, str, int], tuple[float, list[float]]] = {}
+        self._oi_series_cache: dict[tuple[str, str, int], tuple[float, Any]] = {}
         self._gls_series_cache: dict[tuple[str, str, int], tuple[float, list[float]]] = {}
         self._order_book_depth_cache: dict[tuple[str, int], tuple[float, dict[str, Any]]] = {}
         self._leverage_tiers_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
@@ -127,16 +136,11 @@ class HuntCcxtClient:
         self._secondary_exchange_ids: dict[str, str] = {
             name: name for name in configured_secondary_exchanges()
         }
-        self._proxy_pool: ProxyPool | None = None
         self._rest_gate = HuntCcxtRestGate()
-        self._proxy_failover_lock = asyncio.Lock()
         self._streams_reconnect: Any | None = None
 
-    def attach_proxy_pool(self, pool: ProxyPool | None) -> None:
-        self._proxy_pool = pool
-
     def set_streams_reconnect(self, callback: Any | None) -> None:
-        """Optional async callback after proxy swap at cycle boundary."""
+        """Store the streams' own reconnect callback (used by the WS backoff path)."""
         self._streams_reconnect = callback
 
     @property
@@ -198,82 +202,6 @@ class HuntCcxtClient:
             context=context,
         )
 
-    async def apply_pending_proxy_at_cycle(self) -> bool:
-        """Rotate proxy only between ticks — never during concurrent symbol gather."""
-        if not self._rest_gate.consume_proxy_failover_flag():
-            return False
-        async with self._proxy_failover_lock:
-            pool = self._proxy_pool
-            if pool is None or not pool.has_alternatives():
-                LOG.warning("hunt_proxy_failover_deferred | reason=no_pool")
-                self._rest_gate.schedule_proxy_failover()
-                return False
-            attempts = 0
-            while attempts < len(pool.urls):
-                attempts += 1
-                nxt = pool.rotate_after_failure(
-                    self._proxy_url or pool.current(),
-                    "ip_ban_cycle_boundary",
-                )
-                if not nxt:
-                    break
-                try:
-                    await self._apply_proxy(nxt)
-                    self._rest_gate.guard.telemetry.pause_until_mono = 0.0
-                    if self._streams_reconnect is not None:
-                        asyncio.create_task(
-                            self._run_streams_reconnect(),
-                            name="hunt_streams_reconnect",
-                        )
-                    return True
-                except Exception as exc:  # noqa: BLE001
-                    LOG.warning(
-                        "hunt_ccxt_proxy_apply_skip | proxy=%s error=%s",
-                        mask_proxy_url(nxt),
-                        exc,
-                    )
-            self._rest_gate.schedule_proxy_failover()
-        return False
-
-    async def _run_streams_reconnect(self) -> None:
-        if self._streams_reconnect is None:
-            return
-        try:
-            result = self._streams_reconnect()
-            if asyncio.iscoroutine(result):
-                await result
-        except Exception as re_exc:  # noqa: BLE001
-            LOG.warning("hunt_ccxt_streams_reconnect_failed | error=%s", re_exc)
-
-    async def _apply_proxy(self, proxy_url: str | None) -> None:
-        """Hot-swap REST + Pro CCXT clients onto a new egress proxy."""
-        self._proxy_url = proxy_url
-        for name, ex in list(self._secondary_clients.items()):
-            await close_exchange_async(ex, label=f"secondary_rest:{name}")
-        self._secondary_clients.clear()
-        self._secondary_failed.clear()
-        if self._pro_ex is not None:
-            await close_exchange_async(self._pro_ex, label="binance_pro_swap")
-            self._pro_ex = None
-        await close_exchange_async(self._ex, label="binance_rest_swap")
-        self._ex = create_async_binance_future(
-            proxy_url=proxy_url,
-            trust_env=self._trust_env,
-            timeout_ms=self._timeout_ms,
-        )
-        self._markets_loaded = False
-        try:
-            await self.load_markets()
-        except Exception as exc:
-            if self._proxy_pool is not None and proxy_url:
-                self._proxy_pool.mark_failed(proxy_url, f"apply_failed:{type(exc).__name__}")
-            raise
-        if self._proxy_pool is not None and proxy_url:
-            self._proxy_pool.mark_success(proxy_url)
-        LOG.info(
-            "hunt_ccxt_proxy_applied | proxy=%s",
-            mask_proxy_url(proxy_url) if proxy_url else "direct",
-        )
 
     @classmethod
     def from_settings(cls, settings: Any) -> HuntCcxtClient:
@@ -394,7 +322,6 @@ class HuntCcxtClient:
 
     async def _bootstrap_markets_via_ccxt_implicit(self) -> None:
         """CCXT implicit ``fapiPublicGetExchangeInfo`` when ``load_markets`` fails."""
-        from hunt_core.market.network import mask_proxy_url
 
         fetcher = getattr(self._ex, "fapipublicGetExchangeinfo", None)
         if not callable(fetcher):
@@ -541,6 +468,56 @@ class HuntCcxtClient:
                 exc,
             )
         return None
+
+    async def fetch_status(self) -> dict[str, Any] | None:
+        """Exchange operational status (server time, maintenance windows, etc)."""
+        try:
+            return await self._direct_binance_fetch(
+                lambda: self._ex.fetch_status(),
+                context="exchange_status",
+                weight=1,
+                method="fetchStatus",
+            )
+        except ccxt.BaseError as exc:
+            if is_ccxt_rate_limited(exc):
+                raise
+            LOG.warning("fetch_status failed | error=%s", exc)
+        except Exception as exc:
+            LOG.warning("fetch_status failed | error=%s", exc)
+        return None
+
+    async def fetch_bids_asks(
+        self, symbols: list[str]
+    ) -> dict[str, dict[str, float]]:
+        """Best bid/ask for multiple symbols via REST (WS fallback / warmup)."""
+        if not symbols:
+            return {}
+        syms = [self._ccxt_sym(s) for s in symbols]
+        await self.load_markets()
+        try:
+            result = await self._direct_binance_fetch(
+                lambda: self._ex.fetch_bids_asks(syms),
+                context=f"bids_asks:{len(syms)}syms",
+                weight=2,
+                method="fetchBidsAsks",
+            )
+            out: dict[str, dict[str, float]] = {}
+            for ccxt_sym, bbo in (result or {}).items():
+                if not isinstance(bbo, dict):
+                    continue
+                bid = float(bbo.get("bid") or 0)
+                ask = float(bbo.get("ask") or 0)
+                if bid > 0 and ask > 0:
+                    sym = self._bin_sym(ccxt_sym)
+                    out[sym] = {"bid": bid, "ask": ask}
+            return out
+        except ccxt.BaseError as exc:
+            if is_ccxt_rate_limited(exc):
+                raise
+            LOG.warning("fetch_bids_asks failed | error=%s", exc)
+        except Exception as exc:
+            LOG.warning("fetch_bids_asks failed | error=%s", exc)
+        return {}
 
     async def fetch_exchange_symbols(self) -> list[SymbolMeta]:
         now = time.monotonic()
@@ -739,8 +716,6 @@ class HuntCcxtClient:
     async def fetch_order_book_depth_snapshot(
         self, symbol: str, *, limit: int = 20
     ) -> dict[str, float | None]:
-        from hunt_core.market.client import depth_snapshot_from_book
-
         sym = self._bin_sym(symbol)
         depth_limit = min(100, max(5, int(limit)))
         key = (sym, depth_limit)
@@ -1191,7 +1166,8 @@ class HuntCcxtClient:
             premium_slope = float(s[-1] - s[-2]) if len(basis_series) >= 2 else None
             premium_zscore = None
             if len(basis_series) >= 3:
-                std = float(s.std(ddof=0) or 0.0)
+                _std = s.std(ddof=0)
+                std = float(_std.total_seconds()) if isinstance(_std, timedelta) else float(_std) if _std is not None else 0.0
                 if std > 0:
                     premium_zscore = float((s[-1] - s.mean()) / std)
             self._basis_cache[cache_key] = (now, basis_pct)
@@ -1412,7 +1388,8 @@ class HuntCcxtClient:
         s = pl.Series("rates", [float(r["fundingRate"]) for r in cached[1]]).drop_nans()
         if s.len() < 6:
             return None
-        stdev = float(s.std(ddof=1) or 0.0)
+        _stdev = s.std(ddof=1)
+        stdev = float(_stdev.total_seconds()) if isinstance(_stdev, timedelta) else float(_stdev) if _stdev is not None else 0.0
         if stdev <= 1e-12:
             return 0.0
         return float((s[-1] - s.mean()) / stdev)
@@ -1573,7 +1550,8 @@ class HuntCcxtClient:
             s = joined["basis_pct"]
             latest = float(s[-1])
             slope = float(s[-1] - s[-2]) if s.len() >= 2 else None
-            std = float(s.std(ddof=1) or 0.0)
+            _std = s.std(ddof=1)
+            std = float(_std.total_seconds()) if isinstance(_std, timedelta) else float(_std) if _std is not None else 0.0
             zscore = float((s[-1] - s.mean()) / std) if std > 0 else None
             cache_key = (self._bin_sym(symbol), interval)
             now = time.monotonic()

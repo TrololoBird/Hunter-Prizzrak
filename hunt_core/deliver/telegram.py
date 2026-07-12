@@ -73,15 +73,6 @@ TELEGRAM_CAPTION_LIMIT = 1024
 TELEGRAM_LOG_PREVIEW_LIMIT = 500
 TELEGRAM_TAGS = re.compile(r"</?(?:b|i|code|pre|a)[^>]*>", flags=re.IGNORECASE)
 TELEGRAM_CHUNK_LIMIT = 3900
-__all__ = (
-    "DeliveryResult",
-    "DisabledBroadcaster",
-    "MessageBroadcaster",
-    "TelegramBroadcaster",
-    "WebhookBroadcaster",
-    "build_message_broadcaster",
-)
-
 
 # Fallback retry decorator for when tenacity is not installed
 def _simple_retry(
@@ -224,10 +215,10 @@ class DisabledBroadcaster:
 
     async def send_photo(
         self,
-        _photo_bytes: bytes,
-        _caption: str,
+        photo_bytes: bytes,
+        caption: str,
         *,
-        _reply_to_message_id: int | None = None,
+        reply_to_message_id: int | None = None,
     ) -> None:
         return None
 
@@ -999,7 +990,7 @@ async def send_telegram_chunks(
     return ok
 
 
-__all__ = [
+__all__ = (
     "DeliveryResult",
     "MessageBroadcaster",
     "TelegramBroadcaster",
@@ -1022,4 +1013,4 @@ __all__ = [
     "trigger_human",
     "veto_human",
     "_split_telegram_text",
-]
+)

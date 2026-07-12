@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import os
 from datetime import datetime
-from typing import Any
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from hunt_core.track.tracker import HuntFollowUp
 
 from hunt_core import clock
 from hunt_core.params.store import tracker_thresholds
@@ -143,7 +146,7 @@ def _maybe_armed_to_triggered(
         {
             "entry_zone": [active.get("entry_lo"), active.get("entry_hi")],
         },
-        price,
+        price=price,
         direction=direction,
         strict_upper=True,
     ):
