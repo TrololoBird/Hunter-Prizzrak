@@ -55,9 +55,21 @@ def ensure_prizrak_verdict(
         from hunt_core.prizrak.dominance_source import read_cached_changes_24h
 
         dominance_changes = read_cached_changes_24h()
+    # bias ↔ liquidation/DOM reconciliation (WS-2M.2): the bot's own already-computed maps
+    # live on row["market"] (populated by apply_map_bundle_to_row). Pass the three keys the
+    # factor reads; a row without maps (test/cold) simply yields a neutral factor.
+    liq_context: dict[str, Any] | None = None
+    if cfg.liq_reconcile_enabled:
+        market = row.get("market")
+        if isinstance(market, dict):
+            liq_context = {
+                "liq_cascade_risk": market.get("liq_cascade_risk"),
+                "liq_synthetic_only": market.get("liq_synthetic_only"),
+                "map_book_imbalance_1pct": market.get("map_book_imbalance_1pct"),
+            }
     candidates = build_prizrak_signals(
         ohlcv_by_tf, price=price, cfg=cfg, marketcap_series=marketcap_series,
-        dominance_changes=dominance_changes,
+        dominance_changes=dominance_changes, liq_context=liq_context,
     )
     # Single structural source of truth for the display layer (📐 МТФ структура) — this is
     # exactly the multi-scale structure + HTF bias that gated the candidates above.

@@ -132,6 +132,18 @@ class PrizrakConfig(BaseModel):
     # treated as flat — inside this band the factor stays neutral (no signal from noise).
     dominance_neutral_band_pct: float = Field(default=0.3, ge=0.0, le=5.0)
 
+    # bias ↔ liquidation/DOM reconciliation (WS-2M.2). Unlike the external доп-факторы above
+    # (OFF by default), this reads the bot's OWN already-computed maps (liq cascade + book
+    # imbalance) and down-weights a structural bias that contradicts them, surfacing a risk
+    # flag — the documented ETH failure where structural bias was SHORT but the liq map's
+    # short-squeeze + DOM buyers were right. Bounded and non-gating (never vetoes/flips), so
+    # ON by default is safe; a realized-liquidation gate stops synthetic-only data from
+    # driving the conflict flag.
+    liq_reconcile_enabled: bool = Field(default=True)
+    # Min |book imbalance| (fraction of top-1% depth, +buyers/-sellers) below which DOM is
+    # treated as balanced — inside this band DOM contributes no directional pressure.
+    liq_dom_neutral_band: float = Field(default=0.15, ge=0.0, le=1.0)
+
     _instance: ClassVar["PrizrakConfig | None"] = None
 
     @classmethod

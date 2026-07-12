@@ -6,7 +6,11 @@ import os
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-_DEFAULT_LEVERAGE_WEIGHTS: tuple[float, ...] = (0.35, 0.30, 0.20, 0.10, 0.05)
+# One weight per tier in liquidation._DEFAULT_LEVERAGE_TIERS (10,25,50,100). Descending:
+# more retail OI sits at lower leverage, but 100× still carries a real 0.15 so the
+# near-price magnet is represented. Length MUST equal the tier tuple (was 5 vs 4 — the
+# 5th weight was dead code).
+_DEFAULT_LEVERAGE_WEIGHTS: tuple[float, ...] = (0.35, 0.30, 0.20, 0.15)
 _DEFAULT_VP_PERIODS: tuple[str, ...] = ("1h", "4h", "1d", "1w")
 
 
@@ -79,7 +83,7 @@ class MapsConfig:
             forward_confidence_min=float(section.get("forward_confidence_min", 0.25)),
             leverage_weights=lev,
             vp_periods=periods,
-            vp_buckets=int(section.get("vp_buckets", 24)),
+            vp_buckets=int(section.get("vp_buckets", 60)),
             vp_value_area_pct=float(section.get("vp_value_area_pct", 0.70)),
         )
 

@@ -4,7 +4,8 @@
 - ``source=realized`` — clusters from public CCXT liquidation events (when available).
 - ``source=leverage_tier_estimate`` / ``prospective_source=leverage_tier_estimate`` —
   synthetic bands at ``price × (1 ± maintenance_margin_rate)`` from default tiers
-  ``(5, 10, 20, 50)×`` when no realized events exist. These are directional magnet
+  ``(10, 25, 50, 100)×`` (industry ladder; real exchange brackets preferred when
+  available) when no realized events exist. These are directional magnet
   hints, not exact liquidation prices. Deep reconcile ignores synthetic bands for
   trade veto; the formatter labels them explicitly.
 - Improve accuracy only via additional **public** OI/liq feeds — no auth endpoints.
@@ -21,7 +22,12 @@ from hunt_core.maps.config import MapsConfig
 
 LOG = logging.getLogger("hunt_core.maps.liquidation")
 
-_DEFAULT_LEVERAGE_TIERS = (5, 10, 20, 50)
+# Industry ladder (CoinGlass/Hyblock): include 25× and 100× — 100× liquidations sit
+# ~1% from entry, the densest near-price magnet where price actually reacts (the ETH
+# short-squeeze case). Real exchange ``bracket_tiers`` are still PREFERRED over this;
+# this tuple is only the fallback when brackets are unavailable. Length MUST match
+# ``_DEFAULT_LEVERAGE_WEIGHTS`` (config.py) so every tier carries a weight.
+_DEFAULT_LEVERAGE_TIERS = (10, 25, 50, 100)
 LiqEvent = tuple[int, str, str, float, float]  # ts_ms, symbol, side, qty, price
 
 

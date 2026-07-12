@@ -138,6 +138,14 @@ class AnalystReport:
                 lines.append("<i>против HTF-тренда, но слом подтверждён — сила снижена</i>")
             else:
                 lines.append("<i>против HTF-тренда без слома — такой сигнал не проходит гейт и не отправляется</i>")
+        # bias ↔ liquidation/DOM risk flag (WS-2M.2): the bot's own realized liq cascade / DOM
+        # contradicts the structural bias — the ETH failure mode (structural SHORT vs liq
+        # short-squeeze + buyers, and the squeeze was right). Surface it, do not hide it.
+        if isinstance(summary, dict) and summary.get("liq_conflict"):
+            reconcile = summary.get("liq_reconcile") or {}
+            ev = ", ".join(reconcile.get("evidence", [])) if isinstance(reconcile, dict) else ""
+            note = f" ({ev})" if ev else ""
+            lines.append(f"⚠️ <i>структура против карты ликвидаций/DOM — риск-флаг{note}</i>")
         return "\n".join(lines) if len(lines) > 1 else ""
 
     def interest_zones_text(self) -> str:

@@ -174,8 +174,11 @@ def _level_within_range(level: float, price: float, max_pct: float = _GRID_MAX_D
 
 
 def _fmt_price(v: Any) -> str:
+    # Delegate to the adaptive formatter so sub-dollar instruments (e.g. XTZ ~0.228)
+    # keep enough precision — a hardcoded .2f collapsed distinct levels to the same
+    # number (support==resistance==0.23, "0.24/0.24/0.24").
     try:
-        return f"{float(v):.2f}" if isinstance(v, (int, float)) else str(v)
+        return _fmt_price_adaptive(float(v)) if isinstance(v, (int, float)) else str(v)
     except (ValueError, TypeError):
         return str(v)
 

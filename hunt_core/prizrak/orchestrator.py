@@ -34,6 +34,7 @@ from hunt_core.prizrak.accumulation import _CLUSTER_TOL, _overlaps, find_accumul
 from hunt_core.prizrak.confluence import compute_confluence
 from hunt_core.prizrak.config import PrizrakConfig, ScaleTier
 from hunt_core.prizrak.dominance import compute_dominance_factor
+from hunt_core.prizrak.liq_reconcile import compute_liquidation_factor
 from hunt_core.prizrak.figures import tag_squeeze_pattern
 from hunt_core.prizrak.marketcap import compute_marketcap_factor
 from hunt_core.prizrak.pp import detect_pereprior
@@ -54,6 +55,12 @@ _MARKETCAP_SERIES: ContextVar["list[list[float]] | None"] = ContextVar(
 # and read by ``_apply_confluence``. Same ambient-context pattern; defaults to None (neutral).
 _DOMINANCE_CHANGES: ContextVar["dict[str, float] | None"] = ContextVar(
     "prizrak_dominance_changes", default=None
+)
+# Per-tick liquidation/DOM keys (WS-2M.2 bias↔liq reconciliation), set once by
+# ``build_prizrak_signals`` and read by ``_apply_confluence``. Same ambient-context pattern;
+# defaults to None (factor reads neutral, so map-less callers are unaffected).
+_LIQ_CONTEXT: ContextVar["dict[str, Any] | None"] = ContextVar(
+    "prizrak_liq_context", default=None
 )
 # Max width of a displayed interest/добор zone («вход по факту касания» = a limit band).
 # Tighter than accumulation_max_width_pct (12%, used for forward zone-targeting): a limit
@@ -797,8 +804,15 @@ def _apply_confluence(
     dom = compute_dominance_factor(_DOMINANCE_CHANGES.get(), direction=direction, cfg=cfg)
     dom_mult = dom["multiplier"]
 
+    # bias ↔ liquidation/DOM reconciliation (WS-2M.2): reconcile this candidate's structural
+    # direction against the bot's OWN liq cascade + book imbalance. Bounded, non-gating —
+    # down-weights (and flags) a bias contradicted by the real maps, per the ETH разбор where
+    # structural SHORT lost to the liq map's short-squeeze + DOM buyers. Neutral without data.
+    liq = compute_liquidation_factor(_LIQ_CONTEXT.get(), direction=direction, cfg=cfg)
+    liq_mult = liq["multiplier"]
+
     # Legacy flat strength for external consumers, and the driver breakdown.
-    strength = 0.5 * conf["multiplier"] * quality_mult * htf_mult * mcap_mult * dom_mult
+    strength = 0.5 * conf["multiplier"] * quality_mult * htf_mult * mcap_mult * dom_mult * liq_mult
     summary["strength"] = round(max(0.0, min(1.0, strength)), 3)
     summary["fragility"] = _compute_fragility(summary, cfg=cfg)
     summary["trade_quality"] = "favorable" if summary["strength"] >= 0.55 else ("marginal" if summary["strength"] >= 0.4 else "poor")
@@ -821,6 +835,17 @@ def _apply_confluence(
         })
     if dom.get("evidence") and dom["evidence"][0] not in ("dominance_disabled", "dominance_unavailable"):
         summary["dominance"] = {k: dom[k] for k in ("multiplier", "evidence") if k in dom}
+    if abs(liq_mult - 1.0) > 0.001:
+        drivers.append({
+            "name": "ликвидации/DOM",
+            "delta": round(liq_mult - 1.0, 3),
+            "description": ", ".join(liq.get("evidence", [])) or "bias↔liq reconciliation",
+        })
+    if liq.get("evidence") and liq["evidence"][0] not in ("liq_disabled", "liq_neutral"):
+        summary["liq_reconcile"] = {k: liq[k] for k in ("multiplier", "evidence", "conflict") if k in liq}
+    # Risk flag consumed by the display layer (mtf_text / liquidation section): the structural
+    # bias is contradicted by the bot's own realized liq cascade / strong DOM imbalance.
+    summary["liq_conflict"] = bool(liq.get("conflict"))
     total = sum(d["delta"] for d in drivers)
     # Aggregate of the driver-delta breakdown (0.50 base ± driver deltas). Diagnostic
     # only — `summary["strength"]` remains the authoritative score for ranking/delivery;
@@ -1533,6 +1558,7 @@ def build_prizrak_signals(
     cfg: PrizrakConfig | None = None,
     marketcap_series: list[list[float]] | None = None,
     dominance_changes: dict[str, float] | None = None,
+    liq_context: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """0..N independent ScenarioVerdict-summary-compatible signals for one tick.
 
@@ -1543,6 +1569,10 @@ def build_prizrak_signals(
     ``dominance_changes`` = ``{btc_d_change_24h, total3_change_24h}`` from
     ``dominance_source.read_cached_changes_24h()`` — supplied only when
     ``cfg.dominance_enabled``; ``None`` leaves the dominance factor neutral.
+
+    ``liq_context`` = the bot's own per-tick map keys (``liq_cascade_risk``,
+    ``liq_synthetic_only``, ``map_book_imbalance_1pct``) for the bias↔liq reconciliation
+    (WS-2M.2); ``None`` leaves that factor neutral (map-less callers/tests unaffected).
     """
     cfg = cfg or PrizrakConfig.load()
     if price <= 0:
@@ -1550,11 +1580,13 @@ def build_prizrak_signals(
 
     token = _MARKETCAP_SERIES.set(marketcap_series)
     dom_token = _DOMINANCE_CHANGES.set(dominance_changes)
+    liq_token = _LIQ_CONTEXT.set(liq_context)
     try:
         return _build_prizrak_signals_inner(ohlcv_by_tf, price=price, cfg=cfg)
     finally:
         _MARKETCAP_SERIES.reset(token)
         _DOMINANCE_CHANGES.reset(dom_token)
+        _LIQ_CONTEXT.reset(liq_token)
 
 
 def _build_prizrak_signals_inner(
