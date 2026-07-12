@@ -14,6 +14,8 @@ import logging
 import time
 from collections import deque
 
+from hunt_core.runtime.heartbeat import beat as _wd_beat
+
 LOG = logging.getLogger("hunt_core.market.rate_limit")
 
 REST_WEIGHT_SOFT_LIMIT = 1800
@@ -65,7 +67,10 @@ class SlidingWindowRateLimiter:
 
     async def acquire(self, *, label: str) -> float:
         waited_s = 0.0
-        deadline = time.monotonic() + 300.0
+        # Give up before the hang-watchdog would fire (HUNT_WATCHDOG_S default 300) so a
+        # stuck acquire surfaces as a catchable TimeoutError, not a process kill (invariant:
+        # inner blocking timeout < watchdog).
+        deadline = time.monotonic() + 200.0
         while True:
             if time.monotonic() >= deadline:
                 LOG.warning(
@@ -103,6 +108,7 @@ class SlidingWindowRateLimiter:
                     self._max_requests,
                     self._window_seconds,
                 )
+            _wd_beat()  # an intentional pacing wait is progress, not a hang
             await asyncio.sleep(sleep_s)
             waited_s += sleep_s
 
@@ -149,7 +155,10 @@ class WeightBudgetManager:
         if normalized_weight <= 0:
             return 0.0
         waited_s = 0.0
-        deadline = time.monotonic() + 300.0
+        # Give up before the hang-watchdog would fire (HUNT_WATCHDOG_S default 300) so a
+        # stuck acquire surfaces as a catchable TimeoutError, not a process kill (invariant:
+        # inner blocking timeout < watchdog).
+        deadline = time.monotonic() + 200.0
         while True:
             if time.monotonic() >= deadline:
                 LOG.warning(
@@ -178,5 +187,6 @@ class WeightBudgetManager:
                     self._max_weight,
                     self._window_seconds,
                 )
+            _wd_beat()  # an intentional pacing wait is progress, not a hang
             await asyncio.sleep(sleep_s)
             waited_s += sleep_s

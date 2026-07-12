@@ -47,6 +47,8 @@ from hunt_core.market import (
 )
 from hunt_core.params.store import migrate_calibration_split, prescan_thresholds
 from hunt_core.runtime.cycle._cycle_tick import run_tick
+from hunt_core.runtime.heartbeat import beat as _wd_beat
+from hunt_core.runtime.heartbeat import seconds_since_progress as _wd_gap
 from hunt_core.data.symbol_blacklist import is_blacklisted
 from hunt_core.runtime.state import (
     LOG,
@@ -441,7 +443,30 @@ async def run_loop(
     faulthandler.enable()
     _wd_timeout_s = float(os.getenv("HUNT_WATCHDOG_S", "300") or 300)
     _wd_file = (OUT_PATH.parent / "hunt_watchdog.log").open("a", buffering=1)
-    LOG.info("hunt_watchdog_armed", timeout_s=_wd_timeout_s)
+    LOG.info("hunt_watchdog_armed", timeout_s=_wd_timeout_s, mode="progress_heartbeat")
+
+    async def _watchdog_rearmer() -> None:
+        # Progress-driven hang watchdog. The old design armed a fixed per-tick 300s
+        # faulthandler deadline over the WHOLE tick body — so a tick that was merely SLOW
+        # (the REST weight pacer legitimately sleeping 12-21s per call to stay under Binance's
+        # limit) was killed exactly like a hang. Instead, push faulthandler's C-timer forward
+        # while work is advancing: the cycle and the REST pacer call ``heartbeat.beat()`` (a
+        # rate-limit sleep IS progress), and we re-arm the timer to ``timeout - seconds_since_
+        # progress`` each check. It fires ONLY after a genuine no-progress stall for the full
+        # timeout — including a GIL-held tight loop, which stops the re-arms so the C-timer
+        # (independent of the event loop) elapses and dumps every thread's stack.
+        check_s = max(1.0, min(5.0, _wd_timeout_s / 20.0))
+        while True:
+            remaining = _wd_timeout_s - _wd_gap()
+            faulthandler.cancel_dump_traceback_later()
+            if remaining <= 0.0:
+                LOG.critical("hunt_watchdog_no_progress", timeout_s=_wd_timeout_s)
+                faulthandler.dump_traceback(file=_wd_file)
+                os._exit(1)
+            faulthandler.dump_traceback_later(remaining, repeat=False, file=_wd_file, exit=True)
+            await asyncio.sleep(check_s)
+
+    _wd_task = asyncio.create_task(_watchdog_rearmer()) if not once else None
     _pinned_brief_sent = False
     _last_checkpoint = time.monotonic()
     _degraded_streak = 0  # consecutive ticks the whole universe failed data assembly
@@ -795,11 +820,7 @@ async def run_loop(
                     "symbol_state": symbol_state,
                     "feature_lake": feature_lake,
                 }
-                if not once:
-                    faulthandler.cancel_dump_traceback_later()
-                    faulthandler.dump_traceback_later(
-                        _wd_timeout_s, repeat=False, file=_wd_file, exit=True
-                    )
+                _wd_beat()  # tick start — the watchdog re-armer is progress-driven now
                 # Circuit breaker telemetry — log OPEN state once per tick.
                 _breakers = system_breakers()
                 if not _breakers.rest.can_execute():
@@ -840,6 +861,7 @@ async def run_loop(
                             **{k: v for k, v in tick_ctx.items() if k != "active"},
                         )
                         telemetry.set_attributes({"hunt.rows_emitted": len(rows or [])})
+                _wd_beat()  # tick body completed — mark progress
                 # ── universe data-plane health ─────────────────────────────
                 # Turn a SILENT mass data blackout (dead proxy → every symbol fails
                 # the staleness gate, no signal can form) into a loud, escalating
@@ -953,8 +975,6 @@ async def run_loop(
                         LOG.exception("session_checkpoint_save_failed")
                 save_pump_history(pump_store)
                 buffer_tick_rows(rows)
-                if not once:
-                    faulthandler.cancel_dump_traceback_later()
                 if (
                     OUT_PATH.exists()
                     and OUT_PATH.stat().st_size >= TICK_ROTATE_MIN_BYTES
@@ -975,7 +995,7 @@ async def run_loop(
                     break
             except Exception:
                 LOG.exception("dump_watch_tick_error")
-                faulthandler.cancel_dump_traceback_later()
+                _wd_beat()  # a handled tick error is progress — don't let the watchdog fire on recovery
                 if once:
                     raise
             if once:
@@ -987,6 +1007,8 @@ async def run_loop(
                     break
                 await asyncio.sleep(min(1.0, remaining))
     finally:
+        if _wd_task is not None:
+            _wd_task.cancel()
         faulthandler.cancel_dump_traceback_later()
         try:
             _wd_file.close()

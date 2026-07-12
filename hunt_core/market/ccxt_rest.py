@@ -24,6 +24,7 @@ from hunt_core.market.capacity import (
     secondary_limit_for,
 )
 from hunt_core.market.ccxt_guard import CcxtGuard, is_ccxt_ip_ban, is_ccxt_rate_limited
+from hunt_core.runtime.heartbeat import beat as _wd_beat
 
 LOG = logging.getLogger("hunt_core.market.ccxt_rest")
 
@@ -127,6 +128,7 @@ class HuntCcxtRestGate:
             remaining,
             sleep_s,
         )
+        _wd_beat()  # a rate-limit backoff is intentional progress, not a hang
         await asyncio.sleep(sleep_s)
         return sleep_s
 
