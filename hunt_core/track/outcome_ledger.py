@@ -139,11 +139,20 @@ def build_ledger_record(
         delivered=delivered,
     )
     geometry = _setup_geometry(setup)
+    # bias↔liq reconciliation (WS-2M.2): record the risk flag + factor evidence against the
+    # forward-outcome horizons so the ±0.15 envelope / whether to gate can be CALIBRATED from
+    # the flag's real hit-rate later, rather than guessed. Canonical source is the summary.
+    _summary = (row or {}).get("prizrak_summary")
+    if not isinstance(_summary, dict):
+        _summary = setup if isinstance(setup, dict) else {}
+    _liq_reconcile = _summary.get("liq_reconcile")
     return {
         "symbol": str(symbol).upper(),
         "direction": str(direction).lower(),
         "event": event,
         "delivered": delivered,
+        "liq_conflict": bool(_summary.get("liq_conflict")),
+        "liq_reconcile": _liq_reconcile if isinstance(_liq_reconcile, dict) else None,
         "archetype": fusion.get("archetype") or row.get("entry_archetype") if row else None,
         "fusion_score": fusion.get("primary_score") or (setup or {}).get("fusion_score"),
         "oi_regime": fusion.get("oi_regime"),

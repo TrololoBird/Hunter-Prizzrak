@@ -11,9 +11,13 @@ from __future__ import annotations
 
 from typing import Any
 
+import structlog
+
 from hunt_core.prizrak.adapter import row_ohlcv_by_tf
 from hunt_core.prizrak.config import PrizrakConfig
 from hunt_core.prizrak.orchestrator import build_prizrak_signals
+
+LOG = structlog.get_logger("hunt.prizrak.entry")
 
 
 def ensure_prizrak_verdict(
@@ -81,6 +85,18 @@ def ensure_prizrak_verdict(
     row["prizrak_interest_zones"] = compute_interest_zones(ohlcv_by_tf, price=price, cfg=cfg)
     row["prizrak_signals"] = candidates
     row["prizrak_summary"] = max(candidates, key=lambda c: c["strength"]) if candidates else None
+    # Live visibility for the bias↔liq risk flag (WS-2M.2): the durable record is the outcome
+    # ledger (for calibration); this makes an active conflict greppable in the running log.
+    _summary = row["prizrak_summary"]
+    if isinstance(_summary, dict) and _summary.get("liq_conflict"):
+        _rec = _summary.get("liq_reconcile") or {}
+        LOG.info(
+            "prizrak_liq_conflict",
+            symbol=str(row.get("symbol") or ""),
+            direction=_summary.get("action"),
+            strength=_summary.get("strength"),
+            evidence=_rec.get("evidence") if isinstance(_rec, dict) else None,
+        )
     return candidates
 
 
