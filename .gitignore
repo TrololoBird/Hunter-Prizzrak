@@ -20,8 +20,10 @@ venv/
 # Runtime logs & generated data
 *.log
 logs/
-data/
-dataset/
+# Anchored to repo root: an unanchored `data/`/`dataset/` also matched the SOURCE package
+# hunt_core/data/ (11 modules imported 78×), leaving the repo non-building from a clean clone.
+/data/
+/dataset/
 reports/
 hunt_research/
 graphify-out/
