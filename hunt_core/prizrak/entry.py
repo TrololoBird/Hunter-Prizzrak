@@ -47,8 +47,17 @@ def ensure_prizrak_verdict(
         from hunt_core.prizrak.marketcap_source import read_cached_series
 
         marketcap_series = read_cached_series(str(row.get("symbol") or ""))
+    # Dominance доп-фактор (Prizrak TOTAL3/BTC.D): cache-only read on the tick path (zero
+    # network) — a separate off-process refresher warms the /global snapshot cache. Global
+    # (not per-symbol), so it's read once here. Skipped entirely when disabled.
+    dominance_changes: dict[str, float] | None = None
+    if cfg.dominance_enabled:
+        from hunt_core.prizrak.dominance_source import read_cached_changes_24h
+
+        dominance_changes = read_cached_changes_24h()
     candidates = build_prizrak_signals(
-        ohlcv_by_tf, price=price, cfg=cfg, marketcap_series=marketcap_series
+        ohlcv_by_tf, price=price, cfg=cfg, marketcap_series=marketcap_series,
+        dominance_changes=dominance_changes,
     )
     # Single structural source of truth for the display layer (📐 МТФ структура) — this is
     # exactly the multi-scale structure + HTF bias that gated the candidates above.

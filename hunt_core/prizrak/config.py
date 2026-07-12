@@ -123,6 +123,15 @@ class PrizrakConfig(BaseModel):
     # transfer valid). Above it, supply is moving so the confirm bonus is damped.
     marketcap_supply_drift_pct: float = Field(default=0.05, ge=0.0, le=0.5)
 
+    # Dominance доп-фактор (Prizrak: «доминация вниз — крипта вверх»; TOTAL3/Others reaction).
+    # OFF by default: needs a non-CCXT free source (CoinGecko /global) fetched off the tick
+    # plane, with 24h change derived from a rolling snapshot cache; silently neutral when
+    # unavailable (incl. cold start < 24h), so enabling it never risks the live path.
+    dominance_enabled: bool = Field(default=False)
+    # Min |24h change| (BTC.D percentage-points / TOTAL3 percent) below which dominance is
+    # treated as flat — inside this band the factor stays neutral (no signal from noise).
+    dominance_neutral_band_pct: float = Field(default=0.3, ge=0.0, le=5.0)
+
     _instance: ClassVar["PrizrakConfig | None"] = None
 
     @classmethod

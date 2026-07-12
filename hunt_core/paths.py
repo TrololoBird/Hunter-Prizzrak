@@ -58,6 +58,9 @@ CALIBRATION_CACHE = DATA / "calibration_cache.json"
 INFRA_SNAPSHOTS = DATA / "infra_snapshots"
 # Market-cap доп-фактор (Павел М.) — CoinGecko free supply/cap series, off the tick plane.
 MARKETCAP_CACHE = DATA / "marketcap_cache"
+# Dominance доп-фактор (Prizrak: TOTAL3/BTC.D «доминация вниз — крипта вверх») — CoinGecko
+# free /global snapshots, off the tick plane; 24h-change derived from cached snapshots.
+DOMINANCE_CACHE = DATA / "dominance_cache.json"
 
 __all__ = [
     "ADAPTIVE_THRESHOLDS",
@@ -84,6 +87,7 @@ __all__ = [
     "LAKE_PARQUET",
     "MAPS_LAKE_JSONL",
     "MARKETCAP_CACHE",
+    "DOMINANCE_CACHE",
     "MARKET_REGIME",
     "OUTCOME_LEDGER",
     "PREP_SHADOW_EVENTS",

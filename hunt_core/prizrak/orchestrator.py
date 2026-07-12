@@ -33,6 +33,7 @@ from hunt_core.prizrak.invalidation import build_invalidation
 from hunt_core.prizrak.accumulation import _CLUSTER_TOL, _overlaps, find_accumulation_zone, find_accumulation_zones
 from hunt_core.prizrak.confluence import compute_confluence
 from hunt_core.prizrak.config import PrizrakConfig, ScaleTier
+from hunt_core.prizrak.dominance import compute_dominance_factor
 from hunt_core.prizrak.figures import tag_squeeze_pattern
 from hunt_core.prizrak.marketcap import compute_marketcap_factor
 from hunt_core.prizrak.pp import detect_pereprior
@@ -48,6 +49,11 @@ _TIER_SETUP_KIND = {"intraday": "level_intraday_scalp", "meso": "level_core", "m
 # every candidate builder. Async/thread-safe; defaults to None (factor reads neutral).
 _MARKETCAP_SERIES: ContextVar["list[list[float]] | None"] = ContextVar(
     "prizrak_marketcap_series", default=None
+)
+# Per-tick dominance 24h changes (Prizrak доп-фактор), set once by ``build_prizrak_signals``
+# and read by ``_apply_confluence``. Same ambient-context pattern; defaults to None (neutral).
+_DOMINANCE_CHANGES: ContextVar["dict[str, float] | None"] = ContextVar(
+    "prizrak_dominance_changes", default=None
 )
 # Course (стр.34): стоповый объём is "такое же накопление (база), но на более мелком ТФ,
 # чем основное движение" — a denser base one TF down (ТФ-1). Detecting it on the move's
@@ -152,12 +158,18 @@ def compute_interest_zones(
         zones = find_accumulation_zones(bars, tf=use_tf, cfg=cfg, max_zones=8)
         below = [z for z in zones if z.get("hi", 0) < price]
         above = [z for z in zones if z.get("lo", 0) > price]
-        # Pick the STRONGEST accumulation box by traded VOLUME (course стр.22: сила
-        # уровня = ТФ + объём), nearest as tie-break — not the most-touched one. Measured
-        # on live data, volume ranking selects a different zone than touch ranking on 41%
-        # of multi-zone scans (e.g. ETH 1d: a 4-touch/3.8e8-vol base over a 6-touch/9.4e7).
-        long_zone = max(below, key=lambda z: (float(z.get("zone_volume") or 0), z["hi"])) if below else None
-        short_zone = max(above, key=lambda z: (float(z.get("zone_volume") or 0), -z["lo"])) if above else None
+        # Pick the STRONGEST accumulation box by STRUCTURAL SIGNIFICANCE first (course
+        # стр.22: сила уровня = ТФ + объём + история/касания), volume as the reinforcing
+        # factor, nearest as final tie-break. The live Prizrak channel selects the KEY
+        # (most-touched) level, not the highest single-bar volume: verified head-to-head on
+        # 6 instruments — e.g. XRP author's 1.0484 sits in our 5-touch zone while pure
+        # volume ranking surfaced a nearer 4-touch box; ATOM author's 1.98 = our 9-touch
+        # box that volume ranking passed over for a 7-touch. So touches-primary matches the
+        # method's own selection; volume still breaks ties (honours «ТФ + объём»).
+        def _zone_rank(z: dict[str, Any], *, nearer: float) -> tuple[int, float, float]:
+            return (int(z.get("touches") or 0), float(z.get("zone_volume") or 0), nearer)
+        long_zone = max(below, key=lambda z: _zone_rank(z, nearer=z["hi"])) if below else None
+        short_zone = max(above, key=lambda z: _zone_rank(z, nearer=-z["lo"])) if above else None
         if not long_zone and not short_zone:
             continue
         out: dict[str, Any] = {"tf": use_tf}
@@ -750,8 +762,15 @@ def _apply_confluence(
     )
     mcap_mult = mcap["multiplier"]
 
+    # Dominance доп-фактор (Prizrak: «доминация вниз — крипта вверх»; TOTAL3/Others reaction).
+    # Bounded [0.85,1.15], non-gating; reads the per-tick 24h changes from ambient context;
+    # neutral (1.0) when disabled or unavailable, so strength is unchanged unless enabled AND
+    # data exists.
+    dom = compute_dominance_factor(_DOMINANCE_CHANGES.get(), direction=direction, cfg=cfg)
+    dom_mult = dom["multiplier"]
+
     # Legacy flat strength for external consumers, and the driver breakdown.
-    strength = 0.5 * conf["multiplier"] * quality_mult * htf_mult * mcap_mult
+    strength = 0.5 * conf["multiplier"] * quality_mult * htf_mult * mcap_mult * dom_mult
     summary["strength"] = round(max(0.0, min(1.0, strength)), 3)
     summary["fragility"] = _compute_fragility(summary, cfg=cfg)
     summary["trade_quality"] = "favorable" if summary["strength"] >= 0.55 else ("marginal" if summary["strength"] >= 0.4 else "poor")
@@ -766,6 +785,14 @@ def _apply_confluence(
         })
     if mcap.get("evidence") and mcap["evidence"][0] not in ("marketcap_disabled", "marketcap_unavailable"):
         summary["marketcap"] = {k: mcap[k] for k in ("multiplier", "cap_trend", "supply", "evidence") if k in mcap}
+    if abs(dom_mult - 1.0) > 0.001:
+        drivers.append({
+            "name": "доминация",
+            "delta": round(dom_mult - 1.0, 3),
+            "description": ", ".join(dom.get("evidence", [])) or "доминация доп-фактор",
+        })
+    if dom.get("evidence") and dom["evidence"][0] not in ("dominance_disabled", "dominance_unavailable"):
+        summary["dominance"] = {k: dom[k] for k in ("multiplier", "evidence") if k in dom}
     total = sum(d["delta"] for d in drivers)
     # Aggregate of the driver-delta breakdown (0.50 base ± driver deltas). Diagnostic
     # only — `summary["strength"]` remains the authoritative score for ranking/delivery;
@@ -1477,22 +1504,29 @@ def build_prizrak_signals(
     price: float,
     cfg: PrizrakConfig | None = None,
     marketcap_series: list[list[float]] | None = None,
+    dominance_changes: dict[str, float] | None = None,
 ) -> list[dict[str, Any]]:
     """0..N independent ScenarioVerdict-summary-compatible signals for one tick.
 
     ``marketcap_series`` is the optional CoinGecko cap series (``[[ts_ms, cap], ...]``)
     for Павел М.'s доп-фактор — supplied only when ``cfg.marketcap_enabled`` and fetched
     off the tick plane; ``None`` leaves the factor neutral.
+
+    ``dominance_changes`` = ``{btc_d_change_24h, total3_change_24h}`` from
+    ``dominance_source.read_cached_changes_24h()`` — supplied only when
+    ``cfg.dominance_enabled``; ``None`` leaves the dominance factor neutral.
     """
     cfg = cfg or PrizrakConfig.load()
     if price <= 0:
         return []
 
     token = _MARKETCAP_SERIES.set(marketcap_series)
+    dom_token = _DOMINANCE_CHANGES.set(dominance_changes)
     try:
         return _build_prizrak_signals_inner(ohlcv_by_tf, price=price, cfg=cfg)
     finally:
         _MARKETCAP_SERIES.reset(token)
+        _DOMINANCE_CHANGES.reset(dom_token)
 
 
 def _build_prizrak_signals_inner(
