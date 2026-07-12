@@ -55,6 +55,11 @@ _MARKETCAP_SERIES: ContextVar["list[list[float]] | None"] = ContextVar(
 _DOMINANCE_CHANGES: ContextVar["dict[str, float] | None"] = ContextVar(
     "prizrak_dominance_changes", default=None
 )
+# Max width of a displayed interest/добор zone («вход по факту касания» = a limit band).
+# Tighter than accumulation_max_width_pct (12%, used for forward zone-targeting): a limit
+# zone must be actionable, not the whole range (ETH head-to-head vs Prizrak: our 1633–1810
+# 10.8% box vs his tight 1700–1750 2.9%).
+_INTEREST_ZONE_MAX_WIDTH_PCT = 4.0
 # Course (стр.34): стоповый объём is "такое же накопление (база), но на более мелком ТФ,
 # чем основное движение" — a denser base one TF down (ТФ-1). Detecting it on the move's
 # own TF collapses it into a couple of candles and almost never fires (measured: 4% vs
@@ -156,8 +161,17 @@ def compute_interest_zones(
         if not bars:
             continue
         zones = find_accumulation_zones(bars, tf=use_tf, cfg=cfg, max_zones=8)
-        below = [z for z in zones if z.get("hi", 0) < price]
-        above = [z for z in zones if z.get("lo", 0) > price]
+        # ACTIONABILITY: an interest zone is a LIMIT/добор band («вход по факту касания»),
+        # so it must be tight. find_accumulation_zones allows up to accumulation_max_width_pct
+        # (12%) for forward zone-TARGETING, but a 12%-wide box is useless as a limit — e.g. on
+        # ETH it produced «Лонг: 1633–1810» (10.8%), the whole range, while the channel gives a
+        # tight 1700–1750 (2.9%). Prefer zones ≤ _INTEREST_ZONE_MAX_WIDTH_PCT; fall back to the
+        # tightest available only if none qualify (never show nothing).
+        def _tight(side: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            narrow = [z for z in side if float(z.get("width_pct") or 0) <= _INTEREST_ZONE_MAX_WIDTH_PCT]
+            return narrow or (sorted(side, key=lambda z: float(z.get("width_pct") or 0))[:1] if side else [])
+        below = _tight([z for z in zones if z.get("hi", 0) < price])
+        above = _tight([z for z in zones if z.get("lo", 0) > price])
         # Pick the STRONGEST accumulation box by STRUCTURAL SIGNIFICANCE first (course
         # стр.22: сила уровня = ТФ + объём + история/касания), volume as the reinforcing
         # factor, nearest as final tie-break. The live Prizrak channel selects the KEY

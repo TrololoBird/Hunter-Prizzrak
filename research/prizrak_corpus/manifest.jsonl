@@ -5,3 +5,4 @@
 {"slug": "prizrak_res", "source": "37627648-CwU1oJ1HmYUI3-_N.mp4", "sha256": "92701c7e5078dfbe9aeb78ffe7d08a2efcc4ee3b199e951ae0c53464696bae34", "duration_s": 203.3, "n_segments": 39, "model": "whisper-large-v3-turbo", "ingested": "2026-07-12"}
 {"slug": "prizrak_pol_matic", "source": "https://youtu.be/7ew29d1jY6s", "source_id": "yt:7ew29d1jY6s", "duration_s": 2267.0, "n_segments": 619, "model": "whisper-large-v3-turbo", "ingested": "2026-07-12"}
 {"slug": "prizrak_aevo", "source": "37627648-NwhMD4N3VXChMbaL.mp4", "sha256": "77554351d4f95da95c765a732a45e2cbcb3fb3e921315e43701ebbc53631b8bc", "duration_s": 193.9, "n_segments": 24, "model": "whisper-large-v3-turbo", "ingested": "2026-07-12"}
+{"slug": "prizrak_eth", "source": "37627648-KecEdrEhtvGEPuyL.mp4", "sha256": "ee020889579aaed4e20048366c306187eb75d062e97f5075b62a03cf2a643aa4", "duration_s": 434.2, "n_segments": 93, "model": "whisper-large-v3-turbo", "ingested": "2026-07-12"}
