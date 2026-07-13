@@ -260,6 +260,23 @@ def entry_anchored_forward_zones(
     if global_ls_ratio is not None and global_ls_ratio > 0:
         long_share = global_ls_ratio / (1.0 + global_ls_ratio)
     cluster_map: dict[int, dict[str, float]] = {}
+    # leverage_weights encode "more OI sits at lower leverage" in ASCENDING-leverage
+    # order (0.35→10×, 0.15→100×). But leverage_tiers can arrive DESCENDING (real
+    # bracket path: leverage_tiers_from_brackets sorts reverse) or with more entries
+    # than there are weights — a positional weights[i % n] then inverts the intent
+    # (0.35 lands on the HIGHEST leverage) and wraps big weights onto the 5th+ tiers.
+    # Assign each tier the weight for its ascending leverage RANK instead, so the
+    # lowest-leverage band always carries the largest share regardless of tier order
+    # or count; extra high-leverage tiers clamp to the smallest weight. Tier↔mmr
+    # pairing (indexed by i) is untouched.
+    _asc_levs = sorted(set(leverage_tiers))
+
+    def _weight_for(lev: int) -> float:
+        if not leverage_weights:
+            return 1.0 / lev
+        rank = _asc_levs.index(lev)
+        return leverage_weights[min(rank, len(leverage_weights) - 1)]
+
     prev_oi: float | None = None
     for bar in oi_bars:
         try:
@@ -273,7 +290,7 @@ def entry_anchored_forward_zones(
             entry = (h + l + c) / 3.0
             delta_notional = (oi - prev_oi) * entry
             for i, lev in enumerate(leverage_tiers):
-                w = leverage_weights[i % len(leverage_weights)] if leverage_weights else 1.0 / lev
+                w = _weight_for(lev)
                 mmr = 0.0
                 if maintenance_margin_rates and i < len(maintenance_margin_rates):
                     mmr = maintenance_margin_rates[i]
