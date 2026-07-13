@@ -902,7 +902,14 @@ def auto_resolve_active_signals(
                     tracker_state,
                     symbol=sym,
                     direction=direction,
-                    reason="stop_loss",
+                    # Canonical stop-out reason. "stop_loss" was recognised by NO
+                    # consumer — the re-entry / loss-streak cooldowns (_cooldowns.py)
+                    # and the loss classifiers (outcomes.LOSS_REASONS,
+                    # stats_report._STOP_REASONS) all key on "stop_hit" — so this
+                    # dominant per-tick auto-resolve stop path bypassed both
+                    # cooldowns (instant re-entry into a just-stopped symbol) and
+                    # misclassified the loss in win-rate stats (TRACK-1).
+                    reason="stop_hit",
                     exit_price=price,
                     now=ts,
                 )
@@ -931,7 +938,14 @@ def auto_resolve_active_signals(
                     tracker_state,
                     symbol=sym,
                     direction=direction,
-                    reason="stop_loss",
+                    # Canonical stop-out reason. "stop_loss" was recognised by NO
+                    # consumer — the re-entry / loss-streak cooldowns (_cooldowns.py)
+                    # and the loss classifiers (outcomes.LOSS_REASONS,
+                    # stats_report._STOP_REASONS) all key on "stop_hit" — so this
+                    # dominant per-tick auto-resolve stop path bypassed both
+                    # cooldowns (instant re-entry into a just-stopped symbol) and
+                    # misclassified the loss in win-rate stats (TRACK-1).
+                    reason="stop_hit",
                     exit_price=price,
                     now=ts,
                 )
