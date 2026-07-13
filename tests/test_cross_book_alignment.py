@@ -10,7 +10,7 @@ surviving secondary become the reference.
 """
 from __future__ import annotations
 
-from hunt_core.market.cross import _stale_venues_by_alignment
+from hunt_core.market.cross import _anchor_fetched_at_ms, _stale_venues_by_alignment
 
 _STALE_MS = 750.0
 
@@ -49,3 +49,26 @@ def test_primary_absent_falls_back_to_freshest() -> None:
 def test_single_venue_never_excluded() -> None:
     assert _stale_venues_by_alignment({"binance": 1000.0}, primary="binance", stale_ms=_STALE_MS) == []
     assert _stale_venues_by_alignment({}, primary="binance", stale_ms=_STALE_MS) == []
+
+
+# --- fetched_at anchoring: keep Binance, but don't hide its true age -----------
+# The mirror risk of the primary-anchor fix: if we keep a stale-but-kept Binance
+# book and stamp it datetime.now(), an old primary renders as "сейчас". The merged
+# book must instead carry the primary's OWN fetch time so dom_age_s is honest.
+
+
+def test_anchor_is_primary_fetch_time() -> None:
+    # Binance kept even if it is the older snapshot → its real (older) time is what
+    # we stamp, so dom_age reflects the primary's age, not the merge moment.
+    stamped = {"binance": 1000.0, "bybit": 1200.0}
+    assert _anchor_fetched_at_ms(stamped, ["binance", "bybit"], primary="binance") == 1000.0
+
+
+def test_anchor_falls_back_to_oldest_kept_when_primary_absent() -> None:
+    # binance unstamped → most conservative: oldest kept snapshot age.
+    stamped = {"bybit": 3000.0, "okx": 1500.0}
+    assert _anchor_fetched_at_ms(stamped, ["bybit", "okx"], primary="binance") == 1500.0
+
+
+def test_anchor_none_when_nothing_stamped() -> None:
+    assert _anchor_fetched_at_ms({}, [], primary="binance") is None

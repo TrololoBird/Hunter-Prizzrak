@@ -449,6 +449,30 @@ def _stale_venues_by_alignment(
     ]
 
 
+def _anchor_fetched_at_ms(
+    stamped: dict[str, float], kept: Any, *, primary: str
+) -> float | None:
+    """Fetch-time (ms) to stamp on the merged book so its age is honest.
+
+    Prefer the PRIMARY's own snapshot time — it is the venue we keep, and stamping
+    it means a stale-but-kept Binance book raises freshness.dom_age_s and trips the
+    actionability-staleness gate instead of masquerading as "сейчас". Fall back to
+    the OLDEST kept snapshot (most conservative), then None if nothing is stamped.
+
+    Args:
+        stamped: venue → fetched_at_ms (pre-exclusion is fine; primary is kept).
+        kept: the venue names surviving exclusion.
+        primary: authoritative venue name.
+
+    Returns:
+        The chosen fetch time in epoch ms, or None.
+    """
+    if primary in stamped:
+        return stamped[primary]
+    kept_stamps = [stamped[ex] for ex in kept if ex in stamped]
+    return min(kept_stamps) if kept_stamps else None
+
+
 async def fetch_cross_exchange_book_walls(
     client: Any,
     symbol: str,
@@ -497,7 +521,19 @@ async def fetch_cross_exchange_book_walls(
         merged["stale_venues_excluded"] = excluded_stale
     from datetime import UTC, datetime
 
-    merged["fetched_at"] = datetime.now(UTC).isoformat()
+    # Stamp the merged book with the actual age of its UNDERLYING snapshot, not the
+    # merge moment. The #1 primary-anchor fix keeps Binance even when it is the
+    # laggard, so stamping datetime.now() here would let an old Binance book render
+    # as "сейчас" — the mirror of the bug it fixed (stale primary accepted as
+    # current). Anchoring to the primary's own fetch time makes freshness.dom_age_s
+    # honest, so the existing _DOM_ACTIONABLE_MAX_AGE_S gate in _sections trips on a
+    # genuinely stale primary instead of being defeated. Fall back to the oldest
+    # kept snapshot, then to now only if nothing carried a timestamp.
+    _anchor_ms = _anchor_fetched_at_ms(stamped, per_ex.keys(), primary=_PRIMARY)
+    if _anchor_ms is not None:
+        merged["fetched_at"] = datetime.fromtimestamp(_anchor_ms / 1000.0, tz=UTC).isoformat()
+    else:
+        merged["fetched_at"] = datetime.now(UTC).isoformat()
     try:
         from hunt_core.maps.config import load_maps_config
         from hunt_core.maps.orderbook import merge_full_depth_bins
