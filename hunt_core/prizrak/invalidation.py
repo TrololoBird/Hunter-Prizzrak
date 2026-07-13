@@ -40,14 +40,13 @@ def build_invalidation(
             "reason": "нарушение структурного уровня входа",
         })
 
-        # Secondary: nearest swing low breach
-        if swing_lows:
-            nearest_sl = min((s for s in swing_lows if s < entry_lo), default=None)
-            if nearest_sl and nearest_sl > invalidation_level * 0.95:
-                conditions.append({
-                    "condition": f"{entry_tf} close below {_fmt_price(nearest_sl)}",
-                    "reason": "пробой ближайшего свинг-лоу",
-                })
+        # (Removed) A "nearest swing-low breach" secondary was dead code: it read
+        # swing_lows, but every caller populates swing_highs for a long / swing_lows
+        # for a short (TP-direction swings from _extract_swing_levels, i.e. AHEAD of
+        # entry), so the long branch always saw None — and even the intended data
+        # (a swing LOW *below* entry) is never produced. See PRIZRAK-1. Params kept
+        # for call-site stability; wire a real stop-direction swing source before
+        # reinstating.
 
         # Tertiary: volume confirmation of rejection
         conditions.append({
@@ -74,13 +73,8 @@ def build_invalidation(
             "reason": "нарушение структурного уровня входа",
         })
 
-        if swing_highs:
-            nearest_sh = max((s for s in swing_highs if s > entry_hi), default=None)
-            if nearest_sh and nearest_sh < invalidation_level * 1.05:
-                conditions.append({
-                    "condition": f"{entry_tf} close above {_fmt_price(nearest_sh)}",
-                    "reason": "пробой ближайшего свинг-хая",
-                })
+        # (Removed) symmetric dead "nearest swing-high breach" — see the long
+        # branch note above (PRIZRAK-1).
 
         conditions.append({
             "condition": f"volume > 1.5× среднего на {entry_tf} green close",
