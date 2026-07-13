@@ -34,6 +34,16 @@ _DOM_ACTIONABLE_MAX_AGE_S = float(_os.getenv("HUNT_DOM_ACTIONABLE_MAX_AGE_S", "4
 _PRIMARY_VENUE = "binance"
 _VENUE_CODES = {"binance": "BNC", "bybit": "BYB", "okx": "OKX", "bitget": "BGT"}
 
+# A realized-liquidation cluster below this USD notional is too thin to be a
+# magnet. `intensity` is normalized to the map's own max, so a single tiny
+# force-order — and Binance forceOrder streams only the LARGEST event per 1s,
+# heavily undersampled — renders as "100% плотн." on e.g. $128. Below the floor
+# we drop the size/density tail entirely rather than dignify noise as a cluster.
+# Env: HUNT_LIQ_MIN_CLUSTER_USD.
+_LIQ_MIN_CLUSTER_NOTIONAL_USD = float(
+    _os.getenv("HUNT_LIQ_MIN_CLUSTER_USD", "10000") or 10000.0
+)
+
 
 def _venue_code(name: Any) -> str:
     """Short display code for a venue name, consistent across every section."""
@@ -422,6 +432,10 @@ def format_liquidation_map_section(row: dict[str, Any]) -> str:
             return ""
         notional = float(best.get("total_notional") or 0.0)
         intensity = float(best.get("intensity") or 0.0)
+        # Below the floor the cluster is an undersampled single force-order, not a
+        # density — suppress the whole tail so "100% плотн." never rides on $128.
+        if notional < _LIQ_MIN_CLUSTER_NOTIONAL_USD:
+            return ""
         parts: list[str] = []
         if notional > 0:
             parts.append(_fmt_usd_compact(notional))
