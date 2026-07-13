@@ -738,6 +738,19 @@ async def run_loop(
                     ignited=set(ignition_by_sym.keys()),
                     interval_s=float(interval_s),
                 )
+                if load_plan.dropped_symbols:
+                    # Demand shaping (ADR-0001 pillar 3): the plan shed these to fit
+                    # the weight budget — exclude them from THIS tick's REST snapshots.
+                    # WS subscriptions below still cover the full universe (weight-free),
+                    # and the keep-window rotates so they return on later ticks.
+                    _shed = frozenset(load_plan.dropped_symbols)
+                    hunt_active = tuple(s for s in hunt_active if s not in _shed)
+                    LOG.info(
+                        "hunt_demand_shaped",
+                        kept=len(hunt_active),
+                        dropped=len(_shed),
+                        dropped_list=sorted(_shed)[:10],
+                    )
                 LOG.info(
                     "hunt_load_plan",
                     symbols=len(hunt_active),

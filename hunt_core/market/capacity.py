@@ -11,7 +11,11 @@ import os
 from dataclasses import dataclass, field
 from typing import Literal
 
+import structlog
+
 from hunt_core.data.universe import PINNED_SYMBOLS
+
+LOG = structlog.get_logger("hunt_core.market.capacity")
 
 SnapshotTier = Literal["full", "fast"]
 
@@ -34,7 +38,14 @@ BINANCE_FAPI_DATA_LIMIT_5M = 1000
 # tripped repeated 418 -1003 bans within minutes of restart. 450/300s ≈ 1.5 req/s halves
 # the cold-start rate; steady-state refresh volume (OI 600s / funding 300s / basis 7200s
 # TTLs over ~30 symbols) stays comfortably within it. Raise via HUNT_BINANCE_FAPI_PACE.
-BINANCE_FAPI_DATA_PACE_5M = int(os.getenv("HUNT_BINANCE_FAPI_PACE", "450") or 450)
+# 2026-07-12 12:04: SECOND 418 on the SAME NAT IP (10.119.59.87, banned yesterday too;
+# Binance escalates for repeat offenders — this one 973s). Trigger: 3 interactive
+# /symbol probes of cold out-of-universe symbols (TCUSDT/BTCUSDT/XAIUSDT) within 40s
+# stacked their full fapi-data packs on top of tick steady-state — in-process smooth
+# pacing at 450/5min was respected, and the WAF banned anyway: the shared NAT IP's
+# effective budget is below our pace. 450→300 stopgap; real fix = ADR-0001 (QoS
+# reserve for probes, demand shaping, push-first removes most fapi-data need).
+BINANCE_FAPI_DATA_PACE_5M = int(os.getenv("HUNT_BINANCE_FAPI_PACE", "300") or 300)
 
 # Conservative per-symbol estimates (first tick / cold cache).
 EST_BATCH_OVERHEAD_WEIGHT = 65  # ticker_24h + premium + funding batch
@@ -76,6 +87,9 @@ class TickLoadPlan:
     estimated_fapi_calls: int
     full_count: int
     fast_count: int
+    # ADR-0001 pillar 3: symbols shed at PLAN time to fit the weight budget —
+    # excluded from this tick's REST snapshots (WS streaming keeps them warm).
+    dropped_symbols: tuple[str, ...] = ()
 
 
 @dataclass
@@ -119,69 +133,87 @@ class HuntLoadPlanner:
         pinned_in_universe = [s for s in ordered if s in pinned]
         rotatable = [s for s in ordered if s not in pinned]
 
+        order_index = {sym: i for i, sym in enumerate(ordered)}
+
         def _rot_rank(sym: str) -> tuple[int, int]:
-            return (0 if sym in ign else 1, ordered.index(sym))
+            return (0 if sym in ign else 1, order_index[sym])
 
         rotatable_sorted = sorted(rotatable, key=_rot_rank)
 
         overhead = EST_BATCH_OVERHEAD_WEIGHT
         budget = max(overhead + EST_WEIGHT_FAST_SYMBOL, self.target_weight_per_tick)
 
-        def _est_weight(full_n: int) -> int:
-            fast_n = max(0, n - full_n)
-            return overhead + full_n * EST_WEIGHT_FULL_SYMBOL + fast_n * EST_WEIGHT_FAST_SYMBOL
+        # ── Demand shaping (ADR-0001 pillar 3) ───────────────────────────────
+        # Fit the KEPT symbol set to the per-tick budget BEFORE tiering: a tick
+        # is physically incapable of requesting more than the budget holds, so
+        # the weight-budget `acquire` sleeps disappear structurally. Pinned
+        # symbols are never dropped; ignited outrank the rotatable tail; the
+        # tail keep-window rotates with tick_index so dropped symbols cycle
+        # back in on later ticks instead of starving.
+        afford = max(0, int((budget - overhead) // EST_WEIGHT_FAST_SYMBOL))
+        if len(pinned_in_universe) > afford:
+            LOG.warning(
+                "plan_pinned_over_budget",
+                pinned=len(pinned_in_universe),
+                afford=afford,
+                budget=budget,
+            )
+        keep_rot_n = max(0, afford - len(pinned_in_universe))
+        ignited_first = [s for s in rotatable_sorted if s in ign]
+        tail = [s for s in rotatable_sorted if s not in ign]
+        if len(ignited_first) + len(tail) > keep_rot_n and tail:
+            off = self.tick_index % len(tail)
+            tail = tail[off:] + tail[:off]
+        kept: list[str] = pinned_in_universe + (ignited_first + tail)[:keep_rot_n]
+        kept_set = frozenset(kept)
+        dropped = tuple(s for s in ordered if s not in kept_set)
+        k = len(kept)
 
-        max_full = len(pinned_in_universe)
-        for candidate in range(len(pinned_in_universe), n + 1):
-            if _est_weight(candidate) <= budget:
-                max_full = candidate
-            else:
-                break
-        max_full = max(max_full, min(self.min_full_slots, n))
-        max_full = min(n, max_full)
-
-        full_set: list[str] = list(pinned_in_universe)
-        for sym in rotatable_sorted:
-            if len(full_set) >= max_full:
-                break
-            if sym not in full_set:
-                full_set.append(sym)
-        # Round-robin: when budget allows more than ignited+pinned head, rotate tail.
-        if len(full_set) < max_full and rotatable_sorted:
-            pool = [s for s in rotatable_sorted if s not in full_set]
-            if pool:
-                offset = self.tick_index % len(pool)
-                for i in range(min(max_full - len(full_set), len(pool))):
-                    sym = pool[(offset + i) % len(pool)]
-                    if sym not in full_set:
-                        full_set.append(sym)
-
-        full_frozen = frozenset(full_set)
+        # ── Tier assignment within the kept set (budget-bounded, no floor) ───
+        # min_full_slots is a PREFERENCE honoured only within budget; the old
+        # floor that overrode the budget is gone (its xfail acceptance test in
+        # tests/test_market_rate_gate.py now passes).
+        full_count = 0
+        if k:
+            spare = budget - overhead - k * EST_WEIGHT_FAST_SYMBOL
+            upgrade_cost = EST_WEIGHT_FULL_SYMBOL - EST_WEIGHT_FAST_SYMBOL
+            full_count = max(0, min(k, int(spare // upgrade_cost)))
+        # kept is already priority-ordered (pins → ignited → rotated tail), so
+        # the full-tier prefix follows priority and rotates via the tail window.
+        full_frozen = frozenset(kept[:full_count])
         tier_by_symbol: dict[str, SnapshotTier] = {
-            s: ("full" if s in full_frozen else "fast") for s in ordered
+            s: ("full" if s in full_frozen else "fast") for s in kept
         }
-        full_count = sum(1 for t in tier_by_symbol.values() if t == "full")
-        fast_count = n - full_count
+        full_count = len(full_frozen)
+        fast_count = k - full_count
 
         est_weight = overhead + full_count * EST_WEIGHT_FULL_SYMBOL + fast_count * EST_WEIGHT_FAST_SYMBOL
         est_fapi = full_count * EST_FAPI_CALLS_FULL + fast_count * EST_FAPI_CALLS_FAST
+        if dropped:
+            LOG.info(
+                "plan_demand_shaped",
+                kept=k,
+                dropped=len(dropped),
+                est_weight=est_weight,
+                budget=budget,
+            )
 
         # Parallel: limit burst so concurrent symbols don't spike weight/fapi.
         per_slot = max(EST_WEIGHT_FULL_SYMBOL, EST_WEIGHT_FAST_SYMBOL)
         parallel_by_budget = max(1, budget // (per_slot * 2))
-        parallel = min(self.max_parallel_cap, parallel_by_budget, max(1, n))
-        if n > 24:
+        parallel = min(self.max_parallel_cap, parallel_by_budget, max(1, k))
+        if k > 24:
             parallel = min(parallel, 3)
-        elif n > 12:
+        elif k > 12:
             parallel = min(parallel, 4)
 
         # Cross-ex: scale with interval; never refresh whole universe at once.
         cross_cap = int(os.getenv("HUNT_CROSS_MAX_SYMBOLS", "24") or 24)
-        cross_max = min(cross_cap, max(4, n // 2 if interval_s < 90 else n))
-        if n > 30:
+        cross_max = min(cross_cap, max(4, k // 2 if interval_s < 90 else k))
+        if k > 30:
             cross_max = min(cross_max, 16)
 
-        skip_secondary_tickers = n > 40 or est_weight > BINANCE_WEIGHT_PACE_TARGET * 0.85
+        skip_secondary_tickers = k > 40 or est_weight > BINANCE_WEIGHT_PACE_TARGET * 0.85
 
         self.tick_index += 1
         return TickLoadPlan(
@@ -193,6 +225,7 @@ class HuntLoadPlanner:
             estimated_fapi_calls=est_fapi,
             full_count=full_count,
             fast_count=fast_count,
+            dropped_symbols=dropped,
         )
 
 

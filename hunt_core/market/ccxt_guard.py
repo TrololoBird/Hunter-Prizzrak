@@ -75,6 +75,34 @@ class CcxtBanTelemetry:
             self.transport_count += 1
 
 
+def classify_ccxt_error(exc: BaseException) -> BanKind:
+    """Classify a CCXT error into ``ip_ban | rate_limit | transport | other``.
+
+    Stateless — the single classifier shared by the guard and the module-level
+    ``is_ccxt_*`` helpers (previously each helper allocated a throwaway guard).
+    """
+    if is_proxy_transport_error(exc):
+        return "transport"
+    if isinstance(exc, ccxt.DDoSProtection):
+        if _http_code_in_exc(exc, 418):
+            return "ip_ban"
+        return "rate_limit"
+    if isinstance(exc, ccxt.RateLimitExceeded):
+        return "rate_limit"
+    if isinstance(exc, ccxt.ExchangeNotAvailable):
+        text = str(exc).lower()
+        if "418" in text or "ip ban" in text or "banned" in text:
+            return "ip_ban"
+        if "429" in text or "rate limit" in text or "too many" in text:
+            return "rate_limit"
+        # Generic CCXT "GET https://..." without status — often transient; do not
+        # thrash the proxy pool on every blip (CCXT wiki: also Cloudflare/HTML).
+        return "other"
+    if isinstance(exc, CCXT_TRANSPORT_EXC):
+        return "transport"
+    return "other"
+
+
 @dataclass(slots=True)
 class CcxtGuard:
     """Stateful guard: classify CCXT errors, compute pauses, expose telemetry."""
@@ -85,26 +113,7 @@ class CcxtGuard:
     _last_rate_limit_mono: float = 0.0
 
     def classify(self, exc: BaseException) -> BanKind:
-        if is_proxy_transport_error(exc):
-            return "transport"
-        if isinstance(exc, ccxt.DDoSProtection):
-            if _http_code_in_exc(exc, 418):
-                return "ip_ban"
-            return "rate_limit"
-        if isinstance(exc, ccxt.RateLimitExceeded):
-            return "rate_limit"
-        if isinstance(exc, ccxt.ExchangeNotAvailable):
-            text = str(exc).lower()
-            if "418" in text or "ip ban" in text or "banned" in text:
-                return "ip_ban"
-            if "429" in text or "rate limit" in text or "too many" in text:
-                return "rate_limit"
-            # Generic CCXT "GET https://..." without status — often transient; do not
-            # thrash the proxy pool on every blip (CCXT wiki: also Cloudflare/HTML).
-            return "other"
-        if isinstance(exc, CCXT_TRANSPORT_EXC):
-            return "transport"
-        return "other"
+        return classify_ccxt_error(exc)
 
     def is_actionable(self, exc: BaseException) -> bool:
         return self.classify(exc) in {"ip_ban", "rate_limit"}
@@ -274,11 +283,11 @@ def liquidation_ws_mode(exchange: Any) -> str:
 
 
 def is_ccxt_ip_ban(exc: BaseException) -> bool:
-    return CcxtGuard().classify(exc) == "ip_ban"
+    return classify_ccxt_error(exc) == "ip_ban"
 
 
 def is_ccxt_rate_limited(exc: BaseException) -> bool:
-    return CcxtGuard().classify(exc) in {"ip_ban", "rate_limit"}
+    return classify_ccxt_error(exc) in {"ip_ban", "rate_limit"}
 
 
 def ccxt_error_summary(exc: BaseException) -> dict[str, Any]:
@@ -303,6 +312,7 @@ __all__ = [
     "CcxtBanTelemetry",
     "CcxtGuard",
     "ccxt_error_summary",
+    "classify_ccxt_error",
     "is_ccxt_ip_ban",
     "is_ccxt_rate_limited",
     "parse_ccxt_retry_after_s",

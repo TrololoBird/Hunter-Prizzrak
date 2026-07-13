@@ -140,6 +140,7 @@ async def run_backfill_pass(client: Any, *, now_ms: int, max_rows: int = 200) ->
         try:
             ohlcv = await client.fetch_ohlcv_list(
                 symbol, "1m", since=decision_ts, limit=1500,
+                qos_context="path_backfill",  # background QoS: yield to the watch tick
             )
         except Exception:
             _LOG.exception("path_backfill_fetch_failed sym=%s candidate=%s", symbol, row.get("candidate_id"))

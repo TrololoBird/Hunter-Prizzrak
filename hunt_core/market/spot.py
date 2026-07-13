@@ -4,20 +4,20 @@ from __future__ import annotations
 
 
 import asyncio
-import logging
 import time
 from dataclasses import dataclass
 from typing import Any
 
 import ccxt.async_support as ccxt
+import structlog
 
 from hunt_core.errors import DEFENSIVE_EXC
 from hunt_core.market.ccxt_guard import ccxt_method_available, is_ccxt_rate_limited
-from hunt_core.market.ccxt_rest import HuntCcxtRestGate
+from hunt_core.market.ccxt_rest import create_spot_rest_gate
 from hunt_core.market.factory import close_exchange_async, create_async_binance_spot
 from hunt_core.market.symbols import to_binance_symbol, to_ccxt_symbol
 
-LOG = logging.getLogger("hunt_core.market.spot")
+LOG = structlog.get_logger("hunt_core.market.spot")
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,7 +44,9 @@ class HuntCcxtSpotCompanion:
             trust_env=trust_env,
             timeout_ms=timeout_ms,
         )
-        self._rest_gate = HuntCcxtRestGate()
+        # Own spot budgets — spot's 6000/min weight counter is separate from
+        # fapi's 2400/min; never charge or floor the futures budget (F2).
+        self._rest_gate = create_spot_rest_gate()
         self._cache: dict[str, SpotMetrics] = {}
         self._lock = asyncio.Lock()
         self._markets_loaded = False
@@ -136,13 +138,13 @@ class HuntCcxtSpotCompanion:
         except ccxt.BaseError as exc:
             if is_ccxt_rate_limited(exc):
                 raise
-            LOG.debug("spot_fetch_failed | symbol=%s error=%s", sym, exc)
+            LOG.debug("spot_fetch_failed", symbol=sym, error=str(exc))
             return None
         except DEFENSIVE_EXC as exc:
-            LOG.debug("spot_fetch_failed | symbol=%s error=%s", sym, exc)
+            LOG.debug("spot_fetch_failed", symbol=sym, error=str(exc))
             return None
         except Exception as exc:
-            LOG.debug("spot_fetch_failed | symbol=%s error=%s", sym, exc)
+            LOG.debug("spot_fetch_failed", symbol=sym, error=str(exc))
             return None
 
     async def refresh_symbols(
