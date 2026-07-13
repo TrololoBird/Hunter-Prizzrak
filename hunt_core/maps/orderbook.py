@@ -472,25 +472,39 @@ def _detect_cvd_divergence(
     *,
     price_change_pct: float | None,
     window_seconds: int = 60,
+    min_ratio: float = 0.25,
 ) -> str | None:
+    """Flag CVD↔price divergence using a VOLUME-RELATIVE imbalance ratio.
+
+    signed CVD ÷ Σ notional over the window ∈ [−1, 1] (VPIN-like). This is
+    instrument- and window-invariant: the previous absolute ±$5000 threshold
+    fired ~5× more often once the flow window widened from 60s to the base-TF
+    300s (5× the accumulated $CVD), whereas a ratio is scale-free. ``min_ratio``
+    (cfg.cvd_div_ratio) is the net-imbalance fraction that counts as divergence.
+    """
     if price_change_pct is None or not trades:
         return None
     cutoff_ms = int(time.time() * 1000) - window_seconds * 1000
     cvd = 0.0
+    total = 0.0
     for pt in trades:
         ts_ms = int(getattr(pt, "ts_ms", 0) or 0)
         if ts_ms < cutoff_ms:
             continue
         qty = float(getattr(pt, "qty", 0) or 0)
         px = float(getattr(pt, "price", 0) or 0)
-        is_buy = bool(getattr(pt, "is_buy", False))
-        if qty <= 0:
+        if qty <= 0 or px <= 0:
             continue
-        cvd += qty * px if is_buy else -qty * px
+        notional = qty * px
+        total += notional
+        cvd += notional if bool(getattr(pt, "is_buy", False)) else -notional
+    if total <= 0:
+        return None
+    cvd_ratio = cvd / total
     px_chg = float(price_change_pct)
-    if px_chg >= 0.15 and cvd < -5_000:
+    if px_chg >= 0.15 and cvd_ratio < -min_ratio:
         return "bearish_div"
-    if px_chg <= -0.15 and cvd > 5_000:
+    if px_chg <= -0.15 and cvd_ratio > min_ratio:
         return "bullish_div"
     return None
 
@@ -659,12 +673,18 @@ def build_orderbook_map(
         current_price=current_price,
         n_buckets=cfg.n_buckets,
         price_range_pct=cfg.price_range_pct,
+        window_seconds=cfg.window_seconds,
     )
     stacked = _stacked_imbalance(footprint)
     icebergs = _detect_iceberg(trades or [], zone_bids, zone_asks, current_price=current_price)
     absorption = _detect_absorption(footprint, clusters, current_price=current_price, price_change_pct=price_change_pct)
     spoofs = _detect_spoof(hist, zone_bids, zone_asks, current_price=current_price)
-    cvd_div = _detect_cvd_divergence(trades or [], price_change_pct=price_change_pct)
+    cvd_div = _detect_cvd_divergence(
+        trades or [],
+        price_change_pct=price_change_pct,
+        window_seconds=cfg.window_seconds,
+        min_ratio=cfg.cvd_div_ratio,
+    )
     heat_matrix = _depth_heatmap_matrix(
         hist,
         current_price=current_price,

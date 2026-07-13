@@ -36,6 +36,13 @@ class MapsConfig:
     # config vp_buckets note — 24 buckets is ~$150/bucket on BTC, too coarse to be useful).
     vp_buckets: int = 60
     vp_value_area_pct: float = 0.70
+    # CVD-divergence threshold as a FRACTION of window turnover (signed CVD ÷ Σ
+    # notional), not an absolute $. Volume-relative so it is instrument- and
+    # window-invariant: widening the flow window from 60s to the base-TF
+    # window_seconds (300s) ~5×'s the accumulated $CVD, which would make a fixed
+    # $ threshold fire ~5× more — a ratio does not. 0.25 = 25% net imbalance
+    # (VPIN-like). Env HUNT_CVD_DIV_RATIO.
+    cvd_div_ratio: float = 0.25
 
     @classmethod
     def from_defaults(cls, raw: Mapping[str, Any] | None = None) -> MapsConfig:
@@ -85,6 +92,10 @@ class MapsConfig:
             vp_periods=periods,
             vp_buckets=int(section.get("vp_buckets", 60)),
             vp_value_area_pct=float(section.get("vp_value_area_pct", 0.70)),
+            cvd_div_ratio=_env_float(
+                "HUNT_CVD_DIV_RATIO",
+                section.get("cvd_div_ratio", 0.25),
+            ),
         )
 
 
