@@ -648,6 +648,10 @@ def _htf_bias(
         ("4h", cfg.htf_4h_weight, "4h"),
         ("1h", cfg.htf_1h_weight, "1h"),
     ]
+    # Published on EVERY return path (incl. accumulation/distribution/unknown early
+    # returns) so the МТФ render's per-TF weight suffixes never vanish — the main
+    # path added them but the early ones dropped the key (a dead-render gap).
+    weights_pub = {display_key: round(w, 2) for _tf, w, display_key in weights}
 
     votes: dict[str, str] = {}
     for tf_key, _w, display_key in weights:
@@ -662,10 +666,10 @@ def _htf_bias(
 
     # Accumulation: 4h bull against higher-TF bear → no directional edge
     if trend_4h == "bull" and (trend_1w == "bear" or trend_1d == "bear"):
-        return {"bias": "neutral", "score": 0.0, "weight_available": 1.0, "votes": votes, "struct_by_tf": struct_by_tf}
+        return {"bias": "neutral", "score": 0.0, "weight_available": 1.0, "votes": votes, "struct_by_tf": struct_by_tf, "weights": weights_pub}
     # Distribution: 4h bear against higher-TF bull → no directional edge
     if trend_4h == "bear" and (trend_1w == "bull" or trend_1d == "bull"):
-        return {"bias": "neutral", "score": 0.0, "weight_available": 1.0, "votes": votes, "struct_by_tf": struct_by_tf}
+        return {"bias": "neutral", "score": 0.0, "weight_available": 1.0, "votes": votes, "struct_by_tf": struct_by_tf, "weights": weights_pub}
 
     # All TFs agree or mixed without accumulation — use weighted vote.
     net = 0.0
@@ -684,7 +688,7 @@ def _htf_bias(
         net += w if trend == "bull" else -w
 
     if weight_available <= 0.0:
-        return {"bias": "unknown", "score": 0.0, "weight_available": 0.0, "votes": votes}
+        return {"bias": "unknown", "score": 0.0, "weight_available": 0.0, "votes": votes, "struct_by_tf": struct_by_tf, "weights": weights_pub}
     norm = net / weight_available
     if norm >= cfg.htf_bias_threshold:
         bias = "long"
@@ -701,7 +705,7 @@ def _htf_bias(
         # Per-TF weights so the render can show the score is WEIGHTED, not a flat
         # 4-TF average (a live −0.60 = −(0.35+0.25) confused a careful reader into
         # reading it as a mean over four equal TFs). Sourced from cfg → no drift.
-        "weights": {display_key: round(w, 2) for _tf, w, display_key in weights},
+        "weights": weights_pub,
     }
 
 

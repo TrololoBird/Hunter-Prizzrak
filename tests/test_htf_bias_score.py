@@ -81,3 +81,6 @@ def test_accumulation_shortcircuits_to_neutral(monkeypatch: pytest.MonkeyPatch) 
     out = _run_bias({"1w": _BEAR, "1d": _BEAR, "4h": _BULL, "1h": _NEUTRAL}, monkeypatch)
     assert out["bias"] == "neutral"
     assert out["score"] == pytest.approx(0.0, abs=1e-9)
+    # The early (accumulation) return must still carry weights + struct_by_tf so the
+    # МТФ render's per-TF weight suffixes don't vanish on this path (dead-render gap).
+    assert out.get("weights") and "struct_by_tf" in out
