@@ -222,13 +222,19 @@ class AnalystReport:
                 lines.append("   " + " · ".join(parts))
 
         def _bias_warn(side: str) -> None:
-            # A zone AGAINST the HTF bias is a reaction-only play (course: против
-            # тренда без слома не проходит гейт) — say it, don't leave the reader
-            # to reconcile «HTF шорт» with «лонг-зона» themselves.
+            # A zone AGAINST the HTF bias is a counter-trend REACTION/добор — not a
+            # standalone trend signal, but a valid play the way the author works it
+            # (video 2026-07-13: «здесь буду добирать долонговую позицию … кто берёт
+            # лимитками — тогда надо поставить большой стоп-лосс на всю 4-часовую
+            # структуру»). So frame it as HE does — reaction-from-touch with
+            # confirmation, laddered доборы, and a WIDE stop behind the whole HTF
+            # structure (NOT the tight per-zone invalidation shown above) — instead
+            # of just "doesn't pass the gate", which hid a play he actively trades.
             if (bias == "short" and side == "long") or (bias == "long" and side == "short"):
                 lines.append(
-                    "   ⚠️ <i>против HTF-bias — только реакция от касания с подтверждением;"
-                    " без слома структуры такой сетап не проходит гейт</i>"
+                    "   ⚠️ <i>против HTF-bias — не самостоятельный сигнал, а реакция/добор"
+                    " от касания с подтверждением; стоп прячем за всю HTF-структуру"
+                    " (шире зоны), доборы по сетке зон интереса</i>"
                 )
 
         def _side(label: str, single: Any, ladder: Any, *, side: str) -> None:
