@@ -50,9 +50,14 @@ def _clamp01(x: float) -> float:
 
 
 def _z_component(z: float | None, *, weight: float = 1.0) -> float:
+    # Energy rewards SURGES (see the vol/OI/trade comment below), so only a
+    # positive z-score — activity ABOVE the rolling mean — contributes. The old
+    # abs(z) let a drought (z ≪ 0: volume/trade far BELOW average) inflate energy
+    # exactly like a surge, scoring dead coins as "about to expand" (SCAN-2).
+    # oi_accel already gates oi_z > 0 before calling, so it is unaffected.
     if z is None:
         return 0.0
-    return _clamp01(abs(z) / 4.0) * weight * 100.0
+    return _clamp01(max(z, 0.0) / 4.0) * weight * 100.0
 
 
 @dataclass(frozen=True, slots=True)
