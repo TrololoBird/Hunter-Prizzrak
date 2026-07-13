@@ -21,7 +21,18 @@ import time
 
 _CATS: dict[str, re.Pattern[str]] = {
     "errors": re.compile(r"traceback|exception|critical|fatal|\berror\b(?!_rate)", re.I),
-    "bans_rl": re.compile(r"\b418\b|\b429\b|rate.?limit|too many|banned|ip.?ban|retcode.*1000[36]", re.I),
+    # Anchor to real ban SIGNATURES the bot/ccxt emit, not bare status numbers:
+    # a naked \b418\b matched a weight/limit value of 418 (and \b429\b likewise),
+    # firing on benign `futures_data_request_pacing` lines. ccxt maps a real Binance
+    # HTTP 418/429 to DDoSProtection/RateLimitExceeded; the bot logs
+    # hunt_binance_ip_ban / RestBanSkip / "banned until <epoch>". 418/429 count only
+    # in an http/status context. retcode 10003/10006 is Bybit's rate-limit code.
+    "bans_rl": re.compile(
+        r"DDoSProtection|RateLimitExceeded|hunt_binance_ip_ban|RestBanSkip|"
+        r"banned until|\bip_ban\b|too many request|rate.?limit(?:ed|_exceeded)?|"
+        r"(?:http|status|code)[\s:=/]*4(?:18|29)\b|retcode.*1000[36]",
+        re.I,
+    ),
     "reconnects": re.compile(r"reconnect|disconnect|ws.*(closed|restart)|stream.*(restart|down)", re.I),
     "stale_empty": re.compile(r"blackout|stale|\bempty\b|no data|no_data|universe_health|degraded", re.I),
     "watchdog": re.compile(r"watchdog.*(fired|trip|kill|dump)|dump_traceback", re.I),
