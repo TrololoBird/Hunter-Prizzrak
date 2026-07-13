@@ -85,8 +85,13 @@ async def assemble_analyst_tick(
     stagger_ms: int = 200,
     ws_feed: Any | None = None,
     allow_low_liquidity: bool = False,
+    snap_tier: str = "full",
 ) -> dict[str, Any]:
-    """Full deep snapshot — no hunt fusion, structure-first enrichments."""
+    """Full deep snapshot — no hunt fusion, structure-first enrichments.
+
+    ``snap_tier="probe_lite"`` — QoS-trimmed REST pack for interactive probes of
+    cold out-of-universe symbols (skips fapi-data series; probe_qos / ADR-0001).
+    """
     import asyncio
 
     from hunt_core.prizrak.build import _enrich_analyst_row
@@ -154,7 +159,7 @@ async def assemble_analyst_tick(
             ws_feed=ws_feed,
             spot_companion=None,
             stagger_klines_ms=stagger_ms,
-            tier="full",
+            tier=snap_tier,  # type: ignore[arg-type]  # "probe_lite" = QoS-trimmed cold probe
             hunt_fusion=False,
             allow_low_liquidity=allow_low_liquidity,
         )

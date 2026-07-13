@@ -498,6 +498,11 @@ async def deliver_signal_probe(
     )
     if liq_warn:
         text = f"⚠️ <b>Низкая ликвидность:</b> <code>{html.escape(liq_warn)}</code>\n\n{text}"
+    if row.get("_probe_lite"):
+        text = (
+            f"{text}\n⚡ <i>облегчённый пак: серии basis/OI/long-short не запрошены "
+            f"(защита от IP-бана, символ вне юниверса)</i>"
+        )
     from hunt_core.deliver.confluence_grid import build_confluence_grid, format_grid_telegram
     from hunt_core.deliver._sections import format_intraday_maps_telegram
 

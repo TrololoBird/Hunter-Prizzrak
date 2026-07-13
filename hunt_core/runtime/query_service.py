@@ -185,10 +185,7 @@ async def resolve_query_row(
     source = "live_rest"
     _client: HuntCcxtClient = client if client is not None else HuntCcxtClient(timeout_ms=45_000)
 
-    if live:
-        row = await assemble_analyst_tick(sym, _client, stagger_ms=max(stagger_ms, 200), allow_low_liquidity=allow_low_liquidity)
-        source = "deep_live"
-    else:
+    if not live:
         cached = deep_query_store().resolve(sym)
         if isinstance(cached, dict) and not cached.get("error"):
             age_s = row_age_seconds(cached)
@@ -202,8 +199,36 @@ async def resolve_query_row(
                 row = None
 
     if row is None:
-        row = await assemble_analyst_tick(sym, _client, stagger_ms=max(stagger_ms, 200), allow_low_liquidity=allow_low_liquidity)
-        source = "analyst_assembly"
+        # Interactive live probe — the path behind the 2026-07-12 418 ban. QoS
+        # (probe_qos, ADR-0001): one live probe at a time, same-symbol requests
+        # coalesce, COLD out-of-universe symbols are spaced out and get the
+        # trimmed probe_lite REST pack instead of the full fapi-data series.
+        from hunt_core.data.universe import PINNED_SYMBOLS
+        from hunt_core.runtime.probe_qos import probe_qos
+        from hunt_core.runtime.tick_state import last_tick_store
+
+        qos = probe_qos()
+        in_tick_universe = isinstance(last_tick_store().resolve(sym), dict)
+        cold = not in_tick_universe and sym not in PINNED_SYMBOLS
+        if cold:
+            if qos.cold_wait_s() > 0:
+                return qos.throttled_row(sym), "probe_qos", False, None
+            qos.note_cold_probe()
+        tier = "probe_lite" if cold else "full"
+
+        async def _live_probe() -> dict[str, Any]:
+            return await assemble_analyst_tick(
+                sym,
+                _client,
+                stagger_ms=max(stagger_ms, 200),
+                allow_low_liquidity=allow_low_liquidity,
+                snap_tier=tier,
+            )
+
+        row = await qos.run_live_probe(sym, _live_probe)
+        if cold and not row.get("error"):
+            row["_probe_lite"] = True
+        source = "deep_live" if live else "analyst_assembly"
 
     if row.get("maps") and not row.get("maps_forecast"):
         from hunt_core.toolkit.forecast import stamp_forecasts_on_row
