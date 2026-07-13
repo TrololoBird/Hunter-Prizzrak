@@ -37,12 +37,15 @@ class MapsConfig:
     vp_buckets: int = 60
     vp_value_area_pct: float = 0.70
     # CVD-divergence threshold as a FRACTION of window turnover (signed CVD ÷ Σ
-    # notional), not an absolute $. Volume-relative so it is instrument- and
-    # window-invariant: widening the flow window from 60s to the base-TF
-    # window_seconds (300s) ~5×'s the accumulated $CVD, which would make a fixed
-    # $ threshold fire ~5× more — a ratio does not. 0.25 = 25% net imbalance
-    # (VPIN-like). Env HUNT_CVD_DIV_RATIO.
-    cvd_div_ratio: float = 0.25
+    # notional), not an absolute $. This IS the VPIN construction (imbalance ÷
+    # volume) §5.3 grounds on — a dimensionless net-imbalance share in [0,1], so
+    # it is cross-instrument BY CONSTRUCTION (15% imbalance is 15% on BTC and on
+    # an alt; the normalization already does what §5.3 exists for). 0.15 is a
+    # principled universal default, not a guessed absolute; the distribution is
+    # unimodal (no two populations → no gap to hunt), so it is validated by
+    # fire-rate (should flag ~5-10% of qualifying bars, not 40%), not calibrated
+    # by gap-finding. Env HUNT_CVD_DIV_RATIO.
+    cvd_div_ratio: float = 0.15
 
     @classmethod
     def from_defaults(cls, raw: Mapping[str, Any] | None = None) -> MapsConfig:

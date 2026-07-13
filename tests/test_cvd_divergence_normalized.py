@@ -57,6 +57,14 @@ def test_min_ratio_gates() -> None:
     assert _detect_cvd_divergence(flow, price_change_pct=-0.5, window_seconds=60, min_ratio=0.15) == "bullish_div"
 
 
+def test_config_default_ratio_is_015() -> None:
+    # Principled universal default (dimensionless net-imbalance share), not a
+    # guessed absolute — validated by fire-rate, not gap-hunting (unimodal dist).
+    from hunt_core.maps.config import MapsConfig
+
+    assert MapsConfig().cvd_div_ratio == 0.15
+
+
 def test_window_excludes_older_trades() -> None:
     # A strong sell burst 200s ago: in-window at 300s (fires), out at 60s (nothing).
     burst = _sell_heavy(1.0)

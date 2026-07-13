@@ -472,7 +472,7 @@ def _detect_cvd_divergence(
     *,
     price_change_pct: float | None,
     window_seconds: int = 60,
-    min_ratio: float = 0.25,
+    min_ratio: float = 0.15,
 ) -> str | None:
     """Flag CVD↔price divergence using a VOLUME-RELATIVE imbalance ratio.
 
