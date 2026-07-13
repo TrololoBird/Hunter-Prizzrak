@@ -201,7 +201,12 @@ def compute_interest_zones(
         # for backward-compatible consumers.
         def _ladder(zones_side: list[dict[str, Any]], *, nearer: Any) -> list[dict[str, Any]]:
             ranked = sorted(zones_side, key=lambda z: _zone_rank(z, nearer=nearer(z)), reverse=True)[:3]
-            ranked.sort(key=lambda z: z["hi"], reverse=True)  # nearest-to-price first
+            # Nearest-to-price first — but "nearest" is side-dependent. Sorting by
+            # z["hi"] desc is only right for LONG rungs (below price → highest hi is
+            # nearest); for SHORT rungs (above price) it put the FARTHEST rung first
+            # (Д1=farthest). Sort by the side-aware `nearer` function already passed
+            # (higher = nearer on both sides), so Д1 is always the nearest limit.
+            ranked.sort(key=lambda z: nearer(z), reverse=True)
             return [{"lo": float(z["lo"]), "hi": float(z["hi"]), "touches": int(z.get("touches") or 0)}
                     for z in ranked]
 
