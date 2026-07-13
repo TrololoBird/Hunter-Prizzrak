@@ -189,7 +189,14 @@ def _cluster_levels(levels: list[float], *, pct_gap: float = _CLUSTER_PCT_GAP) -
         return []
     if len(levels) <= 4:
         return [levels]
-    gaps = [(levels[i] - levels[i + 1]) / max(levels[i], 0.01) * 100 for i in range(len(levels) - 1)]
+    # Absolute gaps so clustering is order-agnostic: the support path feeds
+    # DESCENDING levels (gaps were positive) but the resistance path feeds
+    # ASCENDING levels — signed gaps were then all-negative, so no split ever fired
+    # and resistance «зона N» rows silently never rendered. abs() fixes both.
+    gaps = [
+        abs(levels[i] - levels[i + 1]) / max(abs(levels[i]), 0.01) * 100
+        for i in range(len(levels) - 1)
+    ]
     # Split at all gaps wider than pct_gap — if none, take the single widest.
     split_indices = [i for i, g in enumerate(gaps) if g > pct_gap]
     if not split_indices:
