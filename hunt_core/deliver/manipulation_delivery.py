@@ -33,6 +33,22 @@ from hunt_core.track.tracker import has_active_signal, register_signal_open
 _LOG = logging.getLogger(__name__)
 
 _MIN_RR = 1.2
+# Minimum structural sweep depth (|swept_level − sweep_extreme| / swept_level) for a
+# dip to count as a liquidity-grab «свип». Grounded on real bars: the corpus winners
+# swept ≥1%, while the junk O/USDT A-long «swept» only 0.07–0.34% (chart noise). 0.5%
+# sits in the clean gap between the two. Pattern A3 is exempt (no real sweep).
+_MIN_SWEEP_DEPTH_PCT = 0.005
+# Measured-move fallback target, per detection frame. When the structural ladder has NO
+# pool within the cap (only far dead peaks after a round-trip), abstaining drops real
+# author trades whose target is a MEASURED % move, not a structural pool (grounded vs the
+# «Owner of SHORT» channel: ESPORTS +160%, UNI, VELVET, SAFE — «10-20% чистого»). Project
+# a frame-scaled measured target as the fallback. Only fires when NO structural target
+# exists → signals that already have reachable pools (e.g. the O/USDT case) are unchanged.
+# The R:R gate below still filters it.
+_MEASURED_MOVE_BY_TF: dict[str, float] = {
+    "1w": 0.60, "1d": 0.50, "4h": 0.30, "1h": 0.18, "15m": 0.12, "5m": 0.10,
+}
+_MEASURED_MOVE_DEFAULT = 0.15
 # We deliberately hunt VERY large manipulation moves, so a 20% target cap rejected
 # exactly the biggest, most valuable setups; it was raised to 60%. But a single cap
 # cannot serve every scale: the method's own numbers are 100%, 160%, «больше 400%»
@@ -122,6 +138,18 @@ def _stop_buffer(meso_bars: list[list[float]], *, pattern_a3: bool = False) -> f
 def _geometry(setup: ManipulationSetup, *, price: float, stop_buffer: float | None = None) -> dict[str, Any] | None:
     if setup.target is None:
         return None  # no real structural target — abstain, never fabricate one
+    # A real «свип» must actually snag liquidity («снизу ликвидность сняли»). A sub-
+    # _MIN_SWEEP_DEPTH_PCT dip below the level is chart noise, not a sweep — treating
+    # it as one bolts a fixed stop buffer (3%) onto a 0.07–0.34% wiggle, so the stop
+    # sits 15–45× the sweep depth below entry and every добор lands under the extreme
+    # (grounded by replaying the real detector on live O/USDT bars). The genuine corpus
+    # winners all swept ≥1% (ZEREBRO 1.0–2.6%, ESPORTS 2–27%, BSB 4–11%), so this
+    # gate separates junk from the real liquidity grabs. Pattern A3 has no real sweep
+    # (its extreme is a synthetic ATR offset below the accumulation low) → exempt.
+    if setup.pattern_type != "A3" and setup.swept_level > 0:
+        sweep_depth = abs(setup.swept_level - setup.sweep_extreme) / setup.swept_level
+        if sweep_depth < _MIN_SWEEP_DEPTH_PCT:
+            return None
     # Full structural ladder (course: пулы ликвидности снизу/сверху). R:R is measured
     # to the DEEPEST reachable pool within the scale's target cap — the «среднесрочная
     # цель» — while the nearer levels are shown as partial take-profits. A wide stop
@@ -134,10 +162,25 @@ def _geometry(setup: ManipulationSetup, *, price: float, stop_buffer: float | No
         ladder = [t for t in ladder if t < price and abs(price - t) / price * 100.0 <= max_target_pct]
     else:
         ladder = [t for t in ladder if t > price and abs(price - t) / price * 100.0 <= max_target_pct]
-    primary_target = (min(ladder) if setup.direction == "short" else max(ladder)) if ladder else setup.target
-    # Ближайшая цель = первая частичная фиксация (TP1). Именно она определяет,
-    # окупается ли риск на первом же снятии — R:R до дальнего пула этого не показывает.
-    nearest_target = (max(ladder) if setup.direction == "short" else min(ladder)) if ladder else setup.target
+    projected = False
+    if ladder:
+        # Ближайшая цель = первая частичная фиксация (TP1). Именно она определяет,
+        # окупается ли риск на первом же снятии — R:R до дальнего пула этого не показывает.
+        primary_target = min(ladder) if setup.direction == "short" else max(ladder)
+        nearest_target = max(ladder) if setup.direction == "short" else min(ladder)
+    else:
+        st = setup.target
+        st_reachable = st is not None and st > 0 and abs(price - st) / price * 100.0 <= max_target_pct
+        if st_reachable:
+            primary_target = nearest_target = st  # reachable structural target — unchanged
+        else:
+            # setup.target is absent or a far dead peak beyond cap → project a frame-scaled
+            # MEASURED move (the author's %-target) instead of abstaining. See
+            # _MEASURED_MOVE_BY_TF. This does NOT override a reachable structural level.
+            mm = _MEASURED_MOVE_BY_TF.get(str(setup.meso_tf or ""), _MEASURED_MOVE_DEFAULT)
+            primary_target = nearest_target = price * (1 + mm) if setup.direction == "long" else price * (1 - mm)
+            ladder = [primary_target]
+            projected = True
     target_dist_pct = abs(price - primary_target) / price * 100.0
     if target_dist_pct > max_target_pct:
         return None  # цель нереалистично далеко — пропускаем
@@ -186,6 +229,7 @@ def _geometry(setup: ManipulationSetup, *, price: float, stop_buffer: float | No
         "primary_target": primary_target,
         "nearest_target": nearest_target,
         "ladder": ladder,
+        "projected": projected,
     }
 
 
@@ -288,6 +332,9 @@ def _tp_ladder_line(geo: dict[str, Any], setup: ManipulationSetup) -> str:
         return f"🎯 Цель (структурная зона): <code>{fmt_price(setup.target)}</code>"
     ladder = sorted(ladder, reverse=(setup.direction == "short"))
     tps = " · ".join(f"TP{i+1} <code>{fmt_price(t)}</code>" for i, t in enumerate(ladder[:6]))
+    if geo.get("projected"):
+        # No structural pool in reach — this is a measured %-move projection, not a pool.
+        return f"🎯 Цель (проекция движения, нет структурного пула): {tps}"
     return f"🎯 Тейки (пулы ликвидности): {tps}"
 
 
