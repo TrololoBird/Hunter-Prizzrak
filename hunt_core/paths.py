@@ -7,6 +7,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
 SNAPSHOTS = DATA / "snapshots"
+# Persisted HTF (1h/4h/1d) kline frames — reloaded on restart so the cold cache
+# has a fresh-enough fallback instead of a stale bootstrap seed, collapsing the
+# post-restart HTF-staleness blackout while REST backfill catches up.
+HTF_FRAMES = DATA / "htf_frames"
 
 WATCHLIST = DATA / "hunt_watchlist.json"
 SIGNAL_STATE = DATA / "hunt_signal_state.json"

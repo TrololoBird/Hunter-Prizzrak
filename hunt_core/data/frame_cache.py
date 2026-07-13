@@ -5,6 +5,8 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import polars as pl
@@ -31,6 +33,33 @@ _DEFAULT_KLINE_FRAME_MAX_AGE_S = 3600.0
 # Cap for WS-merged kline history per (symbol, tf) — covers the deepest
 # structure lookback (1500 bars) with headroom, bounds memory.
 _KLINE_MERGE_CAP = 2000
+
+# HTF timeframes worth persisting across a restart: REST-only (WS captures only
+# 5m/15m) and slow to warm, so a cold cache serves a stale bootstrap seed for
+# hours until backfill catches up. 1m/5m/15m warm fast and are not persisted.
+_HTF_PERSIST_TFS: tuple[str, ...] = ("1h", "4h", "1d")
+
+
+def _frame_newest_ms(df: pl.DataFrame) -> int | None:
+    """Epoch-ms of the newest bar in a kline frame, or None if unknowable.
+
+    Kline frames store time columns as tz-aware Datetime (factory.finalize), but
+    tolerate a raw epoch-ms fallback for robustness across schema drift.
+    """
+    for col in ("close_time", "time", "open_time"):
+        if col not in df.columns:
+            continue
+        try:
+            val = df[col].max()
+        except Exception:
+            continue
+        if val is None:
+            continue
+        if isinstance(val, datetime):
+            return int(val.timestamp() * 1000)
+        if isinstance(val, (int, float)):
+            return int(val)
+    return None
 
 
 @dataclass(slots=True)
@@ -137,6 +166,84 @@ class SymbolFrameCache:
         self._frames.setdefault(sym, {}).update(bucket)
         self._frame_ts.setdefault(sym, {}).update(ts_bucket)
         self._bootstrapped.add(sym)
+
+    def persist_htf_frames(self, directory: str | Path) -> int:
+        """Write HTF (1h/4h/1d) frames to disk (one parquet per TF, symbol column).
+
+        Called periodically + on shutdown so a restart can reload a fresh-enough
+        HTF fallback instead of serving a stale bootstrap seed for hours. Best
+        effort — never raises. Returns the number of (symbol, TF) frames written.
+        """
+        try:
+            directory = Path(directory)
+            directory.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            LOG.warning("htf_persist_mkdir_failed | dir=%s err=%s", directory, exc)
+            return 0
+        written = 0
+        for tf in _HTF_PERSIST_TFS:
+            parts: list[pl.DataFrame] = []
+            for sym, frames in self._frames.items():
+                df = frames.get(tf)
+                if isinstance(df, pl.DataFrame) and not df.is_empty() and "symbol" not in df.columns:
+                    parts.append(df.with_columns(pl.lit(sym).alias("symbol")))
+            path = directory / f"htf_{tf}.parquet"
+            if not parts:
+                continue
+            # Align to the majority schema — WS-merged frames can drift a column,
+            # and pl.concat needs identical column sets. Drop the oddballs rather
+            # than fail the whole TF (they re-persist once REST normalizes them).
+            ref_cols = parts[0].columns
+            aligned = [p for p in parts if p.columns == ref_cols]
+            try:
+                pl.concat(aligned, how="vertical_relaxed").write_parquet(path)
+                written += len(aligned)
+            except Exception as exc:
+                LOG.debug("htf_persist_write_failed | tf=%s err=%s", tf, exc)
+        return written
+
+    def load_htf_frames(self, directory: str | Path, *, now_ms: int | None = None) -> int:
+        """Reload persisted HTF frames into the cache at startup.
+
+        Only frames whose newest bar is within the TF's fallback max-age are
+        loaded — a long downtime is skipped so genuinely-stale data is never
+        served (the bar-timestamp staleness gate would reject it anyway; this
+        just avoids the churn). Frames are stamped fresh for the monotonic
+        WS-fallback age guard. Best effort — never raises. Returns frames loaded.
+        """
+        directory = Path(directory)
+        if not directory.exists():
+            return 0
+        if now_ms is None:
+            from hunt_core import clock
+
+            now_ms = int(clock.now_ms())
+        now_mono = time.monotonic()
+        loaded = 0
+        for tf in _HTF_PERSIST_TFS:
+            path = directory / f"htf_{tf}.parquet"
+            if not path.exists():
+                continue
+            try:
+                combined = pl.read_parquet(path)
+            except Exception as exc:
+                LOG.debug("htf_load_read_failed | tf=%s err=%s", tf, exc)
+                continue
+            if combined.is_empty() or "symbol" not in combined.columns:
+                continue
+            max_age_ms = _KLINE_FRAME_MAX_AGE_S.get(tf, _DEFAULT_KLINE_FRAME_MAX_AGE_S) * 1000
+            for sym_df in combined.partition_by("symbol"):
+                sym = str(sym_df["symbol"][0]).upper()
+                df = sym_df.drop("symbol")
+                if df.is_empty():
+                    continue
+                newest = _frame_newest_ms(df)
+                if newest is not None and now_ms - newest > max_age_ms:
+                    continue  # genuinely stale — let the fresh REST fetch repopulate
+                self._frames.setdefault(sym, {})[tf] = df
+                self._frame_ts.setdefault(sym, {})[tf] = now_mono
+                loaded += 1
+        return loaded
 
     def seed_enrichment(self, symbol: str, pack: dict[str, Any]) -> None:
         if not isinstance(pack, dict) or not pack:

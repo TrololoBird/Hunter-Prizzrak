@@ -469,6 +469,19 @@ async def run_loop(
     _wd_task = asyncio.create_task(_watchdog_rearmer()) if not once else None
     _pinned_brief_sent = False
     _last_checkpoint = time.monotonic()
+    _last_htf_persist = time.monotonic()
+    # Reload persisted HTF (1h/4h/1d) frames so a restart has a fresh-enough
+    # fallback instead of a stale bootstrap seed — collapses the post-restart
+    # HTF-staleness blackout while REST backfill catches up. Best effort.
+    try:
+        from hunt_core.data.frame_cache import get_frame_cache as _gfc
+        from hunt_core.paths import HTF_FRAMES as _HTF_FRAMES
+
+        _n_htf = _gfc().load_htf_frames(_HTF_FRAMES)
+        if _n_htf:
+            LOG.info("htf_frames_reloaded", frames=_n_htf)
+    except Exception:
+        LOG.exception("htf_frames_reload_failed")
     _degraded_streak = 0  # consecutive ticks the whole universe failed data assembly
     try:
         tick_ctx: dict[str, Any] | None = None
@@ -986,6 +999,19 @@ async def run_loop(
                         _last_checkpoint = time.monotonic()
                     except Exception:
                         LOG.exception("session_checkpoint_save_failed")
+                # Persist HTF frames (~every 5 min) so a hard-kill restart still
+                # has a recent fallback — periodic because SIGKILL skips `finally`.
+                if time.monotonic() - _last_htf_persist >= 300.0:
+                    try:
+                        from hunt_core.data.frame_cache import get_frame_cache as _gfc
+                        from hunt_core.paths import HTF_FRAMES as _HTF_FRAMES
+
+                        _n = _gfc().persist_htf_frames(_HTF_FRAMES)
+                        _last_htf_persist = time.monotonic()
+                        if _n:
+                            LOG.debug("htf_frames_persisted", frames=_n)
+                    except Exception:
+                        LOG.exception("htf_frames_persist_failed")
                 save_pump_history(pump_store)
                 buffer_tick_rows(rows)
                 if (
@@ -1020,6 +1046,16 @@ async def run_loop(
                     break
                 await asyncio.sleep(min(1.0, remaining))
     finally:
+        # Capture the freshest HTF frames on graceful shutdown so the next start
+        # reloads current data (periodic persist covers SIGKILL). Best effort.
+        if not once:
+            try:
+                from hunt_core.data.frame_cache import get_frame_cache as _gfc
+                from hunt_core.paths import HTF_FRAMES as _HTF_FRAMES
+
+                _gfc().persist_htf_frames(_HTF_FRAMES)
+            except Exception:
+                LOG.exception("htf_frames_persist_shutdown_failed")
         if _wd_task is not None:
             _wd_task.cancel()
         faulthandler.cancel_dump_traceback_later()
