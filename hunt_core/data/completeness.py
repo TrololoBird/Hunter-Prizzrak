@@ -166,12 +166,13 @@ DELIVERY_MARKET_KEYS_FAST: tuple[str, ...] = (
     "basis_5m",
 )
 
+# Full/hot-tier extension. Only keys NOT already in _FAST belong here — basis_5m,
+# oi_z and gls_z were duplicated, so the audit loop checked them twice and emitted
+# each violation string twice (DATA-2). The pack dict later keeps only the last
+# write, but the completeness audit iterates the raw tuple.
 DELIVERY_MARKET_KEYS_FULL: tuple[str, ...] = DELIVERY_MARKET_KEYS_FAST + (
     "oi_chg_5m",
     "ls_1h",
-    "basis_5m",
-    "oi_z",
-    "gls_z",
 )
 
 _DELIVERY_KEY_ALIASES: dict[str, tuple[str, ...]] = {
