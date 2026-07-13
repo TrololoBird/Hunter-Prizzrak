@@ -94,18 +94,23 @@ def build_confluence_grid(row: dict[str, Any]) -> list[dict[str, Any]]:
     # --- Multi-level deep zones: collect all swing lows below price as "deeper support" ---
     deeper_supports: list[float] = []
     deeper_resistances: list[float] = []
+    # Bound the deep lists to the SAME near-term window as the per-TF levels
+    # (_GRID_MAX_DISTANCE_PCT). Without this the "выше"/"глубже" lists pulled in
+    # every swing high/low regardless of distance, so an HTF swing / psychological
+    # level +24% away (e.g. 79455 vs a 63937 price, past a 3300pt gap of no nodes)
+    # rendered as near-term structure — low-utility noise on an intraday map.
     for g in grid:
         lows = g.get("_all_swing_lows")
         if isinstance(lows, list):
             for p in lows:
                 if isinstance(p, (int, float)) and p > 0 and p < price:
-                    if p not in deeper_supports:
+                    if p not in deeper_supports and _level_within_range(float(p), price):
                         deeper_supports.append(p)
         highs = g.get("_all_swing_highs")
         if isinstance(highs, list):
             for p in highs:
                 if isinstance(p, (int, float)) and p > 0 and p > price:
-                    if p not in deeper_resistances:
+                    if p not in deeper_resistances and _level_within_range(float(p), price):
                         deeper_resistances.append(p)
     if deeper_supports:
         # Nearest-first, de-duplicated (no per-TF repeats, no ~0.02% pairs).
