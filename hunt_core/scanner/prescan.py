@@ -677,8 +677,9 @@ def suggested_watch_bias(
         return "short"
     if change_24h_pct <= -extreme_pct:
         return "long"
-    if abs(change_24h_pct) >= hot_pct:
-        return "both"
+    # Below the extreme thresholds the bias is undirected regardless of hot_pct —
+    # the old `if abs(change_24h_pct) >= hot_pct: return "both"` returned the same
+    # value as the fallthrough, so it was dead. (SCAN-3)
     return "both"
 
 

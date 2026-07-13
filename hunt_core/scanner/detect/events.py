@@ -341,8 +341,8 @@ def rejection_at_peak(df: pl.DataFrame, peak_high: float) -> bool:
     o_peak = float(df_c["open"][peak_idx])
     if c_peak >= o_peak:
         return False  # not a rejection candle (close >= open)
-    if peak_idx == 0:
-        return False
+    # (peak_idx == 0 is already excluded by the `peak_idx < 3` guard above —
+    # the old peak_idx == 0 check here was dead. SCAN-3)
     c_prev = float(df_c["close"][peak_idx - 1])
     if c_peak >= c_prev:
         return False  # close didn't drop below prior close
