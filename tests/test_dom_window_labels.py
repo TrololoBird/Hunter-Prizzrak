@@ -44,6 +44,20 @@ def test_imbalance_line_disclaims_the_bands() -> None:
     assert "полосы выше" in imb_line
 
 
+def test_no_now_plus_stale_contradiction_at_20s() -> None:
+    # 20s is past the 15s actionability gate but under the old 30s label cutoff —
+    # the header must NOT say "сейчас" while the body warns "устарела".
+    import copy
+
+    row = copy.deepcopy(_ROW)
+    row["freshness"] = {"dom_age_s": 20.0}
+    out = format_book_walls_section(row)
+    header = out.splitlines()[0]
+    assert "сейчас" not in header
+    assert "20с назад" in header
+    assert "устарела" in out  # the stale flag is present — now consistent
+
+
 def test_depth_bands_show_their_price_window() -> None:
     out = format_book_walls_section(_ROW)
     # Each band shows lo–hi so its window is explicit, not a single price.

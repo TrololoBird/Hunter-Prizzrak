@@ -687,7 +687,11 @@ def format_book_walls_section(row: dict[str, Any]) -> str:
     # current is the same defect class as a wrong side, just in time.
     dom_age_f = float(dom_age) if dom_age is not None else None
     dom_stale = dom_age_f is not None and dom_age_f > _DOM_ACTIONABLE_MAX_AGE_S
-    if dom_age_f is not None and dom_age_f > 30:
+    # Label threshold is the SAME as the staleness gate: past it the header must
+    # not say "сейчас" while the body warns "устарела" — that 15–30s window printed
+    # both at once (a milder "stale shown as current"). "сейчас" now means ≤ the
+    # actionable age; beyond it the header shows the age, consistent with the flag.
+    if dom_age_f is not None and dom_age_f > _DOM_ACTIONABLE_MAX_AGE_S:
         dom_label = f"DOM · {dom_age_f:.0f}с назад"
     else:
         dom_label = "DOM · сейчас"
