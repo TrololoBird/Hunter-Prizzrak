@@ -422,16 +422,32 @@ def format_liquidation_map_section(row: dict[str, Any]) -> str:
 
     clusters = market.get("liq_heatmap_clusters")
     clusters = clusters if isinstance(clusters, list) else []
+    cur_price = 0.0
+    try:
+        cur_price = float(row.get("price") or market.get("mark_price") or 0.0)
+    except (TypeError, ValueError):
+        cur_price = 0.0
 
-    def _cluster_size_tail(price: float) -> str:
+    def _cluster_size_tail(price: float, *, side: str) -> str:
         # Distance % alone ("0.2%") says nothing about how much sits there. Attach
         # the nearest cluster's notional + intensity so the magnet's pull is legible.
+        # SIDE-AWARE: long-liquidation mass sits BELOW price, short-squeeze mass
+        # ABOVE. The old side-agnostic nearest-by-abs-distance attached the SAME
+        # central cluster to BOTH lines, printing an identical (and misleading)
+        # "$X · Y% плотн." on the long and short rows. Restrict each row to
+        # clusters on its own side of the current price.
         best = None
         best_d = None
         for c in clusters:
             if not isinstance(c, dict) or c.get("price") is None:
                 continue
-            d = abs(float(c["price"]) - price)
+            c_price = float(c["price"])
+            if cur_price > 0:
+                if side == "long" and c_price >= cur_price:
+                    continue
+                if side == "short" and c_price <= cur_price:
+                    continue
+            d = abs(c_price - price)
             if best_d is None or d < best_d:
                 best, best_d = c, d
         if best is None or price <= 0 or best_d is None or best_d / price > 0.005:
@@ -454,14 +470,14 @@ def format_liquidation_map_section(row: dict[str, Any]) -> str:
         dist = f" ({pull:.1f}%)" if pull is not None else ""
         lines.append(
             f"Лонг-ликвидации ↓ <code>{_fmt_price(float(nearest_long))}</code>{dist}"
-            f"{_cluster_size_tail(float(nearest_long))}"
+            f"{_cluster_size_tail(float(nearest_long), side='long')}"
         )
     if nearest_short is not None:
         pull = market.get("liq_magnet_pull_short_pct")
         dist = f" ({pull:.1f}%)" if pull is not None else ""
         lines.append(
             f"Шорт-сквиз ↑ <code>{_fmt_price(float(nearest_short))}</code>{dist}"
-            f"{_cluster_size_tail(float(nearest_short))}"
+            f"{_cluster_size_tail(float(nearest_short), side='short')}"
         )
     if cascade:
         label = "лонг-флаш" if cascade == "long_flush" else "шорт-сквиз"
