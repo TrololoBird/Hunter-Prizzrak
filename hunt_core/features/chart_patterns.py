@@ -64,8 +64,11 @@ def detect_double_bottom(work: pl.DataFrame, lookback: int = 50) -> dict[str, An
     if work is None or work.is_empty() or "low" not in work.columns or "high" not in work.columns:
         return dict(_EMPTY)
     frame = _slice_work(work, lookback)
-    _, sl_mask = _swing_points(frame, n=_SWING_N, include_unconfirmed_tail=False)
-    _, sh_mask = _swing_points(frame, n=_SWING_N, include_unconfirmed_tail=False)
+    # _swing_points returns (swing_HIGH mask, swing_LOW mask). The high mask was
+    # mis-unpacked into sh_mask (the low mask both times), so `highs` collected
+    # prices at swing-LOW indices → mid_highs between two consecutive swing lows was
+    # always empty → double_bottom never fired (FEAT-2). One call, correct order.
+    sh_mask, sl_mask = _swing_points(frame, n=_SWING_N, include_unconfirmed_tail=False)
     lows = _swing_prices(frame, sl_mask, price_col="low")
     highs = _swing_prices(frame, sh_mask, price_col="high")
     if len(lows) < 2:
