@@ -280,6 +280,20 @@ async def assemble_analyst_tick(
         "tick_age_s": round((now - tick_dt).total_seconds(), 1),
         "dom_age_s": round(dom_age_s, 1) if dom_age_s is not None else None,
     }
+    # Telemetry for the DOM actionability-staleness calibration (#6). This is the
+    # SAME dom_age_s that _sections.py flags against HUNT_DOM_ACTIONABLE_MAX_AGE_S,
+    # so the observed distribution here is exactly the population the threshold
+    # governs. has_dom_ts=1 marks a genuine microstructure fetched_at (the only
+    # rows where staleness is meaningful); =0 is the tick-age fallback (fresh DOM,
+    # no carried snapshot). Greppable as `dom_age_obs` → feed a percentile (p95),
+    # filtered to has_dom_ts=1, into the default. Line kept out of the hot path.
+    if dom_age_s is not None:
+        LOG.info(
+            "dom_age_obs | symbol=%s dom_age_s=%.1f has_dom_ts=%d",
+            sym,
+            dom_age_s,
+            1 if dom_ts else 0,
+        )
 
     from hunt_core.toolkit.forecast import stamp_forecasts_on_row
 
