@@ -20,11 +20,17 @@ def _worst_entry_edge(entry_lo: float, entry_hi: float, *, direction: str, price
 _fmt_price = fmt_price
 
 # Beyond this age a carried DOM/microstructure snapshot is context-only, never a
-# touch-entry basis (#6). Carry spans a few ticks, so this sits well above the 5s
-# REST TTL but below a full minute — tune via HUNT_DOM_ACTIONABLE_MAX_AGE_S.
+# touch-entry basis (#6). CALIBRATED, not guessed: over a 45-min live run the
+# rendered dom_age_s distribution (42 genuine cross-venue samples) was min 2.2s /
+# p50 5.2 / p90 9.2 / p95 12.7 / p99 54.2 — 93% under 10s (the render-pipeline
+# floor is ~2s), then a thin genuinely-stale carry tail (30-90s). p95≈12.7s
+# separates normal carry-reuse from that tail; rounded to 15s to absorb the ~1-2s
+# lift from stamping fetched_at at the primary's fetch time (cross.py) rather than
+# the merge moment. The old 45s guess sat past p99 and effectively never fired.
+# Tune via HUNT_DOM_ACTIONABLE_MAX_AGE_S.
 import os as _os
 
-_DOM_ACTIONABLE_MAX_AGE_S = float(_os.getenv("HUNT_DOM_ACTIONABLE_MAX_AGE_S", "45") or 45.0)
+_DOM_ACTIONABLE_MAX_AGE_S = float(_os.getenv("HUNT_DOM_ACTIONABLE_MAX_AGE_S", "15") or 15.0)
 
 # Canonical venue short-codes. One scheme everywhere (was three: a `[:3].upper()`
 # path rendered binance→BIN / bybit→BYB / bitget→BIT — the last ambiguous with
