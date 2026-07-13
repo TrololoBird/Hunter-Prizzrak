@@ -83,7 +83,12 @@ def build_dump_forecast(row: dict[str, Any]) -> dict[str, Any] | None:
 
     target_lo = min(targets)
     target_hi = max(targets)
-    expected_move_pct = (target_lo - price) / price * 100.0
+    # Primary = NEAREST target, symmetric with the long builders (which use
+    # min(upward) = nearest-above). For downward targets the nearest is the LARGEST
+    # value (closest below price) = target_hi; min() is the deepest/farthest zone,
+    # so using it made the short's expected_move systematically overstate the drop
+    # (FCAST-1). lo/hi still bound the zone.
+    expected_move_pct = (target_hi - price) / price * 100.0
     confidence = _factor_confidence(factors, max_factors=5)
 
     return {
@@ -91,7 +96,7 @@ def build_dump_forecast(row: dict[str, Any]) -> dict[str, Any] | None:
         "direction": "short",
         "target_lo": round(target_lo, 6),
         "target_hi": round(target_hi, 6),
-        "target_primary": round(target_lo, 6),
+        "target_primary": round(target_hi, 6),
         "expected_move_pct": round(expected_move_pct, 2),
         "confidence": confidence,
         "factors": factors,
