@@ -1,6 +1,24 @@
 # ADR 0001 — WeightGovernor: admission control over reactive backoff
 
-**Status:** Proposed (design; implement after WS-1.1 heartbeat proves the bot observable)
+**Status:** Implemented 2026-07-12 (core; live 2h validation gate pending next bot restart).
+Implementation notes: (a) RESERVE re-scoped per REVIEW_market.md — fstream market streams are
+weight-FREE; reserve covers only ccxt.pro REST depth-snapshot seeds + WS-API handshakes
+(`HUNT_WEIGHT_RESERVE`, default 200; TARGET = floor(2400×`HUNT_WEIGHT_MARGIN` 0.75) − 200 = 1600).
+(b) Registry: `hunt_core/market/weight_registry.py`, parameter-aware (klines/depth scale with
+limit); `/futures/data/*` charged nominal weight 1 + own window; funding history gets its
+500/5min side-pool bucket. (c) `force_floor` deleted; header is an advisory drift-check
+(`hunt_weight_drift_high`) + the `header_stop` fuse. (d) Demand shaping in
+`HuntLoadPlanner.plan_tick` drops lowest-priority non-pinned symbols to fit
+`target_weight_per_tick` (acceptance test: `test_planner_never_exceeds_per_tick_budget`).
+(e) QoS: background context families (`hot_enrich`, `path_backfill`) admit under a 0.8 ceiling
+share. (f) Push-first FULLY delivered (second pass, same day): raw `/fapi/v1/klines` 12-element rows on
+the REST path + `HuntProBinanceFutures.handle_ohlcv` extends parsed WS rows with the payload's
+T/q/n/V/Q → frames carry REAL taker/quote fields (this also fixed a pre-existing silent defect:
+ccxt truncation had zero-filled `taker_buy_base_volume` everywhere, degenerating `delta_ratio`
+to 0 and bar delta to −volume). `resolve_kline_map` serves 1m cache-first behind four gates
+(coverage / tail continuity / freshness / per-bar fidelity); duplicate-time merge resolves by
+`num_trades` so a partial mid-candle WS row can never overwrite a closed bar (bar immutability —
+no-lookahead review finding, fixed + pinned by tests).
 **Scope:** `hunt_core/market/**` (rate_limit, ccxt_rest, capacity, client, streams), `hunt_core/data/universe.py`, the cycle loop's background loops.
 **Supersedes the reactive framing of** WS-1.2–1.6 in the remediation plan.
 
