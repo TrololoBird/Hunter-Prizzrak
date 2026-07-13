@@ -797,9 +797,14 @@ def format_book_walls_section(row: dict[str, Any]) -> str:
         lean = "перевес покупателей" if imb_f > 0.15 else ("перевес продавцов" if imb_f < -0.15 else "баланс")
         # Window label matters: this is TOP-OF-BOOK (первые ~20 уровней у цены),
         # while the «Покупка/Продажа» bands above aggregate WIDE price bins — the
-        # two can legitimately disagree (huge ask wall 0.3% away vs bid-heavy top),
-        # and without the label that reads as a contradiction.
-        lines.append(f"Дисбаланс верха стакана (у цены): <code>{imb_f:+.3f}</code> ({lean})")
+        # two can legitimately disagree (huge ask wall 0.3% away vs bid-heavy top).
+        # The explicit «≠ полосы выше» stops a reader from deriving this figure by
+        # hand from the two band notionals above and seeing a contradiction — they
+        # are different windows, not the same number computed twice.
+        lines.append(
+            f"Дисбаланс верха стакана (первые уровни, ≠ полосы выше): "
+            f"<code>{imb_f:+.3f}</code> ({lean})"
+        )
     maps = row.get("maps") or {}
     ob = maps.get("orderbook") if isinstance(maps, dict) else None
     if isinstance(ob, dict):
