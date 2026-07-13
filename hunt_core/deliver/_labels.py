@@ -101,14 +101,24 @@ _STRONG_SIGNAL_PHASES = frozenset(
 
 
 def fmt_price(value: float | None) -> str:
+    # Magnitude-adaptive precision: keep ~5-6 significant figures without printing
+    # below a plausible tick. A flat .3f rendered BTC as 63937.750 / an
+    # invalidation as 60453.476 — three sub-tick digits (BTC perp tick is 0.1),
+    # false precision the eye reads as spurious exactness. Large prices therefore
+    # get fewer decimals; sub-dollar instruments keep enough to stay distinct.
     if value is None:
         return "—"
     v = float(value)
-    if abs(v) >= 100:
+    a = abs(v)
+    if a >= 10000:
+        return f"{v:.1f}"   # 63937.8 — 1 decimal ≈ major-perp tick
+    if a >= 1000:
+        return f"{v:.2f}"   # 2345.67
+    if a >= 100:
         return f"{v:.3f}"
-    if abs(v) >= 1:
+    if a >= 1:
         return f"{v:.4f}"
-    if abs(v) >= 0.01:
+    if a >= 0.01:
         return f"{v:.5f}"
     return f"{v:.6f}"
 
