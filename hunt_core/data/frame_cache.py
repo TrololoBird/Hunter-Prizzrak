@@ -28,6 +28,9 @@ _KLINE_FRAME_MAX_AGE_S: dict[str, float] = {
     "1w": 604800.0,  # 1 w
 }
 _DEFAULT_KLINE_FRAME_MAX_AGE_S = 3600.0
+# Cap for WS-merged kline history per (symbol, tf) — covers the deepest
+# structure lookback (1500 bars) with headroom, bounds memory.
+_KLINE_MERGE_CAP = 2000
 
 
 @dataclass(slots=True)
@@ -219,8 +222,41 @@ class SymbolFrameCache:
             return
         if df.is_empty():
             return
+        # MERGE into the REST-seeded history instead of replacing it: the WS
+        # window is ~200 bars, while structure analysis needs up to 1500 — the
+        # old replace semantics shrank the cached frame to a stub, so the
+        # REST-outage fallback in resolve_kline_map served almost nothing
+        # during the exact blackouts it exists for (2026-07-12 418 ban).
+        #
+        # Full fidelity: HuntProBinanceFutures extends parsed WS rows with the
+        # raw kline payload fields (T/q/n/V/Q) to the same 11-element layout as
+        # raw REST klines, so merged frames carry REAL taker/quote columns and
+        # can serve the feature path cache-first (collect.ws_kline_frame_serves
+        # still guards continuity/freshness/fidelity before serving).
+        existing = (self._frames.get(sym) or {}).get(tf)
+        if existing is not None and hasattr(existing, "is_empty") and not existing.is_empty():
+            try:
+                # Duplicate-time resolution: keep the row with the greater
+                # num_trades. Trades are monotonically non-decreasing within a
+                # candle, so the FINAL row always ties or wins — a partial
+                # mid-candle row left behind by a WS drop can never overwrite a
+                # closed bar (bar immutability / replay determinism; found by
+                # the no-lookahead review). On ties the later (WS) row wins.
+                df = (
+                    pl.concat([existing, df], how="vertical_relaxed")
+                    .sort(["time", "num_trades"], maintain_order=True)
+                    .unique(subset=["time"], keep="last")
+                    .sort("time")
+                    .tail(_KLINE_MERGE_CAP)
+                )
+            except Exception as exc:
+                LOG.debug("frame_cache_ohlcv_merge_failed | sym=%s tf=%s err=%s", sym, tf, exc)
+        now = time.monotonic()
         self._frames.setdefault(sym, {})[tf] = df
-        self._ws_at[sym] = time.monotonic()
+        self._ws_at[sym] = now
+        # A WS update IS freshness: without this stamp get_kline_frame aged the
+        # frame from its REST seed time and refused to serve it mid-outage.
+        self._frame_ts.setdefault(sym, {})[tf] = now
 
     async def refresh_enrichment_batch(
         self,

@@ -131,7 +131,9 @@ async def refresh_dominance(*, ttl_s: int = _DEFAULT_TTL_S) -> None:
                 payload = await resp.json()
             snap = _parse_global(payload)
             if snap is not None:
-                snap["stable_cd"] = await _fetch_stable_cd(session, float(snap.get("total") or 0.0))
+                stable_cd = await _fetch_stable_cd(session, float(snap.get("total") or 0.0))
+                if stable_cd is not None:
+                    snap["stable_cd"] = stable_cd
         if snap is not None:
             snap.pop("total", None)  # derived; not needed in the persisted snapshot
             snaps.append(snap)

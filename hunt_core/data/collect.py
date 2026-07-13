@@ -513,7 +513,7 @@ _fetch_rest_pack = fetch_rest_pack
 
 
 
-SnapshotTier = Literal["full", "fast", "hot"]
+SnapshotTier = Literal["full", "fast", "hot", "probe_lite"]
 
 PREMIUM_BATCH_TTL_S = 30.0
 FUNDING_BATCH_TTL_S = 30.0
@@ -527,6 +527,59 @@ FULL_KLINE_ORDER = ("1m", "5m", "15m", "1h", "4h", "1d", "1w")
 
 def _fetch_error_label(exc: BaseException) -> str:
     return f"fetch_failed:{type(exc).__name__}"
+
+
+def ws_kline_frame_serves(
+    df: Any,
+    need: int,
+    *,
+    interval_ms: int = 60_000,
+    max_close_age_s: float = 180.0,
+) -> bool:
+    """True when the WS-merged cached 1m frame can serve INSTEAD of REST.
+
+    Push-first (ADR-0001 pillar 4): a REST klines call is weight never spent —
+    but only when the cache is provably equivalent. Gates:
+    - coverage: >= ``need`` bars;
+    - continuity: the served tail has NO gaps (every open_time exactly
+      ``interval_ms`` after the previous — a WS outage hole forces REST);
+    - freshness: the last CLOSED bar's close_time is recent (stale WS → REST);
+    - fidelity: taker fields are real, not legacy zero-fill (zeros would
+      degenerate the orderflow delta — no-lookahead/quality guard).
+    """
+    try:
+        if df is None or df.is_empty() or df.height < max(1, int(need)):
+            return False
+        tail = df.tail(max(1, int(need)))
+        times = tail["time"].dt.epoch(time_unit="ms")
+        diffs = times.diff().drop_nulls()
+        if diffs.is_empty() or bool((diffs != interval_ms).any()):
+            return False
+        last_close = tail["close_time"].tail(1).item()
+        if not isinstance(last_close, datetime):
+            return False
+        from hunt_core import clock
+
+        if (clock.now_utc() - last_close).total_seconds() > max_close_age_s:
+            return False
+        if "taker_buy_base_volume" in tail.columns:
+            vol_sum = float(tail["volume"].sum() or 0.0)
+            taker_sum = float(tail["taker_buy_base_volume"].sum() or 0.0)
+            if vol_sum > 0.0 and taker_sum <= 0.0:
+                return False
+        if {"volume", "num_trades"}.issubset(tail.columns):
+            # Per-bar zero-fill detector: a REAL bar with volume>0 always has
+            # trades>=1 (even an all-sell bar), so volume>0 & trades==0 can only
+            # be a legacy zero-filled row — one such bar carries a degenerate
+            # delta (−volume) into orderflow features. Aggregate checks miss it.
+            zero_filled = tail.filter(
+                (pl.col("volume") > 0.0) & (pl.col("num_trades") == 0)
+            ).height
+            if zero_filled > 0:
+                return False
+        return True
+    except Exception:  # noqa: BLE001 — any doubt → REST
+        return False
 
 
 async def resolve_kline_map(
@@ -570,14 +623,23 @@ async def resolve_kline_map(
             )
         need_1m = min(1500, need_1m)
 
-    res_1m = await safe_fetch(
-        lambda: client.fetch_klines_cached(symbol, "1m", limit=need_1m),
-        context="klines.1m",
-        client=client,
-    )
+    # Push-first (ADR-0001 pillar 4): serve 1m from the WS-merged cache when it
+    # is provably equivalent (coverage+continuity+freshness+fidelity) — the
+    # whole 5m→1d map derives from this one frame, so a hit removes the largest
+    # per-symbol REST weight sink. REST remains for cold start and gaps.
+    res_1m: Any = None
+    ws_df = get_frame_cache().get_kline_frame(symbol, "1m")
+    if ws_df is not None and ws_kline_frame_serves(ws_df, need_1m):
+        res_1m = ws_df.tail(need_1m)
     if res_1m is None:
-        ws_df = get_frame_cache().get_kline_frame(symbol, "1m")
+        res_1m = await safe_fetch(
+            lambda: client.fetch_klines_cached(symbol, "1m", limit=need_1m),
+            context="klines.1m",
+            client=client,
+        )
+    if res_1m is None:
         if ws_df is not None and not ws_df.is_empty():
+            # Degraded fallback (REST outage): any WS history beats nothing.
             res_1m = ws_df
         else:
             fetch_errors["1m"] = "fetch_failed"
@@ -659,6 +721,16 @@ def rest_pack_specs(
         ("taker_5m", client.fetch_taker_ratio(symbol, period="5m")),
         ("book_depth", client.fetch_order_book_depth_snapshot(symbol, limit=100)),
     ]
+    if tier == "probe_lite":
+        # QoS-trimmed pack for interactive probes of COLD out-of-universe symbols
+        # (ADR-0001 QoS pillar; 2026-07-12 418 incident: three /signal probes of
+        # cold symbols within 40s tripped the fapi-data WAF). The expensive
+        # fapi-data SERIES (basis, oi_series, gls_series, funding history, 1h
+        # ratio variants) are exactly what got banned — structure/klines/ticker
+        # plus the 5m criticals are enough for a deep-analysis reply. Rows carry
+        # _probe_lite so the renderer says «серии не запрошены (защита от бана)».
+        return critical
+
     if tier == "fast":
         critical.extend(
             [

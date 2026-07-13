@@ -117,13 +117,74 @@ def create_async_binance_future(
     )
 
 
+def extend_parsed_ws_kline(stored_row: list[Any], kline: dict[str, Any]) -> None:
+    """Extend ccxt's parsed 6-element WS kline row with the raw payload fields.
+
+    Binance's kline payload carries T (close time), q (quote volume), n (num
+    trades), V (taker buy base) and Q (taker buy quote); ccxt's parser keeps
+    only [t,o,h,l,c,v]. taker_buy_base_volume is load-bearing for orderflow
+    features (delta = 2·taker_buy − volume), so the row is extended IN PLACE to
+    the same 11-element layout as raw REST klines (see ccxt_ohlcv_to_frame).
+    """
+    try:
+        ext = [
+            int(kline.get("T") or 0),
+            float(kline.get("q") or 0.0),
+            int(kline.get("n") or 0),
+            float(kline.get("V") or 0.0),
+            float(kline.get("Q") or 0.0),
+        ]
+    except (TypeError, ValueError):
+        return
+    if len(stored_row) == 6:
+        stored_row.extend(ext)
+    elif len(stored_row) >= 11:
+        stored_row[6:11] = ext
+
+
+class HuntProBinanceFutures(ccxtpro.binance):  # type: ignore[misc]
+    """ccxt.pro binance that retains the kline fields the stock parser drops."""
+
+    def handle_ohlcv(self, client: Any, message: Any) -> None:
+        super().handle_ohlcv(client, message)
+        try:
+            if not isinstance(message, dict) or message.get("e") != "kline":
+                return  # mark/index klines carry no taker fields
+            kline = message.get("k") or {}
+            t = kline.get("t")
+            market_id = kline.get("s")
+            tf = self.find_timeframe(kline.get("i"))
+            if t is None or not market_id or not tf:
+                return
+            symbol = self.safe_symbol(market_id, None, None, "contract")
+            stored = (self.ohlcvs.get(symbol) or {}).get(tf)
+            if stored is None or not len(stored):
+                return
+            # Look the row up via the cache's hashmap, not just stored[-1]: a
+            # reordered final update for candle T arriving after T+1's first
+            # update would otherwise skip the extension, pairing final OHLC
+            # with stale intrabar taker/quote values.
+            row_obj: Any | None = None
+            hashmap = getattr(stored, "hashmap", None)
+            if isinstance(hashmap, dict):
+                row_obj = hashmap.get(t)
+            if row_obj is None:
+                last = stored[-1]
+                if isinstance(last, list) and last and last[0] == t:
+                    row_obj = last
+            if isinstance(row_obj, list) and row_obj and row_obj[0] == t:
+                extend_parsed_ws_kline(row_obj, kline)
+        except Exception:  # noqa: BLE001 — extension is best-effort, never break the stream
+            LOG.debug("ws_kline_extend_failed", exc_info=True)
+
+
 def create_pro_binance_future(
     *,
     proxy_url: str | None = None,
     trust_env: bool = True,
     timeout_ms: int = 45_000,
 ) -> ccxtpro.binance:
-    return ccxtpro.binance(
+    return HuntProBinanceFutures(
         build_network_config(
             proxy_url=proxy_url,
             trust_env=trust_env,
@@ -339,7 +400,28 @@ def ccxt_ohlcv_to_frame(
             continue
         if open_ms <= 0 or c <= 0:
             continue
+        # Full-fidelity rows (raw fapi klines / extended WS capture) carry
+        # [6]=closeTime [7]=quoteVolume [8]=numTrades [9]=takerBuyBase
+        # [10]=takerBuyQuote. ccxt's standard 6-element OHLCV drops them, which
+        # zeroed taker_buy_base_volume and silently degenerated the orderflow
+        # delta features (delta_ratio→0, bar delta→−volume). Zero-fill remains
+        # only for genuinely 6-element rows.
         close_ms = _close_time_ms(open_ms, interval, exchange)
+        quote_v = 0.0
+        trades = 0
+        taker_base = 0.0
+        taker_quote = 0.0
+        if len(row) >= 11:
+            try:
+                raw_close = int(row[6])
+                if raw_close > open_ms:
+                    close_ms = raw_close
+                quote_v = float(row[7] or 0.0)
+                trades = int(row[8] or 0)
+                taker_base = float(row[9] or 0.0)
+                taker_quote = float(row[10] or 0.0)
+            except (TypeError, ValueError, IndexError):
+                quote_v, trades, taker_base, taker_quote = 0.0, 0, 0.0, 0.0
         built.append(
             {
                 "time": open_ms,
@@ -349,10 +431,10 @@ def ccxt_ohlcv_to_frame(
                 "close": c,
                 "volume": v,
                 "close_time": close_ms,
-                "quote_volume": 0.0,
-                "num_trades": 0,
-                "taker_buy_base_volume": 0.0,
-                "taker_buy_quote_volume": 0.0,
+                "quote_volume": quote_v,
+                "num_trades": trades,
+                "taker_buy_base_volume": taker_base,
+                "taker_buy_quote_volume": taker_quote,
             }
         )
     if not built:

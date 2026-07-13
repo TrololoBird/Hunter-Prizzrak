@@ -18,6 +18,7 @@ from hunt_core.errors import finite_float_or_none
 from hunt_core.domain.schemas import AggTradeSnapshot, SymbolMeta
 from hunt_core.market.ccxt_guard import ccxt_method_available, is_ccxt_rate_limited
 from hunt_core.market.ccxt_rest import HuntCcxtRestGate
+from hunt_core.market.weight_registry import depth_weight, klines_weight, weight_for_context
 from hunt_core.market.factory import (
     close_exchange_async,
     create_async_binance_future,
@@ -591,6 +592,53 @@ class HuntCcxtClient:
             return self._ticker_24h_cache[1]
         return rows
 
+    async def _fetch_raw_klines(
+        self,
+        symbol: str,
+        interval: str,
+        *,
+        since: int | None = None,
+        limit: int = 500,
+        qos_context: str | None = None,
+    ) -> list[list[Any]]:
+        """Raw ``/fapi/v1/klines`` — FULL 12-element rows, numerics typed.
+
+        ccxt's ``fetch_ohlcv`` truncates to [t,o,h,l,c,v], zeroing the taker/
+        quote fields that orderflow features depend on (delta_ratio degenerated
+        to 0 = «всё продажи»). The raw public endpoint keeps them: [6]=closeTime
+        [7]=quoteVol [8]=numTrades [9]=takerBuyBase [10]=takerBuyQuote.
+        """
+        await self.load_markets()
+        capped = min(1500, max(1, int(limit)))
+        params: dict[str, Any] = {
+            "symbol": self._bin_sym(symbol),
+            "interval": interval,
+            "limit": capped,
+        }
+        if since is not None:
+            params["startTime"] = max(0, int(since))
+        base_ctx = f"ohlcv.{interval}"
+        raw = await self._rest_call(
+            lambda: self._ex.fapiPublicGetKlines(params),
+            context=f"{qos_context}:{base_ctx}" if qos_context else base_ctx,
+            weight=klines_weight(capped),
+        )
+        typed: list[list[Any]] = []
+        for r in raw or []:
+            if not r or len(r) < 6:
+                continue
+            try:
+                row: list[Any] = [
+                    int(r[0]),
+                    float(r[1]), float(r[2]), float(r[3]), float(r[4]), float(r[5]),
+                ]
+                if len(r) >= 11:
+                    row.extend([int(r[6]), float(r[7]), int(r[8]), float(r[9]), float(r[10])])
+                typed.append(row)
+            except (TypeError, ValueError):
+                continue
+        return typed
+
     async def fetch_ohlcv_list(
         self,
         symbol: str,
@@ -598,22 +646,13 @@ class HuntCcxtClient:
         *,
         since: int | None = None,
         limit: int = 500,
+        qos_context: str | None = None,
     ) -> list[list[Any]]:
-        await self.load_markets()
-        if not self._ccxt_has(self._ex, "fetchOHLCV"):
-            raise ccxt.NotSupported(f"fetchOHLCV unavailable on {self._ex.id}")
-        ccxt_sym = self._ccxt_sym(symbol)
-        rows = await self._rest_call(
-            lambda: self._ex.fetch_ohlcv(
-                ccxt_sym,
-                interval,
-                since=since,
-                limit=min(1500, max(1, int(limit))),
-            ),
-            context=f"ohlcv.{interval}",
-            weight=10,
+        """``qos_context`` tags the gate context with the caller's QoS family
+        (e.g. ``"path_backfill"``) so background loops yield under scarcity."""
+        return await self._fetch_raw_klines(
+            symbol, interval, since=since, limit=limit, qos_context=qos_context
         )
-        return list(rows)
 
     async def fetch_ohlcv_list_cached(
         self, symbol: str, interval: str, *, limit: int = 500
@@ -641,13 +680,7 @@ class HuntCcxtClient:
             return rows
 
     async def fetch_klines(self, symbol: str, interval: str, *, limit: int) -> pl.DataFrame:
-        await self.load_markets()
-        ccxt_sym = self._ccxt_sym(symbol)
-        rows = await self._rest_call(
-            lambda: self._ex.fetch_ohlcv(ccxt_sym, interval, limit=max(1, int(limit))),
-            context=f"ohlcv.{interval}",
-            weight=10 if interval in {"1m", "5m"} else 5,
-        )
+        rows = await self._fetch_raw_klines(symbol, interval, limit=limit)
         frame = finalize_kline_frame(
             ccxt_ohlcv_to_frame(rows, interval, exchange=self._ex),
             interval,
@@ -664,17 +697,8 @@ class HuntCcxtClient:
         end_time_ms: int,
         limit: int = 1500,
     ) -> pl.DataFrame:
-        await self.load_markets()
-        ccxt_sym = self._ccxt_sym(symbol)
-        rows = await self._rest_call(
-            lambda: self._ex.fetch_ohlcv(
-                ccxt_sym,
-                interval,
-                since=max(0, int(start_time_ms)),
-                limit=min(1500, max(1, int(limit))),
-            ),
-            context=f"ohlcv.{interval}",
-            weight=10,
+        rows = await self._fetch_raw_klines(
+            symbol, interval, since=max(0, int(start_time_ms)), limit=limit
         )
         end_ms = max(0, int(end_time_ms))
         trimmed = [r for r in rows if r and int(r[0]) <= end_ms]
@@ -728,7 +752,7 @@ class HuntCcxtClient:
             ob = await self._direct_binance_fetch(
                 lambda: self._ex.fetch_order_book(self._ccxt_sym(sym), limit=depth_limit),
                 context=f"order_book:{sym}",
-                weight=5,
+                weight=depth_weight(depth_limit),
                 method="fetchOrderBook",
             )
         except ccxt.BaseError:
@@ -1235,7 +1259,7 @@ class HuntCcxtClient:
                 self._ccxt_sym(sym), limit=min(1000, max(1, limit))
             ),
             context=f"agg_trades:{sym}",
-            weight=5,
+            weight=weight_for_context("agg_trades"),  # spec weight 20 (was undercharged 5)
             method="fetchTrades",
         )
         buy_qty = sell_qty = 0.0
