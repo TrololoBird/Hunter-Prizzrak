@@ -865,48 +865,6 @@ def format_cross_microstructure_section(row: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-_MICRO_TAG_RU = {
-    "book_against": "стакан против",
-    "book_for": "стакан за",
-    "microprice_against": "микроцена против",
-    "microprice_for": "микроцена за",
-    "backwardation": "бэквордация",
-    "contango": "контанго",
-    "mixed": "смешанная",
-    "bullish": "бычья",
-    "bearish": "медвежья",
-    "neutral": "нейтр.",
-}
-
-
-def _humanize_micro_bias(raw: str) -> str:
-    """Turn the raw 'microstructure=mixed score=-0.35; k=v:tag · …' debug string into
-    a short Russian phrase. Falls back to the raw text if the shape is unexpected."""
-    if not raw or "=" not in raw:
-        return html.escape(raw)
-    parts: list[str] = []
-    head = raw.split(";", 1)[0].strip()  # 'microstructure=mixed score=-0.35'
-    label = ""
-    score = ""
-    for tok in head.split():
-        if tok.startswith("microstructure="):
-            label = _MICRO_TAG_RU.get(tok.split("=", 1)[1], tok.split("=", 1)[1])
-        elif tok.startswith("score="):
-            score = tok.split("=", 1)[1]
-    if label:
-        parts.append(f"{label}{f' ({score})' if score else ''}")
-    tail = raw.split(";", 1)[1] if ";" in raw else ""
-    for seg in tail.split("·"):
-        seg = seg.strip()
-        if ":" not in seg:
-            continue
-        tag = seg.rsplit(":", 1)[1].strip()
-        ru = _MICRO_TAG_RU.get(tag)
-        if ru and ru != "нейтр.":
-            parts.append(ru)
-    return html.escape(" · ".join(parts)) if parts else html.escape(raw)
-
-
 def format_pinned_deep_analysis(row: dict[str, Any]) -> str:
     """Deep /signal block via hunt_core.prizrak (Module 1 — not hunter lake_panel)."""
     sym = str(row.get("symbol") or "")

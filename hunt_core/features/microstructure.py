@@ -595,37 +595,6 @@ def _score_book(snapshot: MicrostructureSnapshot) -> MicrostructureScore:
     )
 
 
-def _score_microprice(snapshot: MicrostructureSnapshot) -> MicrostructureScore:
-    bias = snapshot.microprice_bias
-    if bias is None:
-        return MicrostructureScore(
-            "microprice",
-            0.0,
-            0.07,
-            available=False,
-            label="missing",
-            value=None,
-            reason="microprice_missing",
-        )
-    signed = _clamp(bias, -1.0, 1.0) * _direction_sign(snapshot.direction)
-    label = (
-        "microprice_supportive"
-        if signed >= 0.12
-        else "microprice_against"
-        if signed <= -0.12
-        else "neutral"
-    )
-    return MicrostructureScore(
-        "microprice",
-        round(_clamp(signed, -1.0, 1.0), 6),
-        0.07,
-        available=True,
-        label=label,
-        value=round(bias, 6),
-        reason=f"microprice_bias={bias:.3f}:{label}",
-    )
-
-
 def _score_spread(snapshot: MicrostructureSnapshot) -> MicrostructureScore:
     bid = snapshot.bid_price
     ask = snapshot.ask_price
@@ -773,8 +742,13 @@ def build_microstructure_context(
         _score_long_short(item),
         _score_taker(item),
         _score_open_interest(item),
+        # book_imbalance is the SOLE top-of-book imbalance component (weight 0.12,
+        # deliberately chosen). A former _score_microprice (0.07) was removed: the
+        # L1 micro-price it scored is algebraically identical to depth-imbalance
+        # ((microprice−mid)/half_spread ≡ (bid_qty−ask_qty)/(bid_qty+ask_qty)), so
+        # the two components double-counted one signal at ~0.19. Do NOT re-add a
+        # micro-price component from an L1 book — it is the same number.
         _score_book(item),
-        _score_microprice(item),
         _score_spread(item),
         _score_basis(item),
         _score_liquidations(item),
