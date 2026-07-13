@@ -43,8 +43,11 @@ def _candle_exprs(open_: pl.Expr, high: pl.Expr, low: pl.Expr, close: pl.Expr) -
     prev2_body = (prev2_close - prev2_open).abs()
     prev_body = (prev_close - prev_open).abs()
     (close - open_).abs()
-    mid_high = pl.max_horizontal(prev_open, prev_close)
-    mid_low = pl.min_horizontal(prev_open, prev_close)
+    # Canonical morning/evening star: the third candle must close back PAST the
+    # midpoint of the FIRST candle's body (prev2), not merely reach the small
+    # star candle's body edge. The old max/min(prev_open, prev_close) took the
+    # STAR (prev) body extreme — a far weaker, wrong threshold (FEAT-3).
+    first_body_mid = (prev2_open + prev2_close) / 2.0
 
     doji = ptc.doji(open_, high, low, close).cast(pl.Float64)
     dragonfly = ptc.dragonfly(open_, high, low, close).cast(pl.Float64)
@@ -68,13 +71,13 @@ def _candle_exprs(open_: pl.Expr, high: pl.Expr, low: pl.Expr, close: pl.Expr) -
         (prev2_close < prev2_open)
         & (prev_body <= prev2_body * 0.45)
         & (close > open_)
-        & (close >= mid_high)
+        & (close >= first_body_mid)
     ).cast(pl.Float64)
     evening_star = (
         (prev2_close > prev2_open)
         & (prev_body <= prev2_body * 0.45)
         & (close < open_)
-        & (close <= mid_low)
+        & (close <= first_body_mid)
     ).cast(pl.Float64)
 
     return [
