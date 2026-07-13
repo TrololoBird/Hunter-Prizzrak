@@ -17,6 +17,11 @@ STORE_FRESH_S = 180.0
 STORE_STALE_S = 600.0
 _HOT_TICK_PATHS = frozenset({"hot_ws", "hot_bootstrap", "hot_delta", "hot_carry"})
 _MAX_BLOCKERS_SHOWN = 5
+# Strong references to fire-and-forget background refresh tasks. asyncio keeps
+# only a WEAK reference to a bare create_task result, so without this the task
+# could be garbage-collected mid-flight and the store refresh silently dropped
+# (MARKET-4). Tasks self-remove on completion.
+_BG_REFRESH_TASKS: set[Any] = set()
 
 
 @dataclass(frozen=True, slots=True)
@@ -386,7 +391,9 @@ def spawn_background_refresh(
 
     try:
         loop = asyncio.get_running_loop()
-        loop.create_task(_run())
+        task = loop.create_task(_run())
+        _BG_REFRESH_TASKS.add(task)
+        task.add_done_callback(_BG_REFRESH_TASKS.discard)
     except RuntimeError:
         pass
 
