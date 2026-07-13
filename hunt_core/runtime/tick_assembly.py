@@ -749,6 +749,23 @@ async def snapshot_symbol(
         carry_cross = carry_base.get("cross_microstructure")
         carry_liq = carry_base.get("liquidity_scenarios")
         carry_data_quality = carry_base.get("data_quality")
+        # Telemetry for the DOM actionability-staleness calibration (#6): a hot-carry
+        # tick reuses the prior snapshot's book_walls, so log how old that carried
+        # microstructure is. Greppable as `carry_book_walls_age` → feed the age
+        # distribution into HUNT_DOM_ACTIONABLE_MAX_AGE_S (a percentile, not a guess).
+        _cbw = carry_book_walls if isinstance(carry_book_walls, dict) else None
+        _fetched_at = _cbw.get("fetched_at") if _cbw else None
+        if _fetched_at:
+            try:
+                _dom_dt = datetime.fromisoformat(str(_fetched_at).replace("Z", "+00:00"))
+                if _dom_dt.tzinfo is None:
+                    _dom_dt = _dom_dt.replace(tzinfo=UTC)
+                _age_s = (datetime.now(UTC) - _dom_dt).total_seconds()
+                LOG.info(
+                    "carry_book_walls_age | symbol=%s dom_age_s=%.1f", symbol, _age_s
+                )
+            except (TypeError, ValueError):
+                pass
     else:
         spot_extra = (
             spot_companion.enrichments_for(symbol)
