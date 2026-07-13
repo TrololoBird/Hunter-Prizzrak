@@ -752,7 +752,9 @@ def rest_pack_specs(
 
     return critical + [
         ("oi_chg_1h", client.fetch_open_interest_change(symbol, period="1h")),
-        ("ls_5m", client.fetch_long_short_ratio(symbol, period="5m")),
+        # ls_5m already fetched in `critical` above — re-adding it here fired a
+        # second identical fapi call every full-tier symbol per tick (the pack dict
+        # keeps only the last write, so pure wasted weight — DATA-1, 418-sensitive).
         ("ls_1h", client.fetch_long_short_ratio(symbol, period="1h")),
         ("top_ls_1h", client.fetch_top_position_ls_ratio(symbol, period="1h")),
         ("global_ls_1h", client.fetch_global_ls_ratio(symbol, period="1h")),
