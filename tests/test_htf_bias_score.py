@@ -44,6 +44,22 @@ def test_score_minus_060_from_1w_1d_bear(monkeypatch: pytest.MonkeyPatch) -> Non
     assert out["weight_available"] == pytest.approx(1.0, abs=1e-9)
 
 
+def test_bias_dict_carries_cfg_weights_for_render(monkeypatch: pytest.MonkeyPatch) -> None:
+    # #5: the render surfaces per-TF weights so -0.60 reads as weighted, not a flat
+    # average. Those weights must come from cfg (no drift) and match the score math.
+    cfg = PrizrakConfig.load()
+    out = _run_bias({"1w": _BEAR, "1d": _BEAR, "4h": _NEUTRAL, "1h": _NEUTRAL}, monkeypatch)
+    weights = out["weights"]
+    assert weights == {
+        "1w": round(cfg.htf_1w_weight, 2),
+        "1d": round(cfg.htf_1d_weight, 2),
+        "4h": round(cfg.htf_4h_weight, 2),
+        "1h": round(cfg.htf_1h_weight, 2),
+    }
+    # The rendered weights must explain the score: -(1w+1d) = -0.60.
+    assert -(weights["1w"] + weights["1d"]) == pytest.approx(out["score"], abs=1e-9)
+
+
 def test_score_minus_070_from_1w_1d_1h_bear(monkeypatch: pytest.MonkeyPatch) -> None:
     # 1w↓ 1d↓ 4h→ 1h↓ (the first live BTC signal): net = -(0.35+0.25+0.10) = -0.70.
     out = _run_bias({"1w": _BEAR, "1d": _BEAR, "4h": _NEUTRAL, "1h": _BEAR}, monkeypatch)

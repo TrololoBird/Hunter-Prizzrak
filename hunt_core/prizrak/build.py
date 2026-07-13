@@ -78,11 +78,18 @@ class AnalystReport:
             f"<b>{_BIAS_RU.get(bias, bias)}</b>{score_str}"
         ]
 
-        # Per-TF breakdown (1w, 1d, 4h, 1h) from explicit prizrak structure.
+        # Per-TF breakdown (1w, 1d, 4h, 1h) with each TF's WEIGHT, so the header
+        # score reads as the weighted sum it is (−0.60 = −(0.35+0.25)) and not a
+        # flat 4-TF average (#5). Weights come from the htf_bias dict (sourced from
+        # cfg); absent → no weight suffix, backward-compatible.
+        _raw_w = htf.get("weights")
+        _htf_weights = _raw_w if isinstance(_raw_w, dict) else {}
         for tf_key in ("1w", "1d", "4h", "1h"):
             trend = str(tf_trends.get(tf_key) or "neutral")
             _raw_s = struct_by_tf.get(tf_key)
             s = _raw_s if isinstance(_raw_s, dict) else {}
+            _w = _htf_weights.get(tf_key)
+            w_str = f" <i>·{float(_w)*100:.0f}%</i>" if isinstance(_w, (int, float)) else ""
             slom_bits = []
             if s.get("bos_up"):
                 slom_bits.append("BOS↑")
@@ -93,7 +100,7 @@ class AnalystReport:
             if s.get("choch_bear"):
                 slom_bits.append("CHoCH↓")
             slom = (" · слом: " + ", ".join(slom_bits)) if slom_bits else ""
-            lines.append(f"  {tf_key}: <b>{_TREND_RU.get(trend, trend)}</b>{slom}")
+            lines.append(f"  {tf_key}: <b>{_TREND_RU.get(trend, trend)}</b>{w_str}{slom}")
 
         # Intraday tier (5m/15m) — timing context ONLY, explicitly NOT part of the
         # HTF-bias score (its own labelled sub-row so it can't be read as an HTF input).

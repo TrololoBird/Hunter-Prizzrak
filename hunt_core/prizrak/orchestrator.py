@@ -698,6 +698,10 @@ def _htf_bias(
         "weight_available": round(weight_available, 3),
         "votes": votes,
         "struct_by_tf": struct_by_tf,
+        # Per-TF weights so the render can show the score is WEIGHTED, not a flat
+        # 4-TF average (a live −0.60 = −(0.35+0.25) confused a careful reader into
+        # reading it as a mean over four equal TFs). Sourced from cfg → no drift.
+        "weights": {display_key: round(w, 2) for _tf, w, display_key in weights},
     }
 
 
