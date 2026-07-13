@@ -155,12 +155,19 @@ def supertrend_series(
         prev_final_upper = final_upper[idx - 1]
         prev_final_lower = final_lower[idx - 1]
 
-        if prev_close > prev_final_upper:
+        # Canonical Pine ta.supertrend band trailing (both comparisons were
+        # inverted): the upper band holds/tightens (min with prior) while price
+        # stays BELOW it (prev_close < prev_final_upper) and resets to basic once
+        # price breaks above; the lower band ratchets up (max with prior) while
+        # price stays ABOVE it (prev_close > prev_final_lower) and resets once price
+        # breaks below. The inverted `>`/`<` reset the trailing band every bar in
+        # the active trend, so the stop never locked and direction flips mistimed.
+        if prev_close < prev_final_upper:
             final_upper[idx] = min(upper_band[idx], prev_final_upper)
         else:
             final_upper[idx] = upper_band[idx]
 
-        if prev_close < prev_final_lower:
+        if prev_close > prev_final_lower:
             final_lower[idx] = max(lower_band[idx], prev_final_lower)
         else:
             final_lower[idx] = lower_band[idx]
