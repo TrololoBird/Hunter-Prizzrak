@@ -38,6 +38,25 @@ def test_single_below_cluster_not_attributed_to_short() -> None:
     assert "плотн." not in short_line  # nothing above price → no size tail on short row
 
 
+def test_absent_short_side_stated_explicitly() -> None:
+    # No short magnet at all (nearest_short=None) → the short side must SAY it's
+    # empty, not silently vanish (the long magnet keeps the section non-trivial).
+    row = _row([{"price": 61990.0, "total_notional": 40_200_000.0, "intensity": 0.94}])
+    row["market"]["liq_heatmap_nearest_short"] = None
+    text = format_liquidation_map_section(row)
+    short_line = _line(text, "Шорт-сквиз")
+    assert "нет значимого кластера сверху" in short_line
+
+
+def test_magnet_with_subfloor_cluster_says_without_cluster() -> None:
+    # Magnet present but its only below-side cluster is under the notional floor →
+    # the row states "без значимого кластера" rather than a bare price.
+    text = format_liquidation_map_section(_row([{"price": 61990.0, "total_notional": 100.0, "intensity": 1.0}]))
+    long_line = _line(text, "Лонг-ликвидации")
+    assert "без значимого кластера" in long_line
+    assert "плотн." not in long_line
+
+
 def test_two_sided_clusters_split_correctly() -> None:
     text = format_liquidation_map_section(
         _row(

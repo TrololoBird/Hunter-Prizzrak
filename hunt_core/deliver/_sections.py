@@ -465,20 +465,25 @@ def format_liquidation_map_section(row: dict[str, Any]) -> str:
             parts.append(f"{intensity:.0%} плотн.")
         return f" · {' · '.join(parts)}" if parts else ""
 
+    # State absence explicitly (a side with no magnet, or a magnet whose cluster is
+    # below the significance floor) instead of silently dropping the line — so the
+    # reader can tell "no meaningful cluster there" from a render miss. Only when at
+    # least one side has a magnet (avoid a section of pure negatives).
+    any_side = nearest_long is not None or nearest_short is not None
     if nearest_long is not None:
         pull = market.get("liq_magnet_pull_long_pct")
         dist = f" ({pull:.1f}%)" if pull is not None else ""
-        lines.append(
-            f"Лонг-ликвидации ↓ <code>{_fmt_price(float(nearest_long))}</code>{dist}"
-            f"{_cluster_size_tail(float(nearest_long), side='long')}"
-        )
+        tail = _cluster_size_tail(float(nearest_long), side="long") or " · <i>без значимого кластера</i>"
+        lines.append(f"Лонг-ликвидации ↓ <code>{_fmt_price(float(nearest_long))}</code>{dist}{tail}")
+    elif any_side:
+        lines.append("Лонг-ликвидации ↓ <i>нет значимого кластера снизу</i>")
     if nearest_short is not None:
         pull = market.get("liq_magnet_pull_short_pct")
         dist = f" ({pull:.1f}%)" if pull is not None else ""
-        lines.append(
-            f"Шорт-сквиз ↑ <code>{_fmt_price(float(nearest_short))}</code>{dist}"
-            f"{_cluster_size_tail(float(nearest_short), side='short')}"
-        )
+        tail = _cluster_size_tail(float(nearest_short), side="short") or " · <i>без значимого кластера</i>"
+        lines.append(f"Шорт-сквиз ↑ <code>{_fmt_price(float(nearest_short))}</code>{dist}{tail}")
+    elif any_side:
+        lines.append("Шорт-сквиз ↑ <i>нет значимого кластера сверху</i>")
     if cascade:
         label = "лонг-флаш" if cascade == "long_flush" else "шорт-сквиз"
         lines.append(f"Риск каскада: <b>{label}</b>")
