@@ -24,6 +24,21 @@ from typing import Any
 import polars as pl
 
 
+def _relocate_idx_by_ts(df: pl.DataFrame, ts: float | None) -> int | None:
+    """Current index of the bar whose open-time == ``ts``, or None if it rolled off.
+
+    Pattern A freezes the impulse across scan cycles, but the meso OHLCV window is
+    refetched each cycle as a fixed-length rolling window, so a stored integer
+    index points one bar later every time a bar closes (SCAN-1). Re-locating by the
+    bar's timestamp keeps the reference on the true impulse bar, honouring the
+    state.py timestamp-freeze guarantee.
+    """
+    if ts is None or "ts" not in df.columns:
+        return None
+    matches = (df["ts"] == float(ts)).arg_true()
+    return int(matches[0]) if len(matches) else None
+
+
 def _to_float(val: Any) -> float:
     return float(val) if val is not None else 0.0
 
@@ -426,7 +441,13 @@ def _advance_pattern_a(
         if imp_ok and imp_idx is not None:
             return {
                 "pattern": "A", "stage": 1, "anchor_ts": now_ms, "first_ts": now_ms,
-                "meso_tf": meso_tf, "data": {"impulse_idx": int(imp_idx)},
+                "meso_tf": meso_tf,
+                "data": {
+                    "impulse_idx": int(imp_idx),
+                    # Freeze the impulse bar's OPEN-TIME so stage 1 can re-locate it
+                    # after the rolling meso window shifts the integer index (SCAN-1).
+                    "impulse_ts": float(meso_df["ts"][imp_idx]),
+                },
             }, None
         b1 = detect_bokovik(meso_df, window=_BOKOVIK_WINDOW)
         # Type 3 (author's descending-channel long): persistent downtrend
@@ -440,7 +461,15 @@ def _advance_pattern_a(
 
     if pattern == "A":
         if stage == 1:
-            imp_idx = data.get("impulse_idx")
+            # Re-locate the impulse bar by its frozen open-time so the rolling meso
+            # window doesn't drift the reference (SCAN-1). Fall back to the stored
+            # index only for legacy state rows that predate impulse_ts; if the ts
+            # rolled off the window, imp_idx is None → wait (staleness reset clears).
+            imp_ts = data.get("impulse_ts")
+            if imp_ts is not None:
+                imp_idx = _relocate_idx_by_ts(meso_df, imp_ts)
+            else:
+                imp_idx = data.get("impulse_idx")
             if imp_idx is None or imp_idx >= len(meso_df) or not detect_absorption(meso_df, imp_idx):
                 return state, None
             data["absorption_confirmed"] = True
