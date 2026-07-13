@@ -186,7 +186,14 @@ def process_lifecycle_tick(
     if event == "none":
         return LifecycleTransition(event="none", suppress_reason="no_state_advance")
 
-    if not store._cooldown_ok(setup_id) and event == "signal" and prev_state == "signal":
+    # Per-setup 4h cooldown. The old `and prev_state == "signal"` made this
+    # unreachable — event=="signal" is only set when prev_state is NOT in
+    # {signal,activated,tracking}, so that conjunct was always False and the
+    # cooldown never fired (SIG-1). Dropping it lets the cooldown do its job: a
+    # setup that already emitted a "signal" and then oscillated out of and back
+    # into the near-entry state within 4h is suppressed (anti-spam). The first
+    # emission passes (_cooldown_ok True when there is no prior last_emit_at).
+    if event == "signal" and not store._cooldown_ok(setup_id):
         return LifecycleTransition(event="none", suppress_reason="setup_cooldown")
 
     plan = _plan_from_summary(summary)
