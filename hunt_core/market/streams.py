@@ -1418,7 +1418,12 @@ class HuntCcxtStreams:
             now_ms = int(time.time() * 1000)
             try:
                 tickers = await self.client.fetch_ticker_24h()
-                self._touch()
+                # Deliberately NO self._touch() here: this is a 60s REST poll, and
+                # _touch() is the WS-PUSH liveness clock (_last_msg_ms). Touching it
+                # from REST pinned ws_last_msg_age_s to ≤60s even when every WS push
+                # stream was dead, masking a genuine push blackout from the
+                # data-plane audit (and keeping `fresh`/ws_connected falsely alive).
+                # WS pushes touch the clock at their own handlers; REST must not.
                 for item in tickers:
                     if not isinstance(item, dict):
                         continue
