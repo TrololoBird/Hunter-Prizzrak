@@ -236,43 +236,70 @@ def format_grid_telegram(grid: list[dict[str, Any]], *, price: float = 0) -> str
 
     lines = ["<b>Карта уровней</b> <i>(POC/структура · не стакан и не ликвидации)</i>"]
     _K_RU = {"poc": "POC", "support": "поддержка", "resistance": "сопротивл", "vah": "VAH", "val": "VAL"}
+    _KIND_ORDER = ("poc", "support", "resistance", "vah", "val")
     # The same TF can appear twice — once from legacy donchian levels, once from
-    # Prizrak structure — which rendered as two identical "1h:" lines. Merge parts
-    # under one line per TF (order preserved, identical parts de-duplicated).
-    by_tf: dict[str, list[str]] = {}
+    # Prizrak structure — which rendered as two identical "1h:" lines. Merge under
+    # one line per TF. Single numeric levels are collected per (tf, kind) so they
+    # can be ordered NEAREST-first at emit time (support below price → higher is
+    # nearer; resistance above → lower is nearer); the old code appended in grid
+    # order, so two donchian/structure resistances printed out of proximity.
+    # String ranges and list-valued kinds (глубже/выше) keep their upstream order.
+    num_by: dict[str, dict[str, list[float]]] = {}
+    tok_by: dict[str, dict[str, list[str]]] = {}
     order: list[str] = []
+
+    def _touch(tf: str) -> None:
+        if tf not in num_by:
+            num_by[tf] = {}
+            tok_by[tf] = {}
+            order.append(tf)
+
     for g in grid:
         tf = str(g.get("tf", "?"))
-        parts: list[str] = []
-        for k in ("poc", "support", "resistance", "vah", "val"):
+        for k in _KIND_ORDER:
             v = g.get(k)
             if v is None:
                 continue
             # String-valued = pre-formatted range (e.g. "63000–62000").
             if isinstance(v, str):
-                parts.append(f"{_K_RU.get(k, k)}={v}")
+                _touch(tf)
+                bucket = tok_by[tf].setdefault(k, [])
+                if v not in bucket:
+                    bucket.append(v)
                 continue
-            # List-valued = multi-level (e.g. deeper supports).
+            # List-valued = multi-level (e.g. deeper supports) — keep upstream order.
             if isinstance(v, list):
                 sub = [_fmt_price(x) for x in v if isinstance(x, (int, float)) and x > 0]
                 if sub:
-                    parts.append(f"{_K_RU.get(k, k)}={'/'.join(sub)}")
+                    _touch(tf)
+                    joined = "/".join(sub)
+                    bucket = tok_by[tf].setdefault(k, [])
+                    if joined not in bucket:
+                        bucket.append(joined)
                 continue
             # Single numeric level.
             if isinstance(v, (int, float)):
-                if not _level_within_range(float(v), price):
+                fv = float(v)
+                if not _level_within_range(fv, price):
                     continue
-                parts.append(f"{_K_RU.get(k, k)}={_fmt_price(v)}")
-        if not parts:
-            continue
-        if tf not in by_tf:
-            order.append(tf)
-            by_tf[tf] = []
-        for p in parts:
-            if p not in by_tf[tf]:
-                by_tf[tf].append(p)
+                _touch(tf)
+                bucket_n = num_by[tf].setdefault(k, [])
+                if fv not in bucket_n:
+                    bucket_n.append(fv)
     for tf in order:
-        lines.append(f"· {tf}: " + ", ".join(by_tf[tf][:6]))
+        parts: list[str] = []
+        for k in _KIND_ORDER:
+            nums = num_by[tf].get(k, [])
+            if k == "support":
+                nums = sorted(nums, reverse=True)  # nearest (highest) first
+            elif k == "resistance":
+                nums = sorted(nums)  # nearest (lowest) first
+            for val in nums:
+                parts.append(f"{_K_RU.get(k, k)}={_fmt_price(val)}")
+            for tok in tok_by[tf].get(k, []):
+                parts.append(f"{_K_RU.get(k, k)}={tok}")
+        if parts:
+            lines.append(f"· {tf}: " + ", ".join(parts[:6]))
     return "\n".join(lines) if len(lines) > 1 else ""
 
 
