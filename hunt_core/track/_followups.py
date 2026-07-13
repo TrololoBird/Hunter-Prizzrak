@@ -31,6 +31,27 @@ def _tracker_ref():
     return tr
 
 
+def _entry_bias_latch(active: dict[str, Any], lc_bias: str) -> str:
+    """Immutable entry-bias latch for counter-flip detection (TRACK-3).
+
+    Counter-bias TG alerts must compare the current lifecycle bias against the
+    bias the trade was OPENED with. ``entry_lifecycle_bias`` can be empty when
+    the lifecycle had no ``recommended_bias`` at creation (tracker.py:532). The
+    old code then fell back to the MUTABLE ``lifecycle_bias`` — which is
+    overwritten to the current tick every pass — so the "opened" bias became
+    "the previous tick's bias" and a slow entry→counter drift never registered.
+    Instead, latch the first non-empty bias observed here and keep it fixed.
+
+    Returns the opened (entry) bias, latching it into ``active`` in place if it
+    was previously unset.
+    """
+    opened = str(active.get("entry_lifecycle_bias") or "")
+    if not opened and lc_bias:
+        active["entry_lifecycle_bias"] = lc_bias
+        opened = lc_bias
+    return opened
+
+
 def _closed_adx_1h(row: dict[str, Any]) -> float | None:
     tf = row.get("timeframes") or {}
     block = tf.get("1h_closed") or tf.get("1h") or {}
@@ -377,11 +398,7 @@ def evaluate_followups(
         # Bias change while active — TG only on COUNTER-bias flips (long→short etc).
         # wait↔long ping-pong and accumulation↔impulse renames stay silent;
         # material long thesis break uses stale_lc (dump_active × N ticks).
-        opened_bias = str(
-            active.get("entry_lifecycle_bias")
-            or active.get("lifecycle_bias")
-            or ""
-        )
+        opened_bias = _entry_bias_latch(active, lc_bias)
         if trk._is_signal_active(active) and lc_phase:
             active["lifecycle_phase"] = lc_phase
             if lc_bias:
