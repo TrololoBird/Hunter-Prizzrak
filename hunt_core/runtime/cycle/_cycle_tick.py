@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Sequence
 from typing import Any
 
 from hunt_core import clock
@@ -48,6 +49,38 @@ from hunt_core.track.tracker import (
 )
 from hunt_core.runtime.tick_assembly import snapshot_symbol
 from hunt_core.data.lake import FeatureLakeWriter
+
+
+def _settle_snapshot_results(
+    ordered: Sequence[str],
+    results: Sequence[Any],
+    *,
+    now_iso: str,
+    tier: str,
+) -> list[tuple[str, dict[str, Any]]]:
+    """Convert asyncio.gather(return_exceptions=True) output into (sym, row) pairs.
+
+    A successful item is the (sym, dict) tuple _snapshot_one returned; an unhandled
+    exception (one raised outside _snapshot_one's caught set) becomes an error row
+    so the rest of the tick's rows survive instead of the whole gather raising.
+    CancelledError re-propagates — shutdown must never be swallowed into a row.
+    """
+    pairs: list[tuple[str, dict[str, Any]]] = []
+    for sym, res in zip(ordered, results, strict=True):
+        if isinstance(res, asyncio.CancelledError):
+            raise res
+        if isinstance(res, BaseException):
+            LOG.warning("snapshot_unhandled_exc", symbol=sym, error=repr(res))
+            pairs.append((sym, {
+                "ts": now_iso,
+                "symbol": sym,
+                "error": repr(res),
+                "tick_path": "rest_error",
+                "snapshot_tier": tier,
+            }))
+        else:
+            pairs.append(res)
+    return pairs
 
 
 def _closed_bar_ts(prepared: Any) -> str | None:
@@ -237,7 +270,15 @@ async def run_tick(
             async with sem:
                 return await _snapshot_one(sym)
 
-        snap_pairs = await asyncio.gather(*[_bounded_snapshot(s) for s in ordered])
+        # return_exceptions=True so ONE symbol raising an exception outside
+        # _snapshot_one's caught set (e.g. a Polars ComputeError) does not sink the
+        # whole tick — every other symbol's already-computed row would otherwise be
+        # discarded. Unhandled failures become error rows (like the in-loop handler);
+        # cancellation still propagates.
+        raw_results = await asyncio.gather(
+            *[_bounded_snapshot(s) for s in ordered], return_exceptions=True
+        )
+        snap_pairs = _settle_snapshot_results(ordered, raw_results, now_iso=now.isoformat(), tier=tier)
         row_by_sym = dict(snap_pairs)
         snap_elapsed = round(time.monotonic() - tick_started, 2)
         if len(ordered) > 1:
