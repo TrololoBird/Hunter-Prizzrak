@@ -26,6 +26,22 @@ import os as _os
 
 _DOM_ACTIONABLE_MAX_AGE_S = float(_os.getenv("HUNT_DOM_ACTIONABLE_MAX_AGE_S", "45") or 45.0)
 
+# Canonical venue short-codes. One scheme everywhere (was three: a `[:3].upper()`
+# path rendered binance→BIN / bybit→BYB / bitget→BIT — the last ambiguous with
+# bybit — while the funding path used BNC/BYB/OKX/BGT). Unknown real names fall
+# back to a 3-letter uppercase slice; only the missing/sentinel case defaults to
+# the primary (binance).
+_PRIMARY_VENUE = "binance"
+_VENUE_CODES = {"binance": "BNC", "bybit": "BYB", "okx": "OKX", "bitget": "BGT"}
+
+
+def _venue_code(name: Any) -> str:
+    """Short display code for a venue name, consistent across every section."""
+    s = str(name or "").strip().lower()
+    if not s or s in {"?", "non", "none"}:
+        return "BNC"
+    return _VENUE_CODES.get(s, s[:3].upper())
+
 
 def _fmt_usd_compact(value: float) -> str:
     """Human-readable USD notional: $920 / $7.3k / $133.4M / $1.2B (no '$133427.0k')."""
@@ -580,9 +596,7 @@ def format_book_walls_section(row: dict[str, Any]) -> str:
         if px is None:
             return ""
         ex_raw = lvl.get("exchange") or walls.get("source") or walls.get("venue") or "BNC"
-        tag = str(ex_raw)[:3].upper()
-        if tag in {"?", "NON"}:
-            tag = "BNC"
+        tag = _venue_code(ex_raw)
         vc = lvl.get("venue_count") or 1
         agg = " агр." if int(vc) > 1 else ""
         return f"{emoji} {side}: {tag}{agg} {_fmt_price(float(px))} (${float(notional or 0)/1e3:.1f}k)"
@@ -658,8 +672,16 @@ def format_book_walls_section(row: dict[str, Any]) -> str:
     else:
         dom_label = "DOM · сейчас"
     lines = [f"📋 <b>Карта ордеров ({dom_label})</b>"]
-    if isinstance(venues, list) and len(venues) > 1:
-        lines[0] += f" <i>({len(venues)} бирж)</i>"
+    # Surviving venues, always shown by code (not just a count) so the reader can
+    # see WHAT feeds the DOM. If binance dropped out of the aggregate (its fetch
+    # failed — after the primary-alignment fix it is never excluded for skew), say
+    # so loudly: a DOM built from secondaries only is a different object.
+    venue_names = [str(v) for v in venues] if isinstance(venues, list) else []
+    if venue_names:
+        codes = "+".join(_venue_code(v) for v in venue_names)
+        lines[0] += f" <i>({codes})</i>"
+        if _PRIMARY_VENUE not in {v.lower() for v in venue_names}:
+            lines.append("<i>⚠️ DOM без Binance — только вторичные площадки</i>")
     if dom_stale and dom_age_f is not None:
         lines.append(
             f"<i>⚠️ микроструктура устарела ({dom_age_f:.0f}с) — "
@@ -667,7 +689,10 @@ def format_book_walls_section(row: dict[str, Any]) -> str:
         )
     stale_excluded = walls.get("stale_venues_excluded")
     if isinstance(stale_excluded, list) and stale_excluded:
-        lines.append(f"<i>⏱ исключены устаревшие: {', '.join(str(v)[:3].upper() for v in stale_excluded)}</i>")
+        lines.append(
+            f"<i>⏱ рассинхрон, исключены: "
+            f"{', '.join(_venue_code(v) for v in stale_excluded)}</i>"
+        )
 
     # Prefer real full-depth cross-venue buckets (merge_full_depth_bins) over top-of-book
     # per-venue levels — each exchange's own best bid/ask sits within a few bps of price
@@ -794,7 +819,7 @@ def format_cross_microstructure_section(row: dict[str, Any]) -> str:
     taker = cx.get("taker_flow") or {}
     per = taker.get("per_exchange") or {}
     if per:
-        bits = [f"{ex[:3].upper()} {float(v):.2f}" for ex, v in per.items()]
+        bits = [f"{_venue_code(ex)} {float(v):.2f}" for ex, v in per.items()]
         consensus = taker.get("consensus")
         tail = f" → consensus <code>{consensus:.2f}</code>" if consensus is not None else ""
         lines.append("Order flow (taker): " + " · ".join(bits) + tail)
@@ -884,26 +909,22 @@ def format_cross_exchange_section(cx: dict[str, Any]) -> str:
     oi_total = float(cx.get("oi_total") or 0)
     price_div = float(cx.get("price_divergence_pct") or 0)
 
-    _NAMES = {"binance": "BNC", "bybit": "BYB", "okx": "OKX", "bitget": "BGT"}
-
     funding_parts: list[str] = []
     for ex, rate in funding.items():
         if rate is None:
             continue
-        label = _NAMES.get(ex, ex.upper()[:3])
         sign = "+" if rate >= 0 else ""
-        funding_parts.append(f"{label} {sign}{rate*100:.4f}%")
+        funding_parts.append(f"{_venue_code(ex)} {sign}{rate*100:.4f}%")
 
     price_parts: list[str] = []
     for ex, mp in mark_price.items():
         if not mp:
             continue
-        label = _NAMES.get(ex, ex.upper()[:3])
-        price_parts.append(f"{label} {_fmt_price(mp)}")
+        price_parts.append(f"{_venue_code(ex)} {_fmt_price(mp)}")
 
     listed = cx.get("listed") or {}
     listed_parts = [
-        f"{_NAMES.get(ex, ex.upper()[:3])}{'✓' if ok else '✗'}"
+        f"{_venue_code(ex)}{'✓' if ok else '✗'}"
         for ex, ok in listed.items()
     ]
     lines: list[str] = ["🌐 <b>КРОСС-БИРЖА</b> <i>(universe: Binance)</i>"]

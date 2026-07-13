@@ -413,6 +413,42 @@ def _reference_mid(snap: dict[str, Any] | None) -> float:
     return bid
 
 
+def _stale_venues_by_alignment(
+    stamped: dict[str, float], *, primary: str, stale_ms: float
+) -> list[str]:
+    """Venues whose snapshot is >stale_ms from the alignment reference.
+
+    The venue fetches complete at different wall-clock moments (a slow OKX REST
+    can be 1-2s behind a 50ms Binance snapshot). Merging them as if simultaneous
+    blurs the aggregate wall notional, so misaligned venues are dropped rather
+    than blended.
+
+    Reference clock is the PRIMARY's timestamp when present — for a Binance-
+    analytics bot binance is authoritative, so a secondary >stale_ms away from it
+    is the misaligned one, and the primary is NEVER returned (a slightly-late
+    binance book still represents the venue we analyze; a fresh secondary
+    presented as "the DOM" would be a wrong-source error). Only when the primary
+    is absent (its fetch failed → unstamped) do we fall back to the freshest
+    surviving snapshot as the reference.
+
+    Args:
+        stamped: venue → fetched_at_ms.
+        primary: the authoritative venue name (never excluded for skew).
+        stale_ms: max tolerated offset from the reference clock.
+
+    Returns:
+        Venue names to exclude (empty when <2 stamped venues).
+    """
+    if len(stamped) < 2:
+        return []
+    ref = stamped.get(primary, max(stamped.values()))
+    return [
+        ex
+        for ex, ts in stamped.items()
+        if ex != primary and abs(ref - ts) > stale_ms
+    ]
+
+
 async def fetch_cross_exchange_book_walls(
     client: Any,
     symbol: str,
@@ -439,24 +475,21 @@ async def fetch_cross_exchange_book_walls(
     # Merging them as if simultaneous blurs the aggregate wall notional. Drop any venue
     # whose snapshot is older than _CROSS_BOOK_STALE_MS behind the freshest one, rather
     # than blend stale depth into a live cross-book.
-    excluded_stale: list[str] = []
     stamped: dict[str, float] = {}
     for ex, s in per_ex.items():
         ts = s.get("fetched_at_ms")
         if isinstance(ts, (int, float)):
             stamped[ex] = float(ts)
-    if len(stamped) >= 2:
-        newest = max(stamped.values())
-        for ex, ts in stamped.items():
-            if newest - ts > _CROSS_BOOK_STALE_MS:
-                excluded_stale.append(ex)
+    excluded_stale = _stale_venues_by_alignment(
+        stamped, primary=_PRIMARY, stale_ms=_CROSS_BOOK_STALE_MS
+    )
+    if excluded_stale:
         for ex in excluded_stale:
             per_ex.pop(ex, None)
-        if excluded_stale:
-            LOG.info(
-                "cross_book_stale_excluded | symbol=%s excluded=%s kept=%s",
-                symbol, ",".join(excluded_stale), ",".join(per_ex.keys()),
-            )
+        LOG.info(
+            "cross_book_stale_excluded | symbol=%s excluded=%s kept=%s",
+            symbol, ",".join(excluded_stale), ",".join(per_ex.keys()),
+        )
     if not per_ex:
         return {"venues": [], "bid_levels": [], "ask_levels": [], "source": "cross_exchange"}
     merged = aggregate_cross_exchange_walls(per_ex)
