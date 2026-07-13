@@ -143,6 +143,25 @@ class _AggPoint:
 _TOP_BOOK_DEPTH_LEVELS = 20
 
 
+def _taker_is_buy(trade: dict[str, Any], info: dict[str, Any]) -> bool:
+    """Resolve the aggressor (taker) side of a trade — the ground truth crypto
+    gives directly, so no tick-rule inference is needed.
+
+    Prefers CCXT's normalized ``side`` (present on parsed aggTrades). If it is
+    absent, falls back to Binance's raw aggTrade maker flag ``m`` (``m=true`` ⇒
+    the BUYER is the maker ⇒ the taker is the SELLER). Without this fallback a
+    side-less payload silently defaulted to sell, quietly biasing CVD/footprint/
+    delta toward sell. The forceOrder path already reads its own ``S`` fallback,
+    so this mirrors that discipline for the trade path.
+    """
+    side = str(trade.get("side") or "").lower()
+    if side:
+        return side == "buy"
+    if "m" in info:
+        return not bool(info["m"])
+    return False
+
+
 def _attach_task_guard(task: asyncio.Task[Any]) -> None:
     """Retrieve task exceptions so asyncio does not log 'Future exception was never retrieved'."""
 
@@ -832,7 +851,7 @@ class HuntCcxtStreams:
         qty = qty_nq if qty_nq > 0 else qty_full
         ts_ms = int(trade.get("timestamp") or info.get("T") or time.time() * 1000)
         px = float(trade.get("price") or info.get("p") or 0)
-        is_buy = str(trade.get("side") or "").lower() == "buy"
+        is_buy = _taker_is_buy(trade, info)
         if qty <= 0 and qty_full <= 0:
             return
         buf = self._agg_points.setdefault(sym, collections.deque(maxlen=_AGG_BUFFER_MAX))
