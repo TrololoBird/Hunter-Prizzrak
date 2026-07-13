@@ -6,9 +6,46 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import re
 from typing import Any
 
 LOG = logging.getLogger("hunt_core.runtime.symbol_probe")
+
+# klines.<tf>.stale.<SYMBOL>.<age>ms><limit>ms  (completeness.audit_kline_staleness)
+_STALE_RE = re.compile(r"^klines\.([0-9a-z]+)\.stale\.[A-Z0-9]+\.(\d+)ms>(\d+)ms$")
+# klines.<tf>.<reason>  — fetch_failed / empty_frame / staleness.*
+_KLINE_FETCH_RE = re.compile(r"^klines\.([0-9a-z]+)\.(fetch_failed|empty_frame|staleness\.[a-z_]+)$")
+
+
+def humanize_probe_error(err: str, *, symbol: str) -> str | None:
+    """Turn a raw data-integrity violation into a plain, actionable TG message.
+
+    Returns None for unrecognized codes so the caller can fall back to the raw
+    string. Presentation only — does not change what the signal gate rejects.
+    The 4h/1h HTF frames are REST-only, so right after a restart (or a rate-limit
+    pause) they lag until backfill catches up; the user hit exactly that window.
+    """
+    short = symbol.replace("USDT", "")
+    m = _STALE_RE.match(err.strip())
+    if m:
+        tf, age_ms, limit_ms = m.group(1), int(m.group(2)), int(m.group(3))
+        age_h = age_ms / 3_600_000
+        limit_h = limit_ms / 3_600_000
+        return (
+            f"📉 Свечи <b>{tf}</b> устарели: данные ~{age_h:.1f}ч назад "
+            f"(порог {limit_h:.0f}ч) — HTF-контекст временно недоступен.\n"
+            f"Обычно самовосстанавливается за несколько минут после рестарта "
+            f"бота, пока 1h/4h догружаются по REST. Повтори через пару минут "
+            f"или запроси свежие данные: <code>/signal {short} --live</code>"
+        )
+    m = _KLINE_FETCH_RE.match(err.strip())
+    if m:
+        tf = m.group(1)
+        return (
+            f"🌐 Не удалось загрузить свечи <b>{tf}</b> (REST) — данные неполные.\n"
+            f"Повтори позже или запроси свежие: <code>/signal {short} --live</code>"
+        )
+    return None
 
 from hunt_core.data.collect import (
     SnapshotTier,
@@ -484,8 +521,15 @@ async def deliver_signal_probe(
         extra = ""
         if audit.get("issues"):
             extra = "\n<i>audit: " + html.escape(", ".join(audit["issues"][:3])) + "</i>"
+        raw_err = str(row["error"])
+        friendly = humanize_probe_error(raw_err, symbol=sym)
+        if friendly is not None:
+            # Lead with the plain explanation; keep the raw code small for power users/logs.
+            body = f"{friendly}\n<i>({html.escape(raw_err)})</i>"
+        else:
+            body = f"<code>{html.escape(raw_err)}</code>"
         await broadcaster.send_html(
-            f"⚠️ <b>/signal</b> {html.escape(sym)}\n<code>{html.escape(str(row['error']))}</code>{extra}",
+            f"⚠️ <b>/signal</b> {html.escape(sym)}\n{body}{extra}",
             no_split=True,
         )
         return row
