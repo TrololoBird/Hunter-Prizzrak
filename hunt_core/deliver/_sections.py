@@ -19,6 +19,13 @@ def _worst_entry_edge(entry_lo: float, entry_hi: float, *, direction: str, price
 
 _fmt_price = fmt_price
 
+# Beyond this age a carried DOM/microstructure snapshot is context-only, never a
+# touch-entry basis (#6). Carry spans a few ticks, so this sits well above the 5s
+# REST TTL but below a full minute — tune via HUNT_DOM_ACTIONABLE_MAX_AGE_S.
+import os as _os
+
+_DOM_ACTIONABLE_MAX_AGE_S = float(_os.getenv("HUNT_DOM_ACTIONABLE_MAX_AGE_S", "45") or 45.0)
+
 
 def _fmt_usd_compact(value: float) -> str:
     """Human-readable USD notional: $920 / $7.3k / $133.4M / $1.2B (no '$133427.0k')."""
@@ -380,17 +387,45 @@ def format_liquidation_map_section(row: dict[str, Any]) -> str:
     if synthetic_only:
         header += " · <i>оценка по leverage-tier, без реальных ликвидаций</i>"
     lines = [header]
+
+    clusters = market.get("liq_heatmap_clusters")
+    clusters = clusters if isinstance(clusters, list) else []
+
+    def _cluster_size_tail(price: float) -> str:
+        # Distance % alone ("0.2%") says nothing about how much sits there. Attach
+        # the nearest cluster's notional + intensity so the magnet's pull is legible.
+        best = None
+        best_d = None
+        for c in clusters:
+            if not isinstance(c, dict) or c.get("price") is None:
+                continue
+            d = abs(float(c["price"]) - price)
+            if best_d is None or d < best_d:
+                best, best_d = c, d
+        if best is None or price <= 0 or best_d is None or best_d / price > 0.005:
+            return ""
+        notional = float(best.get("total_notional") or 0.0)
+        intensity = float(best.get("intensity") or 0.0)
+        parts: list[str] = []
+        if notional > 0:
+            parts.append(_fmt_usd_compact(notional))
+        if intensity > 0:
+            parts.append(f"{intensity:.0%} плотн.")
+        return f" · {' · '.join(parts)}" if parts else ""
+
     if nearest_long is not None:
         pull = market.get("liq_magnet_pull_long_pct")
-        tail = f" ({pull:.1f}%)" if pull is not None else ""
+        dist = f" ({pull:.1f}%)" if pull is not None else ""
         lines.append(
-            f"Лонг-ликвидации ↓ <code>{_fmt_price(float(nearest_long))}</code>{tail}"
+            f"Лонг-ликвидации ↓ <code>{_fmt_price(float(nearest_long))}</code>{dist}"
+            f"{_cluster_size_tail(float(nearest_long))}"
         )
     if nearest_short is not None:
         pull = market.get("liq_magnet_pull_short_pct")
-        tail = f" ({pull:.1f}%)" if pull is not None else ""
+        dist = f" ({pull:.1f}%)" if pull is not None else ""
         lines.append(
-            f"Шорт-сквиз ↑ <code>{_fmt_price(float(nearest_short))}</code>{tail}"
+            f"Шорт-сквиз ↑ <code>{_fmt_price(float(nearest_short))}</code>{dist}"
+            f"{_cluster_size_tail(float(nearest_short))}"
         )
     if cascade:
         label = "лонг-флаш" if cascade == "long_flush" else "шорт-сквиз"
@@ -415,17 +450,28 @@ def format_liquidity_heatmap_section(row: dict[str, Any]) -> str:
         "🌡 <b>Тепловая карта ликвидности</b> "
         "<i>(история стакана · sticky/spoof · не ликвидации)</i>"
     ]
-    for s in sticky[:2]:
-        if not isinstance(s, dict):
+    # Nearest sticky wall PER SIDE — sticky[:2] could show two bids and no ask.
+    by_side: dict[str, dict[str, Any]] = {}
+    for s in sticky:
+        if isinstance(s, dict) and s.get("price") is not None:
+            by_side.setdefault(str(s.get("side") or "?"), s)
+    for side in ("bid", "ask"):
+        s = by_side.get(side)
+        if s is None:
             continue
-        side = str(s.get("side") or "?")
-        px = s.get("price")
+        sticky_px = float(s["price"])
+        bits = [f"Sticky {side} @ <code>{_fmt_price(sticky_px)}</code>"]
+        notional = s.get("notional_usd")
+        if isinstance(notional, (int, float)) and notional > 0:
+            bits.append(_fmt_usd_compact(float(notional)))
+        dist = s.get("distance_pct")
+        if isinstance(dist, (int, float)):
+            arrow = "ниже" if side == "bid" else "выше"
+            bits.append(f"{float(dist):.2f}% {arrow}")
         samples = s.get("samples")
-        if px is not None:
-            age = f" · {samples} samples" if samples else ""
-            lines.append(
-                f"Sticky {side} @ <code>{_fmt_price(float(px))}</code>{age}"
-            )
+        if samples:
+            bits.append(f"{samples} snap")
+        lines.append(bits[0] + " (" + " · ".join(bits[1:]) + ")" if len(bits) > 1 else bits[0])
     for sp in spoof[:2]:
         if not isinstance(sp, dict):
             continue
@@ -600,13 +646,25 @@ def format_book_walls_section(row: dict[str, Any]) -> str:
 
     freshness = row.get("freshness") if isinstance(row.get("freshness"), dict) else {}
     dom_age = (freshness or {}).get("dom_age_s")
-    if dom_age is not None and float(dom_age) > 30:
-        dom_label = f"DOM · {float(dom_age):.0f}с назад"
+    # Actionability gate for carried microstructure (#6): a hot-carry tick reuses
+    # the prior snapshot's book_walls, so DOM/hidden orders can be minutes old while
+    # printed under "сейчас". Past _DOM_ACTIONABLE_MAX_AGE_S the data stays VISIBLE
+    # (context) but is explicitly marked not-for-touch-entry — showing stale as
+    # current is the same defect class as a wrong side, just in time.
+    dom_age_f = float(dom_age) if dom_age is not None else None
+    dom_stale = dom_age_f is not None and dom_age_f > _DOM_ACTIONABLE_MAX_AGE_S
+    if dom_age_f is not None and dom_age_f > 30:
+        dom_label = f"DOM · {dom_age_f:.0f}с назад"
     else:
         dom_label = "DOM · сейчас"
     lines = [f"📋 <b>Карта ордеров ({dom_label})</b>"]
     if isinstance(venues, list) and len(venues) > 1:
         lines[0] += f" <i>({len(venues)} бирж)</i>"
+    if dom_stale and dom_age_f is not None:
+        lines.append(
+            f"<i>⚠️ микроструктура устарела ({dom_age_f:.0f}с) — "
+            f"справочно, НЕ для входа по касанию</i>"
+        )
     stale_excluded = walls.get("stale_venues_excluded")
     if isinstance(stale_excluded, list) and stale_excluded:
         lines.append(f"<i>⏱ исключены устаревшие: {', '.join(str(v)[:3].upper() for v in stale_excluded)}</i>")
@@ -698,7 +756,11 @@ def format_book_walls_section(row: dict[str, Any]) -> str:
     if imb is not None:
         imb_f = float(imb)
         lean = "перевес покупателей" if imb_f > 0.15 else ("перевес продавцов" if imb_f < -0.15 else "баланс")
-        lines.append(f"Дисбаланс стакана: <code>{imb_f:+.3f}</code> ({lean})")
+        # Window label matters: this is TOP-OF-BOOK (первые ~20 уровней у цены),
+        # while the «Покупка/Продажа» bands above aggregate WIDE price bins — the
+        # two can legitimately disagree (huge ask wall 0.3% away vs bid-heavy top),
+        # and without the label that reads as a contradiction.
+        lines.append(f"Дисбаланс верха стакана (у цены): <code>{imb_f:+.3f}</code> ({lean})")
     maps = row.get("maps") or {}
     ob = maps.get("orderbook") if isinstance(maps, dict) else None
     if isinstance(ob, dict):

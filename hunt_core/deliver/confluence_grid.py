@@ -69,6 +69,28 @@ def build_confluence_grid(row: dict[str, Any]) -> list[dict[str, Any]]:
         }
         grid.append(entry)
 
+    # Levels already printed on a per-TF row — the "глубже/выше" lists must not
+    # repeat them (the 1h support/resist reappearing below was pure noise).
+    shown_levels: list[float] = []
+    for g in grid:
+        for k in ("support", "resistance"):
+            v = g.get(k)
+            if isinstance(v, (int, float)) and v > 0:
+                shown_levels.append(float(v))
+
+    def _dedup_levels(vals: list[float], *, min_sep_pct: float = 0.15) -> list[float]:
+        """Drop levels within min_sep_pct of an already-kept OR already-shown
+        level — collapses the 63668.8/63657.4 (~0.02%) near-duplicates and the
+        per-TF repeats into a clean ladder."""
+        kept: list[float] = []
+        for p in vals:
+            if any(abs(p - s) / max(p, 1e-9) * 100.0 < min_sep_pct for s in shown_levels):
+                continue
+            if any(abs(p - k) / max(p, 1e-9) * 100.0 < min_sep_pct for k in kept):
+                continue
+            kept.append(p)
+        return kept
+
     # --- Multi-level deep zones: collect all swing lows below price as "deeper support" ---
     deeper_supports: list[float] = []
     deeper_resistances: list[float] = []
@@ -86,12 +108,13 @@ def build_confluence_grid(row: dict[str, Any]) -> list[dict[str, Any]]:
                     if p not in deeper_resistances:
                         deeper_resistances.append(p)
     if deeper_supports:
-        # Individual deep levels (up to 6 nearest, so 58850 appears).
-        sorted_lows = sorted(deeper_supports, reverse=True)
-        grid.append({
-            "tf": "глубже",
-            "support": sorted_lows[:6],
-        })
+        # Nearest-first, de-duplicated (no per-TF repeats, no ~0.02% pairs).
+        sorted_lows = _dedup_levels(sorted(deeper_supports, reverse=True))
+        if sorted_lows:
+            grid.append({
+                "tf": "глубже",
+                "support": sorted_lows[:6],
+            })
         # Clustered zones: group nearby swing lows into ranges.
         # A cluster is formed when consecutive levels are within 2.5% of each other.
         clusters = _cluster_levels(sorted_lows, pct_gap=2.5)
@@ -103,17 +126,23 @@ def build_confluence_grid(row: dict[str, Any]) -> list[dict[str, Any]]:
                 hi = max(cl)
                 if hi > price:
                     continue
+                # Chained levels (each within 2.5% of the next) can accrete into a
+                # 9%+ band — useless as a zone row (e.g. BTC «зона 1: 63669–58030»).
+                # A zone row is only actionable when the WHOLE band is tight.
+                if lo <= 0 or (hi - lo) / hi * 100.0 > _ZONE_ROW_MAX_WIDTH_PCT:
+                    continue
                 grid.append({
                     "tf": f"зона {i+1}",
                     "support": f"{_fmt_price_adaptive(hi)}–{_fmt_price_adaptive(lo)}",
                     "_skip_generic": True,
                 })
     if deeper_resistances:
-        sorted_highs = sorted(deeper_resistances)
-        grid.append({
-            "tf": "выше",
-            "resistance": sorted_highs[:6],
-        })
+        sorted_highs = _dedup_levels(sorted(deeper_resistances))
+        if sorted_highs:
+            grid.append({
+                "tf": "выше",
+                "resistance": sorted_highs[:6],
+            })
         clusters_h = _cluster_levels(sorted_highs, pct_gap=2.5)
         if len(clusters_h) > 1:
             for i, cl in enumerate(clusters_h):
@@ -122,6 +151,8 @@ def build_confluence_grid(row: dict[str, Any]) -> list[dict[str, Any]]:
                 lo = min(cl)
                 hi = max(cl)
                 if lo < price:
+                    continue
+                if lo <= 0 or (hi - lo) / hi * 100.0 > _ZONE_ROW_MAX_WIDTH_PCT:
                     continue
                 grid.append({
                     "tf": f"зона {i+1}",
@@ -137,6 +168,10 @@ def build_confluence_grid(row: dict[str, Any]) -> list[dict[str, Any]]:
 
 _GRID_MAX_DISTANCE_PCT = 15.0
 _CLUSTER_PCT_GAP = 2.0  # swing lows: split at gaps wider than this
+# Max total width of a rendered «зона N» row. Consecutive levels each within the
+# 2.5% cluster gap can chain into an arbitrarily wide band; beyond this the row
+# stops being a limit band and becomes «the whole range».
+_ZONE_ROW_MAX_WIDTH_PCT = 5.0
 
 
 def _cluster_levels(levels: list[float], *, pct_gap: float = _CLUSTER_PCT_GAP) -> list[list[float]]:

@@ -70,7 +70,13 @@ class AnalystReport:
         bias = str(htf.get("bias") or "unknown")
         score = htf.get("score")
         score_str = f" ({score:+.2f})" if isinstance(score, (int, float)) else ""
-        lines = [f"📐 <b>МТФ структура</b> · HTF-bias: <b>{_BIAS_RU.get(bias, bias)}</b>{score_str}"]
+        # Name the SCORED set in the header so the reader never attributes the
+        # separate intraday line below to the HTF number (#1: 5m under a "HTF-bias"
+        # header misled even a careful reviewer into an incl-5m average).
+        lines = [
+            f"📐 <b>МТФ структура</b> · HTF-bias (1w·1d·4h·1h): "
+            f"<b>{_BIAS_RU.get(bias, bias)}</b>{score_str}"
+        ]
 
         # Per-TF breakdown (1w, 1d, 4h, 1h) from explicit prizrak structure.
         for tf_key in ("1w", "1d", "4h", "1h"):
@@ -89,7 +95,8 @@ class AnalystReport:
             slom = (" · слом: " + ", ".join(slom_bits)) if slom_bits else ""
             lines.append(f"  {tf_key}: <b>{_TREND_RU.get(trend, trend)}</b>{slom}")
 
-        # Legacy intraday tier (5m/15m) — not in the explicit per-TF set.
+        # Intraday tier (5m/15m) — timing context ONLY, explicitly NOT part of the
+        # HTF-bias score (its own labelled sub-row so it can't be read as an HTF input).
         intra_trend = str(tier_trends.get("intraday") or "neutral")
         _raw_intra_s = struct_by_tier.get("intraday")
         intra_s = _raw_intra_s if isinstance(_raw_intra_s, dict) else {}
@@ -104,6 +111,7 @@ class AnalystReport:
             intra_slom.append("CHoCH↓")
         intra_slom_str = (" · слом: " + ", ".join(intra_slom)) if intra_slom else ""
         tf_lbl = str(intra_s.get("tf") or "5m/15m")
+        lines.append("<i>внутридневной контекст (не в HTF-балле):</i>")
         lines.append(f"  {tf_lbl}: <b>{_TREND_RU.get(intra_trend, intra_trend)}</b>{intra_slom_str}")
 
         # This footer used to be a hardcoded "counter-trend без слома — сигнал не
@@ -146,6 +154,19 @@ class AnalystReport:
             ev = ", ".join(reconcile.get("evidence", [])) if isinstance(reconcile, dict) else ""
             note = f" ({ev})" if ev else ""
             lines.append(f"⚠️ <i>структура против карты ликвидаций/DOM — риск-флаг{note}</i>")
+        # No-candidate (WAIT) tick: the per-candidate flag above never ran, but the
+        # HTF bias can still contradict the live microstructure (bullish DOM/squeeze
+        # under a SHORT bias) — surface that conflict instead of printing bias and
+        # microstructure side by side unresolved. Only when no candidate flag showed.
+        elif isinstance(self.row.get("prizrak_bias_liq_conflict"), dict):
+            bc = self.row["prizrak_bias_liq_conflict"]
+            bias_ru = _BIAS_RU.get(str(bc.get("bias") or ""), str(bc.get("bias") or ""))
+            ev = ", ".join(bc.get("evidence") or [])
+            note = f" ({ev})" if ev else ""
+            lines.append(
+                f"⚠️ <i>HTF-bias {bias_ru} против текущей микроструктуры (DOM/ликвидации){note}"
+                f" — near-term давление в другую сторону</i>"
+            )
         return "\n".join(lines) if len(lines) > 1 else ""
 
     def interest_zones_text(self) -> str:
@@ -157,13 +178,53 @@ class AnalystReport:
         if not isinstance(iz, dict) or not (iz.get("long") or iz.get("short")):
             return ""
         tf = str(iz.get("tf") or "4h")
+        # HTF bias lives in TWO shapes: prizrak_structure["htf_bias"] is the full
+        # dict, prizrak_summary["htf_bias"] is just the string verdict. The zone
+        # block can render with summary=None (no active candidate), so read the
+        # dict form first (survives the WAIT tick) and fall back to the string.
+        _raw_struct = self.row.get("prizrak_structure")
+        struct = _raw_struct if isinstance(_raw_struct, dict) else {}
+        _struct_htf = struct.get("htf_bias")
+        if isinstance(_struct_htf, dict):
+            bias = str(_struct_htf.get("bias") or "").lower()
+        else:
+            _raw_ps = self.row.get("prizrak_summary")
+            ps = _raw_ps if isinstance(_raw_ps, dict) else {}
+            _summary_htf = ps.get("htf_bias")
+            bias = str(_summary_htf or "").lower() if isinstance(_summary_htf, str) else ""
         lines = [f"🎯 <b>Зоны интереса</b> ({tf} · лимитки/доборы, вход по факту касания)"]
+        lines.append("<i>отложенные лимит-зоны WAIT-тика — не активный сигнал</i>")
 
         def _zone_line(z: dict[str, Any]) -> str:
             t = f" ({z['touches']} касаний)" if z.get("touches") else ""
             return f"<code>{fmt_price(z['lo'])}–{fmt_price(z['hi'])}</code>{t}"
 
-        def _side(label: str, single: Any, ladder: Any) -> None:
+        def _refs_line(single: Any, *, side: str) -> None:
+            # Ориентиры (не план сделки): инвалидация за структурой + первая реакция.
+            if not isinstance(single, dict):
+                return
+            parts: list[str] = []
+            inval = single.get("invalidation")
+            if isinstance(inval, (int, float)) and inval > 0:
+                word = "ниже" if side == "long" else "выше"
+                parts.append(f"инвалидация {word} <code>{fmt_price(inval)}</code> (за структурой с запасом)")
+            tgt = single.get("first_target")
+            if isinstance(tgt, (int, float)) and tgt > 0:
+                parts.append(f"первая реакция → <code>{fmt_price(tgt)}</code>")
+            if parts:
+                lines.append("   " + " · ".join(parts))
+
+        def _bias_warn(side: str) -> None:
+            # A zone AGAINST the HTF bias is a reaction-only play (course: против
+            # тренда без слома не проходит гейт) — say it, don't leave the reader
+            # to reconcile «HTF шорт» with «лонг-зона» themselves.
+            if (bias == "short" and side == "long") or (bias == "long" and side == "short"):
+                lines.append(
+                    "   ⚠️ <i>против HTF-bias — только реакция от касания с подтверждением;"
+                    " без слома структуры такой сетап не проходит гейт</i>"
+                )
+
+        def _side(label: str, single: Any, ladder: Any, *, side: str) -> None:
             # Лесенка доборов (Д1/Д2/Д3) when present — the author works a GRID of levels,
             # not one box; fall back to the single strongest zone otherwise.
             rungs = [z for z in (ladder or ()) if isinstance(z, dict) and z.get("lo") and z.get("hi")]
@@ -172,10 +233,14 @@ class AnalystReport:
                 lines.append(f"{label} {tags}")
             elif isinstance(single, dict):
                 lines.append(f"{label} {_zone_line(single)}")
+            else:
+                return
+            _refs_line(single, side=side)
+            _bias_warn(side)
 
-        _side("🟢 Лонг:", iz.get("long"), iz.get("long_ladder"))
-        _side("🔴 Шорт:", iz.get("short"), iz.get("short_ladder"))
-        return "\n".join(lines) if len(lines) > 1 else ""
+        _side("🟢 Лонг:", iz.get("long"), iz.get("long_ladder"), side="long")
+        _side("🔴 Шорт:", iz.get("short"), iz.get("short_ladder"), side="short")
+        return "\n".join(lines) if len(lines) > 2 else ""
 
     _ACTION_RU = {"LONG": "ЛОНГ", "SHORT": "ШОРТ", "WAIT": "ОЖИДАНИЕ"}
     _ACTION_EMOJI = {"LONG": "🟢", "SHORT": "🔴", "WAIT": "⏳"}

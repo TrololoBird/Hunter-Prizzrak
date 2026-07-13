@@ -205,15 +205,35 @@ def compute_interest_zones(
             return [{"lo": float(z["lo"]), "hi": float(z["hi"]), "touches": int(z.get("touches") or 0)}
                     for z in ranked]
 
+        # Ориентиры per side (course стр.19: «СТОП прятать с запасом за структуру»):
+        # invalidation = beyond the DEEPEST ladder rung with the configured buffer,
+        # first_target = nearest structural box on the far side of the zone. These are
+        # reference marks for the pending-limit zones, NOT a trade plan — the full
+        # stop/TP ladder still belongs to active candidates only.
+        buffer_pct = float(getattr(cfg, "stop_buffer_pct", 0.02) or 0.02)
         out: dict[str, Any] = {"tf": use_tf}
         if long_zone:
+            long_ladder = _ladder(below, nearer=lambda z: z["hi"])
+            deepest_lo = min(z["lo"] for z in long_ladder)
             out["long"] = {"lo": float(long_zone["lo"]), "hi": float(long_zone["hi"]),
-                           "touches": int(long_zone.get("touches") or 0)}
-            out["long_ladder"] = _ladder(below, nearer=lambda z: z["hi"])
+                           "touches": int(long_zone.get("touches") or 0),
+                           "invalidation": deepest_lo * (1.0 - buffer_pct)}
+            targets_up = [float(z["lo"]) for z in zones
+                          if float(z.get("lo") or 0) > float(long_zone["hi"])]
+            if targets_up:
+                out["long"]["first_target"] = min(targets_up)
+            out["long_ladder"] = long_ladder
         if short_zone:
+            short_ladder = _ladder(above, nearer=lambda z: -z["lo"])
+            highest_hi = max(z["hi"] for z in short_ladder)
             out["short"] = {"lo": float(short_zone["lo"]), "hi": float(short_zone["hi"]),
-                            "touches": int(short_zone.get("touches") or 0)}
-            out["short_ladder"] = _ladder(above, nearer=lambda z: -z["lo"])
+                            "touches": int(short_zone.get("touches") or 0),
+                            "invalidation": highest_hi * (1.0 + buffer_pct)}
+            targets_down = [float(z["hi"]) for z in zones
+                            if 0 < float(z.get("hi") or 0) < float(short_zone["lo"])]
+            if targets_down:
+                out["short"]["first_target"] = max(targets_down)
+            out["short_ladder"] = short_ladder
         return out
     return {}
 

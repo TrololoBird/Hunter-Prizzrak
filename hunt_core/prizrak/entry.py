@@ -15,6 +15,7 @@ import structlog
 
 from hunt_core.prizrak.adapter import row_ohlcv_by_tf
 from hunt_core.prizrak.config import PrizrakConfig
+from hunt_core.prizrak.liq_reconcile import compute_liquidation_factor
 from hunt_core.prizrak.orchestrator import build_prizrak_signals
 
 LOG = structlog.get_logger("hunt.prizrak.entry")
@@ -97,6 +98,28 @@ def ensure_prizrak_verdict(
             strength=_summary.get("strength"),
             evidence=_rec.get("evidence") if isinstance(_rec, dict) else None,
         )
+    # bias↔microstructure reconciliation for the NO-CANDIDATE (WAIT) tick — the gap
+    # the per-candidate reconcile above cannot cover. When there's a directional HTF
+    # bias but no active candidate to sverить, still check the bot's own DOM/liq map
+    # against the bias so a bullish microstructure under a SHORT bias (or vice-versa)
+    # is surfaced instead of the two being printed side by side unresolved.
+    if _summary is None and liq_context is not None:
+        _struct = row.get("prizrak_structure")
+        _htf = _struct.get("htf_bias") if isinstance(_struct, dict) else None
+        _bias = str(_htf.get("bias") or "").lower() if isinstance(_htf, dict) else ""
+        if _bias in {"long", "short"}:
+            _bias_factor = compute_liquidation_factor(liq_context, direction=_bias, cfg=cfg)
+            if _bias_factor.get("conflict"):
+                row["prizrak_bias_liq_conflict"] = {
+                    "bias": _bias,
+                    "evidence": _bias_factor.get("evidence") or [],
+                }
+                LOG.info(
+                    "prizrak_bias_liq_conflict",
+                    symbol=str(row.get("symbol") or ""),
+                    bias=_bias,
+                    evidence=_bias_factor.get("evidence"),
+                )
     return candidates
 
 

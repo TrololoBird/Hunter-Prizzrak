@@ -147,16 +147,30 @@ def _detect_sticky_walls(
                 notionals[key] = max(notionals.get(key, 0.0), float(lvl.get("notional_usd") or 0))
     sticky: list[dict[str, Any]] = []
     for (side, px), count in price_counts.items():
-        if count >= min_samples:
-            sticky.append(
-                {
-                    "side": side,
-                    "price": round(px, 6),
-                    "samples": count,
-                    "notional_usd": round(notionals.get((side, px), 0.0), 2),
-                    "distance_pct": round(abs(px - current_price) / current_price * 100.0, 3),
-                }
-            )
+        if count < min_samples:
+            continue
+        # The top of the book exists in EVERY snapshot by definition, so the bucket
+        # straddling the spread trivially "persists" and, sorted by distance, wins —
+        # rendering the nonsense «Sticky bid == Sticky ask == current price». A sticky
+        # wall is a PRICE-ANCHORED level, not the price-following book top, so require:
+        #   (1) side sanity — a bid rests below price, an ask above;
+        #   (2) the bucket to sit at least one full bucket width away from price.
+        if side == "bid" and px >= current_price:
+            continue
+        if side == "ask" and px <= current_price:
+            continue
+        distance_pct = abs(px - current_price) / current_price * 100.0
+        if distance_pct < tolerance_pct:
+            continue
+        sticky.append(
+            {
+                "side": side,
+                "price": round(px, 6),
+                "samples": count,
+                "notional_usd": round(notionals.get((side, px), 0.0), 2),
+                "distance_pct": round(distance_pct, 3),
+            }
+        )
     return sorted(sticky, key=lambda x: x["distance_pct"])[:6]
 
 
@@ -274,13 +288,34 @@ def _detect_iceberg(
     if current_price <= 0 or not trades:
         return []
     tol = current_price * tolerance_pct / 100.0
+    # Bids and asks share one price-bucket dict. Near the spread a bid and an
+    # ask can round to the SAME bucket; the asks loop must not blindly overwrite
+    # the bid (that mislabeled a support level as a hidden "sell" BELOW price —
+    # physically impossible). Keep the entry whose side agrees with its position
+    # vs current_price; on a genuine straddle bucket keep the larger notional.
     book_by_px: dict[float, tuple[float, str]] = {}
+
+    def _consider(px: float, notional: float, side: str) -> None:
+        if px <= 0:
+            return
+        key = round(px / tol) * tol if tol else px
+        prev = book_by_px.get(key)
+        if prev is None:
+            book_by_px[key] = (notional, side)
+            return
+        # Prefer the side consistent with position; else the larger wall.
+        want = "bid" if key < current_price else "ask"
+        prev_ok = prev[1] == want
+        new_ok = side == want
+        if new_ok and not prev_ok:
+            book_by_px[key] = (notional, side)
+        elif new_ok == prev_ok and notional > prev[0]:
+            book_by_px[key] = (notional, side)
+
     for px, qty in bids:
-        if px > 0:
-            book_by_px[round(px / tol) * tol if tol else px] = (px * qty, "bid")
+        _consider(px, px * qty, "bid")
     for px, qty in asks:
-        if px > 0:
-            book_by_px[round(px / tol) * tol if tol else px] = (px * qty, "ask")
+        _consider(px, px * qty, "ask")
     fill_at: dict[float, float] = {}
     cutoff_ms = int(time.time() * 1000) - 120_000
     for pt in trades:
@@ -298,6 +333,17 @@ def _detect_iceberg(
     for key, filled in fill_at.items():
         shown = book_by_px.get(key)
         if shown and filled > shown[0] * 1.4:
+            # Side sanity (mirrors _detect_sticky_walls): a hidden BID (absorption
+            # buyer) rests at/below price, a hidden ASK (distribution seller)
+            # at/above. Drop the straddle bucket (within one tol of price) where
+            # side is genuinely ambiguous, and never emit an ask below / bid above
+            # price — that was the "скрытый sell ниже цены" artifact.
+            side = shown[1]
+            if abs(key - current_price) <= tol:
+                continue
+            positional = "bid" if key < current_price else "ask"
+            if side != positional:
+                continue
             # A flat $1 floor on displayed notional lets a near-empty book level
             # (e.g. a few cents shown) blow the ratio up into the tens of thousands —
             # not a meaningful "replenishment" reading. Floor against a fraction of the
@@ -307,7 +353,7 @@ def _detect_iceberg(
             out.append(
                 {
                     "price": round(key, 6),
-                    "side": shown[1],
+                    "side": side,
                     "filled_usd": round(filled, 2),
                     "displayed_usd": round(shown[0], 2),
                     "replenishment_ratio": round(min(raw_ratio, _RATIO_CAP), 2),
