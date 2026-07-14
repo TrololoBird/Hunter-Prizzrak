@@ -89,7 +89,10 @@ class AnalystReport:
             _raw_s = struct_by_tf.get(tf_key)
             s = _raw_s if isinstance(_raw_s, dict) else {}
             _w = _htf_weights.get(tf_key)
-            w_str = f" <i>·{float(_w)*100:.0f}%</i>" if isinstance(_w, (int, float)) else ""
+            # Label the % as the TF's WEIGHT in the composite, not a confidence — «1w
+            # вниз ·35%» was misread as «35% sure down» when 35% is 1w's share of the
+            # −0.60 weighted sum (35+25+30+10=100).
+            w_str = f" <i>(вес {float(_w)*100:.0f}%)</i>" if isinstance(_w, (int, float)) else ""
             slom_bits = []
             if s.get("bos_up"):
                 slom_bits.append("BOS↑")

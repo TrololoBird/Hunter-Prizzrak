@@ -15,7 +15,7 @@ from __future__ import annotations
 import collections
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from hunt_core.maps.config import MapsConfig
@@ -87,6 +87,10 @@ class LiquidationMap:
     squeeze_fuel_short: float | None = None
     funding_rate: float | None = None
     leverage_tiers_known: bool = True
+    # Per-venue realized-event counts over ALL LIVE feeders (including 0 for a live-but
+    # -quiet venue), so a signal can tell "quiet market" from "feeder died" — heatmap
+    # .venues only lists venues that HAD events, which hid a dead Bybit feeder.
+    venue_events: dict[str, int] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         base = heatmap_to_market_dict(
@@ -103,6 +107,13 @@ class LiquidationMap:
                 "liq_forward_confidence": self.heatmap.forward_confidence,
                 "liq_leverage_tiers_known": self.leverage_tiers_known,
                 "liq_venues": list(self.heatmap.venues),
+                # ALL live venues + their event counts + completeness (overrides the
+                # events-only heatmap.venues map), so a dead feeder is visible.
+                "liq_venue_events": dict(self.venue_events),
+                "liq_venue_completeness": {
+                    v: _VENUE_LIQ_COMPLETENESS.get(v.lower(), "unknown")
+                    for v in self.venue_events
+                },
                 "liq_realized_events": self.heatmap.realized_event_count,
                 "liq_magnet_pull_long": self.magnet_pull_long,
                 "liq_magnet_pull_short": self.magnet_pull_short,
@@ -584,6 +595,9 @@ def build_liquidation_map(
 
     combined: collections.deque[LiqEvent] = collections.deque(maxlen=16_000)
     venues: list[str] = []
+    # Count events per LIVE feeder (every buffer key), including 0 — so a live-but-quiet
+    # venue is distinguishable from a dead feeder downstream.
+    venue_events: dict[str, int] = {venue: len(buf) for venue, buf in buffers.items()}
     for venue, buf in buffers.items():
         if not buf:
             continue
@@ -750,6 +764,7 @@ def build_liquidation_map(
         squeeze_fuel_short=short_fuel,
         funding_rate=funding_rate,
         leverage_tiers_known=bool(bracket_tiers),
+        venue_events=venue_events,
     )
 
 

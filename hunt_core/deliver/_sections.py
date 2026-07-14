@@ -416,17 +416,30 @@ def format_liquidation_map_section(row: dict[str, Any]) -> str:
     if nearest_long is None and nearest_short is None and not cascade:
         return ""
     header = "💥 <b>Ликвидации</b>"
+    # Show EVERY live venue with its event count + completeness, so a live-but-quiet
+    # feeder (0ev) is distinguishable from a dead one (absent). Falls back to the
+    # completeness-only map when per-venue counts aren't available.
+    ve = market.get("liq_venue_events")
+    vc = market.get("liq_venue_completeness")
+    venue_str = ""
+    if isinstance(ve, dict) and ve:
+        venue_str = ", ".join(
+            f"{v}={vc.get(v, '?') if isinstance(vc, dict) else '?'}·{int(n)}ev"
+            for v, n in ve.items()
+        )
+    elif isinstance(vc, dict) and vc:
+        venue_str = ", ".join(f"{v}={c}" for v, c in vc.items())
     if synthetic_only:
         # Honest: the forward estimate is Binance-OI-based (cross-venue OI is 1в-2,
-        # not yet done); only the realized tape is multi-exchange.
-        header += " · <i>оценка по leverage-tier (Binance OI), без реальных ликвидаций</i>"
+        # not yet done); only the realized tape is multi-exchange. If live feeders
+        # exist but had 0 events this window, name them so «quiet» ≠ «feeder dead».
+        header += " · <i>оценка по leverage-tier (Binance OI), без реальных ликвидаций"
+        header += f"; вены: {html.escape(venue_str)}</i>" if venue_str else "</i>"
     else:
-        vc = market.get("liq_venue_completeness")
-        if isinstance(vc, dict) and vc:
-            parts = ", ".join(f"{v}={c}" for v, c in vc.items())
-            header += f" · <i>реальные ликвидации ({html.escape(parts)})</i>"
-        else:
-            header += " · <i>реальные ликвидации</i>"
+        header += (
+            f" · <i>реальные ликвидации ({html.escape(venue_str)})</i>"
+            if venue_str else " · <i>реальные ликвидации</i>"
+        )
     lines = [header]
 
     clusters = market.get("liq_heatmap_clusters")
