@@ -607,13 +607,25 @@ def build_liquidation_map(
 
     combined: collections.deque[LiqEvent] = collections.deque(maxlen=16_000)
     venues: list[str] = []
-    # Count events per LIVE feeder (every buffer key), including 0 — so a live-but-quiet
-    # venue is distinguishable from a dead feeder downstream.
-    venue_events: dict[str, int] = {venue: len(buf) for venue, buf in buffers.items()}
+    # Per-venue event counts for THIS symbol within the map window. `len(buf)` counted
+    # the whole ring buffer — every symbol in the universe, over the buffer's full
+    # depth — so a BTC card could read «bybit=full·5ev» right next to «без реальных
+    # ликвидаций» (those 5 events were other symbols, outside the window), and a feeder
+    # that died hours ago still looked alive on the strength of its stale backlog.
+    # 0 here now honestly means "live but quiet"; absent means "no feeder".
+    cutoff_ms = int(time.time() * 1000) - cfg.window_seconds * 1000
+    sym_u = symbol.upper()
+    venue_events: dict[str, int] = {
+        venue: sum(1 for ev in buf if ev[1] == sym_u and ev[0] >= cutoff_ms)
+        for venue, buf in buffers.items()
+    }
     for venue, buf in buffers.items():
         if not buf:
             continue
-        venues.append(venue)
+        # `venues` must mean "had events for THIS symbol in-window" — the label the
+        # delivery layer renders as «реальные ликвидации (…)».
+        if venue_events.get(venue, 0) > 0:
+            venues.append(venue)
         for ev in buf:
             combined.append(ev)
 

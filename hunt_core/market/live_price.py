@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -45,6 +46,20 @@ def price_max_age_s() -> float:
     return _DEFAULT_MAX_AGE_S
 
 
+def _stamp_is_stale(ts_ms: Any, max_age_s: float) -> bool:
+    """True when a ts_ms stamp is missing or older than max_age_s.
+
+    Missing stamp = unknown age = treat as stale (fail-loud, never fabricate freshness).
+    """
+    try:
+        ts = float(ts_ms or 0)
+    except (TypeError, ValueError):
+        return True
+    if ts <= 0:
+        return True
+    return (time.time() * 1000 - ts) > max_age_s * 1000
+
+
 def resolve_live_price(
     symbol: str,
     *,
@@ -59,6 +74,10 @@ def resolve_live_price(
     fb = float(fallback) if fallback and float(fallback) > 0 else 0.0
     age_limit = _DEFAULT_MAX_AGE_S if max_age_s is None else max_age_s
 
+    # EVERY live path is age-gated. Only live_ticker used to be: when the depth or
+    # mark stream stalled, live_bbo/live_funding happily served their last cached
+    # quote and it flowed out as a FRESH price — so entry/stop/target geometry got
+    # built on a dead quote with no staleness flag anywhere.
     if ws_feed is not None:
         lt = ws_feed.live_ticker(sym, max_age_s=age_limit)
         if lt:
@@ -66,7 +85,7 @@ def resolve_live_price(
             if last > 0:
                 return last, "ws_ticker"
 
-        bbo = ws_feed.live_bbo(sym)
+        bbo = ws_feed.live_bbo(sym, max_age_s=age_limit)
         if bbo:
             bid = float(bbo.get("bid") or 0)
             ask = float(bbo.get("ask") or 0)
@@ -77,7 +96,7 @@ def resolve_live_price(
             if ask > 0:
                 return ask, "ws_ask"
 
-        funding = ws_feed.live_funding(sym)
+        funding = ws_feed.live_funding(sym, max_age_s=age_limit)
         if funding:
             mark = float(funding.get("markPrice") or 0)
             if mark > 0:
@@ -86,7 +105,10 @@ def resolve_live_price(
     snap = ws_snap or (ws_feed.snapshot(sym) if ws_feed is not None else None)
     if snap:
         mark = float(snap.get("live_mark_price") or 0)
-        if mark > 0:
+        # The snapshot mark comes from the SAME funding store the gate above just
+        # rejected, so honour its stamp too — otherwise a stalled mark stream would
+        # simply re-enter through the snapshot fallback.
+        if mark > 0 and not _stamp_is_stale(snap.get("live_mark_ts_ms"), age_limit):
             return mark, "ws_snap_mark"
 
     if book:

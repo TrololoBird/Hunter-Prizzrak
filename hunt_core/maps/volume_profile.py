@@ -206,13 +206,21 @@ def build_period_profile(
     hist = _volume_histogram(work, lookback=lookback, buckets=buckets)
     hvn, lvn = _hvn_lvn_nodes(hist, price_min=price_min, bucket_size=bucket_size)
 
-    prior_poc, _, _ = volume_profile_levels(
-        work.head(max(0, work.height - lookback)) if work.height > lookback else work,
-        lookback=None,
-        buckets=buckets,
-    )
+    # POC migration needs a PRIOR window that is genuinely different from the current
+    # one. When height <= lookback the "prior" slice degenerates to `work` itself —
+    # the same bars, same buckets — so prior_poc == poc, delta == 0 and migration was
+    # GUARANTEED "flat", which derive_vp_accumulation_features rewards with +0.25 for a
+    # "stable POC" nobody measured. That inflated the accumulation score on exactly the
+    # young listings the scanner hunts. No prior window → no migration claim.
+    # (_naked_poc already guards the same way: height < lookback + 5 → None.)
+    if work.height > lookback:
+        prior_poc, _, _ = volume_profile_levels(
+            work.head(work.height - lookback), lookback=None, buckets=buckets
+        )
+        migration = _poc_migration(prior_poc, poc)
+    else:
+        migration = None
     naked = _naked_poc(work, poc, lookback=lookback, current_price=current_price, buckets=buckets)
-    migration = _poc_migration(prior_poc, poc)
 
     return PeriodProfile(
         period=period,
@@ -354,7 +362,10 @@ def derive_vp_accumulation_features(
         score += 0.08
     if val and vah and vah > val:
         pos_in_va = (current_price - val) / (vah - val)
-        if pos_in_va <= 0.35:
+        # Clamp below: "price sits in the LOWER third of the value area" is accumulation.
+        # A price BELOW the VA (pos < 0) is a breakdown OUT of value — the opposite — yet
+        # the unclamped `<= 0.35` handed it the same +0.20 accumulation credit.
+        if 0.0 <= pos_in_va <= 0.35:
             score += 0.20
         if poc and abs(current_price - poc) / poc * 100.0 <= 1.5:
             score += 0.12

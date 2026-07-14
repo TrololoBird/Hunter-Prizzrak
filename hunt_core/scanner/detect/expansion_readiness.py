@@ -131,10 +131,18 @@ def compute_expansion_readiness(
     ]
     energy = round(min(100.0, sum(energy_parts)), 1)
 
+    # The veto means "OI and volume surged but there is NO taker flow behind it" —
+    # a fake breakout. That verdict is only meaningful when flow is actually MEASURED.
+    # delta_ratio / cvd_slope are not produced anywhere in the ticker rows this runs
+    # on, so flow_mag collapsed to 0.0 < _FLOW_NOISE and the veto degenerated into
+    # "OI up AND volume up" — i.e. it hard-rejected the pre-pump archetype the scanner
+    # exists to find (readiness_meets_prescan requires `not fake_energy_veto`).
+    # Unknown flow is UNKNOWN, not zero: only veto when flow data is present.
+    flow_known = delta is not None or cvd_slope is not None
     flow_mag = max(abs(delta or 0.0), abs(cvd_slope or 0.0))
     oi_up = (oi_chg or 0.0) > 0.5 or (oi_z or 0.0) > 1.0
     vol_up = (vol_z or 0.0) > 1.0
-    fake_veto = oi_up and vol_up and flow_mag < _FLOW_NOISE
+    fake_veto = flow_known and oi_up and vol_up and flow_mag < _FLOW_NOISE
     if fake_veto:
         energy = round(energy * 0.35, 1)
 

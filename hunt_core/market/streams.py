@@ -556,16 +556,24 @@ class HuntCcxtStreams:
                 return None
         return entry
 
-    def live_bbo(self, symbol: str) -> dict[str, float] | None:
+    def live_bbo(self, symbol: str, *, max_age_s: float | None = None) -> dict[str, float] | None:
         """Top-of-book bid/ask — served from L1 order-book depth (watchOrderBookForSymbols).
 
         BBO WS (watchBidsAsks) was removed: per-symbol bookTicker subscriptions for equity
         tokens (TSLAUSDT, MSFTUSDT etc.) are rejected by Binance with close-code 4004 outside
         US market hours, causing 3-second connection churn that destabilises other streams.
         The depth stream already carries L1 bid/ask at equal or better freshness.
+
+        ``max_age_s`` age-gates the entry (mirrors ``live_ticker``): when the depth
+        stream stalls, the last book must NOT be served as a fresh executable price —
+        entries/stops/targets would be geometry off a dead quote.
         """
         sym = to_binance_symbol(symbol)
         book = self._live_books.get(sym)
+        if book and max_age_s is not None:
+            ts_ms = float(book.get("ts_ms") or 0)
+            if ts_ms <= 0 or (time.time() * 1000 - ts_ms) > max_age_s * 1000:
+                return None
         if book and book.get("bid") and book.get("ask"):
             bid = float(book["bid"])
             ask = float(book["ask"])
@@ -573,9 +581,20 @@ class HuntCcxtStreams:
             return {"bid": bid, "ask": ask, "spread_pct": round(spread_pct, 5)}
         return None
 
-    def live_funding(self, symbol: str) -> dict[str, float] | None:
-        """Latest funding rate from watch_funding_rates."""
-        return self._live_funding.get(to_binance_symbol(symbol))
+    def live_funding(
+        self, symbol: str, *, max_age_s: float | None = None
+    ) -> dict[str, float] | None:
+        """Latest funding/mark from watch_funding_rates; age-gated when max_age_s given.
+
+        The markPrice here feeds the price oracle, so a stalled mark stream must not
+        pass a dead mark off as live (same rationale as live_ticker/live_bbo).
+        """
+        entry = self._live_funding.get(to_binance_symbol(symbol))
+        if entry and max_age_s is not None:
+            ts_ms = float(entry.get("ts_ms") or 0)
+            if ts_ms <= 0 or (time.time() * 1000 - ts_ms) > max_age_s * 1000:
+                return None
+        return entry
 
     def live_funding_cross(self, symbol: str) -> dict[str, dict[str, float]]:
         """Latest funding rates from secondary exchanges keyed by exchange name."""
@@ -678,6 +697,9 @@ class HuntCcxtStreams:
             # live funding
             "live_funding_rate": funding.get("fundingRate"),
             "live_mark_price": funding.get("markPrice"),
+            # Age of the mark, so the price oracle can refuse a stale snapshot mark
+            # instead of serving it as live (resolve_live_price).
+            "live_mark_ts_ms": funding.get("ts_ms"),
             "live_index_price": funding.get("indexPrice"),
             **(self.mark_snapshot(sym) or {}),
             **liq_fields,
@@ -1080,6 +1102,7 @@ class HuntCcxtStreams:
                             prev["indexPrice"] = index
                         if funding != 0:
                             prev["fundingRate"] = funding
+                        prev["ts_ms"] = int(time.time() * 1000)  # age-gate stamp
                         self._live_funding[sym] = prev
                         self.client.update_basis_from_websocket(sym, mark, index if index > 0 else None)
             except asyncio.CancelledError:
@@ -1339,6 +1362,9 @@ class HuntCcxtStreams:
                     "depth_imbalance": di_l1,
                     "ws_depth_imbalance": di_top20,
                     "microprice_bias": mp,
+                    # Stamped so readers can age-gate: a stalled depth stream must not
+                    # serve its last book as a fresh executable price (see live_bbo).
+                    "ts_ms": int(time.time() * 1000),
                 }
             except asyncio.CancelledError:
                 break
@@ -1479,6 +1505,7 @@ class HuntCcxtStreams:
                     if funding != 0:
                         prev["fundingRate"] = funding
                     if prev:
+                        prev["ts_ms"] = int(time.time() * 1000)  # age-gate stamp
                         self._live_funding[sym] = prev
                     if mark > 0 and index > 0:
                         self.client.update_basis_from_websocket(sym, mark, index)
