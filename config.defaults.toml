@@ -145,14 +145,6 @@ cex_z_vol_30m_min = 3.0
 cex_pump_buy_share_min = 0.65
 cex_dump_buy_share_max = 0.35
 
-[gate.meme_pump]
-volume_ratio_pump_signature_min = 3.0
-volume_ratio_pump_extreme_min = 5.0
-
-[gate.strategic]
-# move/tradability gates: shadow (log only) until Phase 8 OOS. Set hard=true or HUNT_STRATEGIC_GATES_HARD=1 to block.
-hard = false
-
 [maps]
 enabled = true
 multi_exchange = true
