@@ -224,9 +224,14 @@ class AnalystReport:
                 maps=_mp if isinstance(_mp, dict) else {},
                 price=float(self.row.get("price") or 0),
             )
-            if conf["score"] >= 2:  # only surface a genuine multi-map confluence
+            fund = conf.get("funding_regime")
+            if conf["score"] >= 2:  # ≥2 INDEPENDENT sources (VP/liq/orderbook)
                 joined = " + ".join(conf["factors"])
-                lines.append(f"   🔗 <i>конфлюенс {conf['score']} ({conf['label']}): {joined}</i>")
+                tail = f" · фон: {fund}" if fund else ""
+                lines.append(f"   🔗 <i>конфлюенс {conf['score']} ({conf['label']}): {joined}{tail}</i>")
+            elif fund:
+                # No multi-source confluence, but the global funding regime still favors it.
+                lines.append(f"   <i>фон: {fund}</i>")
 
         def _refs_line(single: Any, *, side: str) -> None:
             # Ориентиры (не план сделки): инвалидация за структурой + первая реакция.
