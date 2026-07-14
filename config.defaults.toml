@@ -18,12 +18,16 @@ pos_near_low = 0.25
 score_watch = 45.0
 score_priority = 60.0
 scan_interval_s = 900
-# NOTE: not wired through the defaults parser (domain/config.py forwards only 4
-# hunter keys) — the EFFECTIVE value is the fallback in params/store.py
-# hunter_thresholds() (currently 50). Kept in sync here for documentation.
+# Now wired: domain/config.py forwards the whole [hunter] section, so this (and every
+# key above) is read by params/store.py::hunter_thresholds() via universal_section.
 watchlist_limit = 50
 
 [watch]
+# DOC-ONLY (top-level keys): these are NOT wired through the defaults parser — the
+# effective values are code constants (e.g. telegram_cooldown_min ↔ COOLDOWN_MINUTES=45
+# in domain/config.py; the tick cadence is set at the watch-loop call site). Kept in
+# sync here for documentation. The NESTED [watch.prescan] below IS wired
+# (params/store.py::prescan_thresholds via universal_section).
 tick_interval_s = 30
 # Ignition TG alerts off by default (watchlist-only); set true in env if needed.
 ignition_telegram = false
@@ -95,6 +99,8 @@ signal_queue_tg_min_rank = 2
 signal_queue_ttl_hours = 2.5
 
 [market_regime]
+# DOC-ONLY: not wired through the defaults parser — refresh cadence and the liquidity
+# floor are code constants (regime/market_regime.py). Kept here for documentation.
 refresh_hours = 4
 min_liquid_qvol_usd = 10_000_000
 

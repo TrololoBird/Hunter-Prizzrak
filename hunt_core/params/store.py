@@ -424,9 +424,9 @@ def hunter_thresholds() -> dict[str, float | int]:
         "score_priority": float(sc.get("score_priority", 60.0)),
         "scan_interval_s": int(sc.get("scan_interval_s", 900)),
         # 30 → 50: widen the scan funnel so more volume-passing candidates reach the
-        # structural manipulation detector. NB config.defaults.toml [hunter] is NOT
-        # wired for this key (the defaults parser only forwards 4 hunter keys), so
-        # this fallback is the effective source until that plumbing is added.
+        # structural manipulation detector. The whole [hunter] section is now forwarded
+        # under key "hunter" (domain/config.py), so this — like every key here — reads
+        # the TOML value; the literal is the fallback if the section is absent.
         "watchlist_limit": int(sc.get("watchlist_limit", 50)),
     }
 

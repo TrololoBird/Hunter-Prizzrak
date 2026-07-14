@@ -300,16 +300,16 @@ def load_config_defaults_toml() -> dict[str, Any]:
     out: dict[str, Any] = {}
     scanner = raw.get("hunter")
     if isinstance(scanner, dict):
-        out["scanner"] = {
-            k: v
-            for k, v in {
-                "hot_range_pct": scanner.get("range_hot_pct"),
-                "pump_extreme_pct": scanner.get("pump_extreme_pct"),
-                "pos_near_high": scanner.get("pos_near_high"),
-                "pos_near_low": scanner.get("pos_near_low"),
-            }.items()
-            if v is not None
-        }
+        # Forward the WHOLE [hunter] section under key "hunter" — that is the key
+        # store.py::hunter_thresholds() reads via universal_section("hunter"). It used
+        # to be emitted under "scanner" (which nothing reads) AND with only 4 renamed
+        # keys, so the entire TOML [hunter] block was doc-only: editing e.g.
+        # min_quote_volume_usd or scan_interval_s in the TOML silently did nothing, the
+        # effective value being the inline `.get(key, fallback)` in hunter_thresholds().
+        # Values currently equal those fallbacks, so this wiring is behaviour-preserving
+        # today and makes future TOML edits actually take effect. Original key names are
+        # kept (range_hot_pct, not the old hot_range_pct rename) so store's .get() hits.
+        out["hunter"] = {k: v for k, v in scanner.items() if v is not None}
 
     confirm_root = raw.get("confirm") if isinstance(raw.get("confirm"), dict) else None
     if isinstance(confirm_root, dict):
