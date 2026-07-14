@@ -317,9 +317,14 @@
 **Решение — bounded standalone capture (НЕ 418-поверхность 1в-2, НЕ в hot-path):**
 `research/maps_prescreen/capture_xvenue_oi.py` — инкрементальный (append только новых баров), 5 символов × binance/bybit/okx, пишет в `data/lake/xvenue_oi_archive.jsonl` (gitignored). Seed сделан (6000 баров текущего окна); идемпотентен (2-й прогон = 0 новых). Бот не трогается, рестарт не нужен.
 
-**Автоматизация — УСТАНОВЛЕНА (с разрешения пользователя).** Daily-cron `14 3 * * *`:
-`uv run --directory <PROJ> python research/maps_prescreen/capture_xvenue_oi.py >> data/lake/xvenue_oi_capture.log 2>&1` (лог gitignored). Форма `--directory` cwd-независима (не зависит от cron-cwd); проверено под cron-minimal env (`env -i`, exit 0). Само-восстановление: каждый прогон тянет трейлинг ~20 дней → пропуск в несколько дней backfill-ится; улика теряется только при разрыве >20 дней.
-`[оговорка]` macOS: cron может требовать Full Disk Access процессу cron (System Settings → Privacy) — если задача не сработает, выдать доступ или перенести на launchd (`~/Library/LaunchAgents/*.plist`, `StartCalendarInterval`). Проверить первый прогон в `xvenue_oi_capture.log`.
+**Автоматизация — УСТАНОВЛЕНА (с разрешения пользователя).** Daily-cron `14 3 * * *` (`crontab -l`):
+```
+14 3 * * * /Users/tonyaleksandrov/.local/bin/uv run --directory /Users/tonyaleksandrov/Documents/HUNTER python research/maps_prescreen/capture_xvenue_oi.py >> /Users/tonyaleksandrov/Documents/HUNTER/data/lake/xvenue_oi_capture.log 2>&1
+```
+`[важно]` **И команда, И путь лога — АБСОЛЮТНЫЕ.** `uv run --directory` меняет cwd только для uv-подпроцесса; редирект `>>` резолвит шелл крона (`/bin/sh`, cwd=`$HOME`), `--directory` его НЕ трогает → относительный `>> data/lake/…` открылся бы как `$HOME/data/lake/…` (нет каталога) и `sh` не запустил бы команду вовсе. Лог gitignored. Форма `--directory` проверена под cron-minimal env (`env -i`, exit 0).
+Само-восстановление: каждый прогон тянет трейлинг ~20 дней → пропуск в несколько дней backfill-ится; улика теряется только при разрыве >20 дней.
+`[оговорка]` macOS: cron может требовать Full Disk Access процессу `/usr/sbin/cron` (System Settings → Privacy) — иначе задача молча не сработает; альтернатива — launchd (`~/Library/LaunchAgents/*.plist`, `StartCalendarInterval`).
+**Проверка по GROUND TRUTH, не по логу** (лог может лежать не там при ошибке редиректа): назавтра после 03:14 смотри рост `data/lake/xvenue_oi_archive.jsonl` (`ls -l` mtime/size). Растёт → крон живой; нет → редирект или Full Disk Access.
 Когда случится каскад: (1) архив уже содержит окружающий кросс-венью OI, (2) перенаправить `oi_regime.py` на каскадное окно → закрыть оговорку #2 фактом.
 
 ---
