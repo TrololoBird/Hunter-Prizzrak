@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from hunt_core import clock
 import json
-import logging
+import structlog
 import os
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -61,8 +61,7 @@ from hunt_core.track._cooldowns import (
 )
 from hunt_core.track._followups import evaluate_followups
 
-_LOG = logging.getLogger(__name__)
-
+_LOG = structlog.get_logger(__name__)
 FOLLOWUP_COOLDOWN_MINUTES = 5
 PHASE_CHANGE_GRACE_MIN = 20.0
 RECLAIM_BUFFER = 1.001  # fallback; prefer tracker_thresholds().reclaim_buffer

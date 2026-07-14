@@ -9,11 +9,10 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import dataclass, field
-import logging
+import structlog
 from typing import Any
 
-LOG = logging.getLogger("hunt_core.data.completeness")
-
+LOG = structlog.get_logger("hunt_core.data.completeness")
 from hunt_core.data_readiness import effective_prepared_minimums, raw_frame_minimums
 from hunt_core.domain.config import BotSettings
 

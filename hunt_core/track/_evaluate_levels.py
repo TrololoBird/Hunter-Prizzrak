@@ -1,7 +1,7 @@
 """SL/TP intrabar evaluation and lifecycle stale invalidation (Phase 8 split)."""
 from __future__ import annotations
 
-import logging
+import structlog
 from datetime import UTC, datetime
 from typing import Any, TYPE_CHECKING
 
@@ -16,8 +16,7 @@ from hunt_core.track._trailing import (
 if TYPE_CHECKING:
     from hunt_core.track.tracker import HuntFollowUp
 
-_LOG = logging.getLogger(__name__)
-
+_LOG = structlog.get_logger(__name__)
 # Stale lifecycle phase sets (mirrored from tracker)
 _SHORT_STALE_PHASES = frozenset(
     {

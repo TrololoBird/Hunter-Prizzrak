@@ -17,7 +17,7 @@ What remains here is small and non-rotating:
 from __future__ import annotations
 
 import asyncio
-import logging
+import structlog
 import os
 import time
 from dataclasses import dataclass
@@ -36,8 +36,7 @@ try:
 except ImportError:
     python_socks = None  # type: ignore[misc, assignment]
 
-LOG = logging.getLogger("hunt_core.market.network")
-
+LOG = structlog.get_logger("hunt_core.market.network")
 # ── Env var resolution ──────────────────────────────────────────────────────
 
 _PROXY_ENV_KEYS: tuple[str, ...] = (

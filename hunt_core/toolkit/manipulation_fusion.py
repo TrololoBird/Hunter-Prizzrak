@@ -4,12 +4,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-import logging
+import structlog
 
 from hunt_core.maps.oi import OiRegime, oi_regime_from_row
 
-LOG = logging.getLogger(__name__)
-
+LOG = structlog.get_logger(__name__)
 Archetype = Literal["predump_short", "prepump_long", "ignition_long", "none"]
 
 _PREDUMP_PHASES = frozenset(

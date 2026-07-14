@@ -7,11 +7,9 @@ from typing import Any, Callable
 
 import polars as pl
 
-import logging
+import structlog
 
-LOG = logging.getLogger(__name__)
-
-
+LOG = structlog.get_logger(__name__)
 @dataclass(frozen=True, slots=True)
 class FactorSpec:
     name: str

@@ -3,11 +3,9 @@ from __future__ import annotations
 
 from typing import Any
 
-import logging
+import structlog
 
-LOG = logging.getLogger(__name__)
-
-
+LOG = structlog.get_logger(__name__)
 def collect_upward_targets(row: dict[str, Any], price: float) -> tuple[list[float], list[str]]:
     market = row.get("market") if isinstance(row.get("market"), dict) else {}
     maps = row.get("maps") if isinstance(row.get("maps"), dict) else {}

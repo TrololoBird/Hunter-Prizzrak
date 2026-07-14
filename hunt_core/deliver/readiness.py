@@ -12,7 +12,7 @@ deleted. This module is what remained genuinely reachable.
 """
 from __future__ import annotations
 
-import logging
+import structlog
 import os
 from dataclasses import dataclass
 from typing import Any
@@ -22,9 +22,7 @@ from hunt_core.deliver.geometry import (
     resolve_min_rr,
 )
 
-LOG = logging.getLogger(__name__)
-
-
+LOG = structlog.get_logger(__name__)
 # ── SniperConfig — live TG delivery window config ──────────────────────────
 @dataclass(frozen=True)
 class SniperConfig:

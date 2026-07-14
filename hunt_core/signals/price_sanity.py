@@ -1,13 +1,11 @@
 """Independent price sanity — withhold signals on implausible quotes (plan §5.13)."""
 from __future__ import annotations
 
-import logging
+import structlog
 
 from typing import Any
 
-LOG = logging.getLogger(__name__)
-
-
+LOG = structlog.get_logger(__name__)
 def price_sanity_check(row: dict[str, Any], *, max_deviation_pct: float = 25.0) -> tuple[bool, str]:
     """Return (ok, reason). Compares live price to structural / session reference."""
     try:

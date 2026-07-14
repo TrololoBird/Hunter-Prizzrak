@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import structlog
+
 import logging
 import asyncio
 import math
@@ -75,7 +77,7 @@ def classify_runtime_error(exc: BaseException) -> str:
         if isinstance(exc, ccxt.NetworkError):
             return "network"
     except Exception:
-        logging.getLogger(__name__).exception("ccxt error classification failed")
+        structlog.get_logger(__name__).exception("ccxt error classification failed")
     name = exc.__class__.__name__.lower()
 
     if isinstance(exc, asyncio.TimeoutError) or name in _NETWORK_ERROR_NAMES:

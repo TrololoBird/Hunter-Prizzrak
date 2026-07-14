@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 
-import logging
+import structlog
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-LOG = logging.getLogger(__name__)
-
+LOG = structlog.get_logger(__name__)
 if TYPE_CHECKING:
     import polars as pl
 

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-import logging
+import structlog
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -11,8 +11,7 @@ from typing import Any
 
 import polars as pl
 
-LOG = logging.getLogger("hunt_core.data.frame_cache")
-
+LOG = structlog.get_logger("hunt_core.data.frame_cache")
 _HOT_MIN_BARS: dict[str, int] = {"1m": 60, "5m": 48, "15m": 96, "1h": 48, "4h": 24}
 _ENRICHMENT_TTL_S = 180.0
 _PREPARED_TTL_S = 900.0

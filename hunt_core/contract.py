@@ -10,7 +10,7 @@ individual detectors do not drift into point entries or partial target gaps.
 """
 from __future__ import annotations
 
-import logging
+import structlog
 import math
 from typing import TYPE_CHECKING, Any, Literal, TypedDict
 
@@ -156,10 +156,7 @@ def normalize_scale_weights(
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-LOG = logging.getLogger("hunt_core.contract")
-
-
-
+LOG = structlog.get_logger("hunt_core.contract")
 def validate_signal_contract(
     signal: Any,
     *,

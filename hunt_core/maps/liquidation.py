@@ -13,15 +13,14 @@
 from __future__ import annotations
 
 import collections
-import logging
+import structlog
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
 from hunt_core.maps.config import MapsConfig
 
-LOG = logging.getLogger("hunt_core.maps.liquidation")
-
+LOG = structlog.get_logger("hunt_core.maps.liquidation")
 # Industry ladder (CoinGlass/Hyblock): include 25× and 100× — 100× liquidations sit
 # ~1% from entry, the densest near-price magnet where price actually reacts (the ETH
 # short-squeeze case). Real exchange ``bracket_tiers`` are still PREFERRED over this;

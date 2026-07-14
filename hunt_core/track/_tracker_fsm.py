@@ -1,15 +1,13 @@
 """Tracker FSM — phase enum, coercion, and allowed transitions (Phase 9 split)."""
 from __future__ import annotations
 
-import logging
+import structlog
 from enum import Enum
 from typing import Any
 
 from hunt_core.track.events import record_phase_transition as _record_phase_transition
 
-_LOG = logging.getLogger(__name__)
-
-
+_LOG = structlog.get_logger(__name__)
 class SignalPhase(str, Enum):
     REGISTERED = "registered"
     ARMED = "armed"

@@ -9,14 +9,13 @@ produced the summary.
 """
 from __future__ import annotations
 
-import logging
+import structlog
 
 from typing import Any, Literal
 
 from hunt_core.prizrak.engines._helpers import safe_float
 
-LOG = logging.getLogger(__name__)
-
+LOG = structlog.get_logger(__name__)
 ActivationState = Literal["idle", "near_entry", "in_entry_zone", "near_catalyst", "at_catalyst"]
 
 

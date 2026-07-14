@@ -1,7 +1,7 @@
 """TF / market / regime snapshot builders (P2 extract from tick_assembly)."""
 from __future__ import annotations
 
-import logging
+import structlog
 import math
 from datetime import UTC, datetime
 from typing import Any, Literal, TYPE_CHECKING
@@ -31,8 +31,7 @@ from hunt_core.data.universe import PINNED_SYMBOLS
 from hunt_core.features.structure import detect_pp
 from hunt_core.market.client import depth_imbalance_from_book, microprice_bias_from_book
 
-LOG = logging.getLogger("hunt_core.features.snapshot")
-
+LOG = structlog.get_logger("hunt_core.features.snapshot")
 WatchMode = Literal["short", "long", "both"]
 
 

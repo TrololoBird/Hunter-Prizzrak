@@ -4,7 +4,7 @@ from __future__ import annotations
 
 
 import asyncio
-import logging
+import structlog
 import math
 import time
 from datetime import timedelta
@@ -35,8 +35,7 @@ from hunt_core.market.symbols import (
     try_binance_id_from_ccxt,
 )
 
-LOG = logging.getLogger("hunt_core.market.client")
-
+LOG = structlog.get_logger("hunt_core.market.client")
 _CACHE_TTL: dict[str, int] = {
     "klines_1m": 25,
     "klines_3m": 120,

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-import logging
+import structlog
 from datetime import UTC, datetime
 from typing import Any
 
@@ -133,9 +133,7 @@ from hunt_core.market import (
 )
 from hunt_core.runtime.state import SymbolStateStore, merge_hunt_extremes
 
-LOG = logging.getLogger("hunt_core.runtime.tick_assembly")
-
-
+LOG = structlog.get_logger("hunt_core.runtime.tick_assembly")
 def _update_rolling_quote_vol_baseline(
     market: dict[str, Any],
     *,

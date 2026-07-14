@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-import logging
+import structlog
 import threading
 import time
 from collections import deque
@@ -21,9 +21,7 @@ from hunt_core.maps.liquidation import (
 from hunt_core.maps.orderbook import OrderbookMap, build_orderbook_map, derive_ob_accumulation_features
 from hunt_core.maps.volume_profile import VolumeProfileMap, build_volume_profile_map, derive_vp_accumulation_features
 
-LOG = logging.getLogger("hunt_core.maps.engine")
-
-
+LOG = structlog.get_logger("hunt_core.maps.engine")
 @dataclass
 class MapBundle:
     symbol: str

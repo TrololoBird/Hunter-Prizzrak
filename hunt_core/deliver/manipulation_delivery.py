@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import html
 import os
-import logging
+import structlog
 from datetime import datetime, timezone
 from typing import Any
 
@@ -30,8 +30,7 @@ from hunt_core.track._cooldowns import (
 )
 from hunt_core.track.tracker import has_active_signal, register_signal_open
 
-_LOG = logging.getLogger(__name__)
-
+_LOG = structlog.get_logger(__name__)
 _MIN_RR = 1.2
 # Minimum structural sweep depth (|swept_level − sweep_extreme| / swept_level) for a
 # dip to count as a liquidity-grab «свип». Grounded on real bars: the corpus winners

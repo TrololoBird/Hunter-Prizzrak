@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
+import structlog
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
@@ -16,8 +16,7 @@ from hunt_core.signals.model import Signal, SignalModule, SignalState
 # delivery_support re-exports it for its own callers.
 MID_DUMP_LC_PHASES: frozenset[str] = frozenset({"mid"})
 
-_LOG = logging.getLogger(__name__)
-
+_LOG = structlog.get_logger(__name__)
 _COOLDOWN_HOURS = 4.0
 _STORE_PATH = SESSION_DIR / "signal_lifecycle.json"
 

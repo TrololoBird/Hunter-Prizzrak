@@ -1,8 +1,9 @@
 """Hunter per-tick cycle — run_loop / run_tick (H-B rewrite)."""
 from __future__ import annotations
 
+import structlog
 
-import logging
+
 import asyncio
 import json
 import os
@@ -10,7 +11,7 @@ from typing import Any
 
 from hunt_core.domain.config import SYMBOL_TICK_TIMEOUT_S
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 from hunt_core.market import HuntCcxtStreams, apply_live_price_to_row
 

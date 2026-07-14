@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import logging
+import structlog
 import time
 from datetime import UTC, datetime
 from typing import Any, Literal, TYPE_CHECKING
@@ -14,8 +14,7 @@ import polars as pl
 if TYPE_CHECKING:
     from hunt_core.market.client import HuntCcxtClient
 
-LOG = logging.getLogger("hunt_core.data.collect")
-
+LOG = structlog.get_logger("hunt_core.data.collect")
 from hunt_core.data.universe import PINNED_SYMBOLS
 from hunt_core.data_readiness import kline_fetch_limit
 from hunt_core.errors import DEFENSIVE_EXC, system_breakers

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
-import logging
+import structlog
 import os
 import time
 from dataclasses import dataclass, field
@@ -33,8 +33,7 @@ from hunt_core.market.symbols import (
 )
 from hunt_core.params.store import orderflow_use_nq, ws_thresholds
 
-LOG = logging.getLogger("hunt_core.market.streams")
-
+LOG = structlog.get_logger("hunt_core.market.streams")
 _MAX_SYMBOL_STREAMS = 100
 _LIQ_BUFFER_MAX = 8_000
 # The primary venue's liquidation tape lives in _force_order_buffer, which

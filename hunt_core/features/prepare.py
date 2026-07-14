@@ -7,7 +7,6 @@ from __future__ import annotations
 
 
 
-import logging
 import math
 import os
 import threading
@@ -641,7 +640,7 @@ def prepare_symbol(
 
     Returns None if there is insufficient historical data.
     """
-    _log = logging.getLogger("hunt_core.features.prepare")
+    _log = LOG  # module-level structlog logger (was a duplicate stdlib getLogger here)
 
     sym = universe_symbol.symbol
 

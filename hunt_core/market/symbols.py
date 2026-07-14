@@ -3,14 +3,12 @@ from __future__ import annotations
 
 
 
-import logging
+import structlog
 from typing import Any
 
 import ccxt
 
-LOG = logging.getLogger("hunt_core.market.symbols")
-
-
+LOG = structlog.get_logger("hunt_core.market.symbols")
 def is_linear_usdt_swap_market(market: Any) -> bool:
     """True for USDⓈ-M linear perp rows in CCXT ``markets``."""
     if not isinstance(market, dict):

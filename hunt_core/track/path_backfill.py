@@ -13,7 +13,7 @@ before favorable) — first_passage_grid/mfe/mae inherit this bias.
 """
 from __future__ import annotations
 
-import logging
+import structlog
 from typing import Any
 
 from hunt_core.track.candidate_ledger import (
@@ -21,8 +21,7 @@ from hunt_core.track.candidate_ledger import (
     record_candidate_forward_path,
 )
 
-_LOG = logging.getLogger(__name__)
-
+_LOG = structlog.get_logger(__name__)
 _RET_OFFSETS_MIN = (15, 60, 240, 480, 1440)  # 15m/1h/4h/8h/24h
 _FIRST_PASSAGE_ATR_GRID = (0.5, 1.0, 1.5, 2.0, 3.0, 5.0)
 

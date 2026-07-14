@@ -5,12 +5,11 @@ from __future__ import annotations
 
 import asyncio
 import html
-import logging
+import structlog
 import re
 from typing import Any
 
-LOG = logging.getLogger("hunt_core.runtime.symbol_probe")
-
+LOG = structlog.get_logger("hunt_core.runtime.symbol_probe")
 # klines.<tf>.stale.<SYMBOL>.<age>ms><limit>ms  (completeness.audit_kline_staleness)
 _STALE_RE = re.compile(r"^klines\.([0-9a-z]+)\.stale\.[A-Z0-9]+\.(\d+)ms>(\d+)ms$")
 # klines.<tf>.<reason>  — fetch_failed / empty_frame / staleness.*

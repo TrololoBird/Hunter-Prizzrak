@@ -4,7 +4,7 @@ from __future__ import annotations
 
 
 import asyncio
-import logging
+import structlog
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -23,8 +23,7 @@ if TYPE_CHECKING:
     from hunt_core.market.spot import HuntCcxtSpotCompanion
     from hunt_core.market.streams import HuntCcxtStreams
 
-LOG = logging.getLogger("hunt_core.market.factory")
-
+LOG = structlog.get_logger("hunt_core.market.factory")
 _PROBE_TIMEOUT_MS = 20_000
 
 BINANCE_EXCHANGE_ID = "binance"

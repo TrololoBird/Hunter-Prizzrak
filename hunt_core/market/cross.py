@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import logging
+import structlog
 import os
 import time
 from dataclasses import dataclass
@@ -15,8 +15,7 @@ from hunt_core.market.ccxt_guard import ccxt_method_available
 from hunt_core.features.volume_profile import volume_profile_levels
 from hunt_core.market.client import aggregate_cross_exchange_walls, depth_snapshot_from_book
 
-LOG = logging.getLogger("hunt_core.market.cross")
-
+LOG = structlog.get_logger("hunt_core.market.cross")
 # Per-venue circuit breaker (Task 3)
 _venue_error_count: dict[str, int] = {}
 _venue_temp_skip: dict[str, float] = {}
