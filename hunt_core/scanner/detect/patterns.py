@@ -896,11 +896,24 @@ def _advance_pattern_c(
             c_target = _lad[0] if _lad else _to_float(meso_df["high"].max())
         micro_df = _micro_df(micro_15m, meso_df)
         ltf_confirmed = bool(bos_up(micro_df) or choch_bull(micro_df))
-        evidence = ["prior_swing_high", "zakrep_reclaim", "wide_stop_dobor",
-                    "ascending_channel_pre" if asc_ok else "",
-                    "descending_channel_post" if desc_ok else ""]
+        # «Почему» must DISCRIMINATE, not restate preconditions. asc_ok/desc_ok/zakrep
+        # are hard gates above (`if not …: return`), so those tokens are present on EVERY
+        # emitted C → tautological (BILL=CRV=HEI verbatim). Lead with the VARYING factors
+        # — reclaim depth, micro-confirmation state, HTF bias — so two C setups read
+        # differently; the fixed preconditions follow as context. Also emit the canonical
+        # htf_bull/htf_bear tokens (not htf_bullish) so _split_evidence classes a
+        # counter-bias correctly, and the ltf token C previously lacked. (WO #4)
+        evidence = [
+            f"закреп×{zakrep}",
+            "ltf_confirmed" if ltf_confirmed else "ltf_pending",
+            "prior_swing_high", "zakrep_reclaim", "wide_stop_dobor",
+            "ascending_channel_pre" if asc_ok else "",
+            "descending_channel_post" if desc_ok else "",
+        ]
         if htf_bias == "bull":
-            evidence.append("htf_bullish")
+            evidence.append("htf_bull")
+        elif htf_bias == "bear":
+            evidence.append("htf_bear")
         setup = _build_setup(
             pattern_type="C", direction="long", meso_tf=meso_tf,
             swept_level=prior_high,
