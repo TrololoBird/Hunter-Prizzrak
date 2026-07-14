@@ -753,6 +753,18 @@ def build_liquidation_map(
     )
 
 
+# Realized-liquidation stream completeness by venue (§8.1): Bybit `allLiquidation`
+# streams EVERY liquidation at 500ms; Binance/OKX/Bitget collapse to the LARGEST
+# per ~1s, so during cascades they systematically under-count. Surfaced so a reader
+# (and the 1в-5 backtest) can tell a full-fidelity venue from a capped one.
+_VENUE_LIQ_COMPLETENESS: dict[str, str] = {
+    "bybit": "full",
+    "binance": "capped_1s",
+    "okx": "capped_1s",
+    "bitget": "capped_1s",
+}
+
+
 def heatmap_to_market_dict(
     heatmap: LiquidationHeatmap | None,
     *,
@@ -769,6 +781,10 @@ def heatmap_to_market_dict(
         "liq_forward_confidence": heatmap.forward_confidence,
         "liq_realized_events": heatmap.realized_event_count,
         "liq_venues": list(heatmap.venues),
+        "liq_venue_completeness": {
+            str(v): _VENUE_LIQ_COMPLETENESS.get(str(v).lower(), "unknown")
+            for v in heatmap.venues
+        },
         "liq_heatmap_clusters": [
             {
                 "price": c.price,

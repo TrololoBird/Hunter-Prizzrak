@@ -417,7 +417,16 @@ def format_liquidation_map_section(row: dict[str, Any]) -> str:
         return ""
     header = "💥 <b>Ликвидации</b>"
     if synthetic_only:
-        header += " · <i>оценка по leverage-tier, без реальных ликвидаций</i>"
+        # Honest: the forward estimate is Binance-OI-based (cross-venue OI is 1в-2,
+        # not yet done); only the realized tape is multi-exchange.
+        header += " · <i>оценка по leverage-tier (Binance OI), без реальных ликвидаций</i>"
+    else:
+        vc = market.get("liq_venue_completeness")
+        if isinstance(vc, dict) and vc:
+            parts = ", ".join(f"{v}={c}" for v, c in vc.items())
+            header += f" · <i>реальные ликвидации ({html.escape(parts)})</i>"
+        else:
+            header += " · <i>реальные ликвидации</i>"
     lines = [header]
 
     clusters = market.get("liq_heatmap_clusters")
