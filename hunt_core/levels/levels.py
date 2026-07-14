@@ -808,7 +808,7 @@ def apply_liquidity_tp_ladder_short(
         return fib_tp1, fib_tp1_label, fib_tp2, "50% fib", "fib_only", src_tf, src_tf
     poc_dir = str(poc_direction or "")
 
-    from hunt_core.scanner.detect.delivery_support import MID_DUMP_LC_PHASES
+    from hunt_core.signals.lifecycle import MID_DUMP_LC_PHASES
 
     phase = str(lifecycle_phase or "")
     if phase in MID_DUMP_LC_PHASES:

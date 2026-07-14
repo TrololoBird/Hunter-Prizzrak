@@ -13,8 +13,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-# New-vocabulary mid-leg phases (replaces the 10-state FSM's MID set).
-MID_DUMP_LC_PHASES: frozenset[str] = frozenset({"mid"})
+# Spine-owned now (levels/ and track/ were importing these FROM the scanner — a
+# spine→strategy inversion). Re-exported here so this module's own callers are unchanged.
+from hunt_core.contract import price_in_entry_zone  # noqa: F401
+from hunt_core.signals.lifecycle import MID_DUMP_LC_PHASES  # noqa: F401
 REPORT_BLOCK_PRIORITY: tuple[str, ...] = ("not_confirmed", "below_calibrated_gate", "cold_start")
 BOUNCE_MIN_RISK_REWARD = 1.05
 _MIN_RR_FLOOR = 1.6
@@ -56,20 +58,6 @@ def liquidity_skip_reason(
         except (TypeError, ValueError):
             return "liquidity_oi_invalid"
     return None
-
-
-def price_in_entry_zone(setup: dict[str, Any], *, price: float, direction: str = "", **_k: Any) -> bool:
-    """True when live price is inside the setup's entry zone (geometry)."""
-    ez = setup.get("entry_zone") or []
-    if not isinstance(ez, (list, tuple)) or len(ez) < 2:
-        return False
-    try:
-        lo, hi = float(ez[0]), float(ez[1])
-    except (TypeError, ValueError):
-        return False
-    if lo > hi:
-        lo, hi = hi, lo
-    return lo <= float(price) <= hi
 
 
 def effective_min_rr_for_delivery(setup: dict[str, Any], *_a: Any, **_k: Any) -> float:

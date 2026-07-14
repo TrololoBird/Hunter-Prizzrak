@@ -457,17 +457,11 @@ def register_signal_open(
     features_open: dict[str, Any] | None = None,
     book_walls: dict[str, Any] | None = None,
 ) -> None:
-    from hunt_core.scanner.detect.delivery_support import mission_delivery_block
-
-    lc_dict = lifecycle if isinstance(lifecycle, dict) else {}
-    mission = mission_delivery_block(
-        direction=direction,
-        lifecycle=lc_dict,
-        setup=setup,
-        symbol=symbol,
-    )
-    if mission is not None:
-        return
+    # The mission_delivery_block() call that stood here was a documented no-op — it
+    # always returns None ("no veto beyond the setup's own confirmation": the persistent
+    # state machine only emits once every stage has confirmed in order). Keeping it cost
+    # track/ an import of scanner/, a spine→strategy inversion, for a branch that could
+    # never be taken.
     if entry_message_id is not None:
         eid = int(entry_message_id)
         for sig in (state.get("signals") or {}).values():

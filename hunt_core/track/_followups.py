@@ -161,7 +161,7 @@ def _maybe_armed_to_triggered(
     trk = _tracker_ref()
     if active.get("delivery_tier") != "armed":
         return None
-    from hunt_core.scanner.detect.delivery_support import price_in_entry_zone  # noqa: PLC0415
+    from hunt_core.contract import price_in_entry_zone  # noqa: PLC0415
 
     if not price_in_entry_zone(
         {

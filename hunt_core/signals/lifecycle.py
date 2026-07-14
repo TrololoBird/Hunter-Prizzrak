@@ -11,6 +11,11 @@ from typing import Any, Literal
 from hunt_core.paths import SESSION_DIR
 from hunt_core.signals.model import Signal, SignalModule, SignalState
 
+# Lifecycle phases that count as "mid-move" (already running, not forming). Spine-owned:
+# levels/ read this from scanner/detect/delivery_support, a spine→strategy inversion.
+# delivery_support re-exports it for its own callers.
+MID_DUMP_LC_PHASES: frozenset[str] = frozenset({"mid"})
+
 _LOG = logging.getLogger(__name__)
 
 _COOLDOWN_HOURS = 4.0

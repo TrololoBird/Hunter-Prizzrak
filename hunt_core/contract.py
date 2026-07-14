@@ -709,6 +709,29 @@ def normalize_funding_fraction(value: Any) -> float | None:
     return parsed
 
 
+def price_in_entry_zone(
+    setup: Mapping[str, Any], *, price: float, direction: str = "", **_k: Any
+) -> bool:
+    """True when live price is inside the setup's entry zone (pure geometry).
+
+    Lives in the spine (it is entry_zone semantics, like worst_entry_edge above) rather
+    than in scanner/detect/delivery_support, which track/ and levels/ were reaching into
+    — a spine→strategy import inversion. delivery_support re-exports it for its own
+    callers.
+    """
+    del direction  # geometry only — the zone is already ordered
+    ez = setup.get("entry_zone") or []
+    if not isinstance(ez, (list, tuple)) or len(ez) < 2:
+        return False
+    try:
+        lo, hi = float(ez[0]), float(ez[1])
+    except (TypeError, ValueError):
+        return False
+    if lo > hi:
+        lo, hi = hi, lo
+    return lo <= float(price) <= hi
+
+
 def worst_entry_edge(setup: Mapping[str, Any], *, direction: str) -> float | None:
     """Worst-case (least-favorable) fill edge for a conservative R:R.
 
