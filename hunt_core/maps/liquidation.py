@@ -382,17 +382,29 @@ def _merge_cluster_maps(
 def _consume_swept_levels(
     cluster_map: dict[int, dict[str, float]],
     *,
-    current_price: float,
     price_min: float,
     bucket_size: float,
-    n_buckets: int,
+    swept_lo: float,
+    swept_hi: float,
 ) -> None:
-    """Reduce forward heat when live price sweeps through a bucket center."""
+    """Reduce forward heat for magnets price has ACTUALLY traded through recently.
+
+    A forward zone is a magnet that has NOT yet been hit. Once live price sweeps a
+    bucket's center — i.e. the center falls inside the recently-traversed price band
+    ``[swept_lo, swept_hi]`` — that magnet is spent and its heat is damped.
+
+    The prior implementation gated on ``center < current_price and b < n_buckets//2``
+    (and the mirror), which is a tautology — with ``price_min = current_price - span``
+    and ``bucket_size = 2·span/n``, ``center < current_price`` is exactly ``b < n//2`` —
+    so EVERY bucket was damped ×0.35 unconditionally, giving no discrimination and
+    silently under-stating every forward magnet's notional. Requiring a real traversal
+    band restores the intended "spent magnet" semantics.
+    """
+    if swept_hi <= swept_lo:
+        return
     for b in list(cluster_map.keys()):
         center = price_min + (b + 0.5) * bucket_size
-        if (center < current_price and b < n_buckets // 2) or (
-            center > current_price and b >= n_buckets // 2
-        ):
+        if swept_lo <= center <= swept_hi:
             row = cluster_map[b]
             if row.get("events", 0) <= 0:
                 row["total"] *= 0.35
@@ -627,6 +639,9 @@ def build_liquidation_map(
 
     forward_zones: list[dict[str, Any]] = []
     effective_lev = lev_tiers or _DEFAULT_LEVERAGE_TIERS
+    fwd: dict[int, dict[str, float]] = {}
+    fwd_price_min = current_price - current_price * cfg.price_range_pct / 100.0
+    fwd_bucket_size = (2.0 * (current_price * cfg.price_range_pct / 100.0)) / max(1, cfg.n_buckets)
     if oi_bars:
         span = current_price * cfg.price_range_pct / 100.0
         price_min = current_price - span
@@ -642,12 +657,15 @@ def build_liquidation_map(
             global_ls_ratio=global_ls_ratio,
             leverage_propensity_exp=cfg.liq_leverage_propensity_exp,
         )
+        # Damp magnets price has ACTUALLY traded through in the recent OI-bar window.
+        swept_lo = min((float(b.get("low") or b.get("l") or 0) for b in oi_bars), default=0.0)
+        swept_hi = max((float(b.get("high") or b.get("h") or 0) for b in oi_bars), default=0.0)
         _consume_swept_levels(
             fwd,
-            current_price=current_price,
             price_min=price_min,
             bucket_size=bucket_size,
-            n_buckets=cfg.n_buckets,
+            swept_lo=swept_lo,
+            swept_hi=swept_hi,
         )
         max_f = max((r["total"] for r in fwd.values()), default=1.0) or 1.0
         for b, row in sorted(fwd.items(), key=lambda kv: kv[1]["total"], reverse=True)[:6]:
@@ -662,27 +680,16 @@ def build_liquidation_map(
                 }
             )
 
-    # Build forward-only heatmap when no realized events but forward zones exist
+    # Build forward-only heatmap when no realized events but forward zones exist.
+    # REUSE the already-damped ``fwd`` cluster map — recomputing it fresh here (the old
+    # behaviour) skipped _consume_swept_levels, so the heatmap clusters and the
+    # forward_zones list disagreed on notional in the SAME payload.
     if heatmap is None and forward_zones:
-        span = current_price * cfg.price_range_pct / 100.0
-        price_min = current_price - span
-        bucket_size = (2.0 * span) / max(1, cfg.n_buckets)
-        fwd_cluster_map = entry_anchored_forward_zones(
-            oi_bars or [],
-            current_price=current_price,
-            n_buckets=cfg.n_buckets,
-            price_range_pct=cfg.price_range_pct,
-            leverage_tiers=effective_lev,
-            maintenance_margin_rates=mm_rates,
-            leverage_weights=cfg.leverage_weights,
-            global_ls_ratio=global_ls_ratio,
-            leverage_propensity_exp=cfg.liq_leverage_propensity_exp,
-        )
         heatmap = _build_heatmap_from_map(
-            fwd_cluster_map,
+            fwd,
             current_price=current_price,
-            price_min=price_min,
-            bucket_size=bucket_size,
+            price_min=fwd_price_min,
+            bucket_size=fwd_bucket_size,
             n_buckets=cfg.n_buckets,
             forward_confidence=_resolved_forward_confidence(symbol, event_count=0, forward_blend=cfg.forward_blend_ratio),
             realized_events=0,

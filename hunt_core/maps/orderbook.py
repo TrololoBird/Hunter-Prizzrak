@@ -751,7 +751,7 @@ def derive_ob_accumulation_features(
         out["map_void_above"] = nearest.get("price_center")
         out["map_void_above_pct"] = nearest.get("distance_pct")
 
-    imb = ob.zone_imbalance.get("imb_1.0pct") if ob.zone_imbalance else None
+    imb = ob.zone_imbalance.get("imb_1pct") if ob.zone_imbalance else None
     bid_notional = sum(float(w.get("notional_usd") or 0) for w in ob.bid_walls[:4])
     ask_notional = sum(float(w.get("notional_usd") or 0) for w in ob.ask_walls[:4])
     ask_thin = False

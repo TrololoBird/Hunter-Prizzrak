@@ -115,7 +115,11 @@ class MapsConfig:
             vp_value_area_pct=float(section.get("vp_value_area_pct", 0.70)),
             cvd_div_ratio=_env_float(
                 "HUNT_CVD_DIV_RATIO",
-                section.get("cvd_div_ratio", 0.25),
+                # 0.15 (not 0.25): matches the dataclass default and the documented
+                # "principled universal default" (net-imbalance fraction, VPIN-style).
+                # The 0.25 fallback silently fired CVD-divergence ~40% less often than
+                # the calibrated 5-10% target on the main (TOML) path.
+                section.get("cvd_div_ratio", 0.15),
             ),
         )
 

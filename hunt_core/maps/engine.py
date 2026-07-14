@@ -376,7 +376,7 @@ def derive_map_features(
 
     if bundle.orderbook:
         ob = bundle.orderbook
-        out["map_book_imbalance_1pct"] = ob.zone_imbalance.get("imb_1.0pct")
+        out["map_book_imbalance_1pct"] = ob.zone_imbalance.get("imb_1pct")
         out["map_sticky_wall_count"] = len(ob.sticky_walls)
         out["map_void_count"] = len(ob.liquidity_voids)
         out["map_stacked_imbalance"] = ob.stacked_imbalance
@@ -400,7 +400,10 @@ def derive_map_features(
         liq = bundle.liquidation
         hm_dict = liq.to_dict() if hasattr(liq, "to_dict") else {}
         out.update({k: v for k, v in hm_dict.items() if k.startswith("liq_")})
-        conf = float(hm_dict.get("liq_forward_confidence") or 1.0)
+        # NOT `or 1.0`: a genuine 0.0 confidence must stay 0.0, not invert to full
+        # confidence. Default to 1.0 only when the key is truly absent.
+        _conf_raw = hm_dict.get("liq_forward_confidence")
+        conf = float(_conf_raw) if _conf_raw is not None else 1.0
         fwd_weight = conf * cfg.forward_blend_ratio
         out["liq_forward_weight"] = round(fwd_weight, 3)
         if liq.magnet_pull_long is not None:
@@ -459,6 +462,6 @@ def apply_map_bundle_to_row(row: dict[str, Any], bundle: MapBundle | None) -> No
             "bid_levels": bundle.orderbook.bid_walls,
             "ask_levels": bundle.orderbook.ask_walls,
             "venues": bundle.orderbook.venues,
-            "depth_imbalance": bundle.orderbook.zone_imbalance.get("imb_1.0pct"),
+            "depth_imbalance": bundle.orderbook.zone_imbalance.get("imb_1pct"),
             "source": bundle.orderbook.source,
         }

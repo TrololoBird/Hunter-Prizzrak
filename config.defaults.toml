@@ -168,9 +168,14 @@ sticky_min_samples = 3
 void_depth_pctile = 10.0
 forward_blend_ratio = 0.35
 forward_confidence_min = 0.25
-leverage_weights = [0.35, 0.30, 0.20, 0.10, 0.05]
+# One weight per tier in liquidation._DEFAULT_LEVERAGE_TIERS (10,25,50,100) — MUST be
+# 4 elements. The 5-element form was stale (5th weight dead) and shifted the
+# mass-weighted leverage anchor to 55.6× vs the intended ~61.7× (Cheng ~60×).
+leverage_weights = [0.35, 0.30, 0.20, 0.15]
 vp_periods = ["1h", "4h", "1d", "1w"]
-vp_buckets = 24
+# 60 (not 24): trader-grade POC/VAH/VAL resolution — 24 buckets is ~$150/bucket on
+# BTC, too coarse to place a usable level (matches maps/config.py code intent).
+vp_buckets = 60
 vp_value_area_pct = 0.70
 
 [intra_bar]

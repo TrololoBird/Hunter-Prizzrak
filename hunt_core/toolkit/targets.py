@@ -26,7 +26,7 @@ def collect_upward_targets(row: dict[str, Any], price: float) -> tuple[list[floa
             pass
 
     liq = maps.get("liquidation") if isinstance(maps.get("liquidation"), dict) else {}
-    for z in liq.get("forward_zones") or []:
+    for z in liq.get("liq_forward_zones") or []:
         if not isinstance(z, dict):
             continue
         pc = z.get("price_center")
@@ -112,7 +112,7 @@ def collect_downward_targets(row: dict[str, Any], price: float) -> tuple[list[fl
             pass
 
     liq = maps.get("liquidation") if isinstance(maps.get("liquidation"), dict) else {}
-    for z in liq.get("forward_zones") or []:
+    for z in liq.get("liq_forward_zones") or []:
         if not isinstance(z, dict):
             continue
         pc = z.get("price_center")

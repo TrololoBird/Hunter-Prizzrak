@@ -162,11 +162,21 @@ def oi_regime_from_row(row: dict[str, Any]) -> OiRegime:
     market: dict[str, Any] = market_raw if isinstance(market_raw, dict) else {}
     session_raw = row.get("session")
     session: dict[str, Any] = session_raw if isinstance(session_raw, dict) else {}
-    oi_d = market.get("oi_change_pct") or market.get("oi_delta_pct") or session.get("oi_change_pct")
-    px_d = (
-        market.get("price_change_pct")
-        or row.get("chg_24h_pct")
-        or session.get("change_24h_pct")
+    # is-None fallthrough (NOT `or`): a legit 0.0 (OI/price flat) is a valid reading,
+    # not "missing". `or`-chaining skipped 0.0 to the next field — often a DIFFERENT
+    # window — so a flat-OI/flat-price bar (true "coiling") mislabeled as unknown or
+    # borrowed a 24h move it never had.
+    def _first_present(*vals: Any) -> Any:
+        for v in vals:
+            if v is not None:
+                return v
+        return None
+
+    oi_d = _first_present(
+        market.get("oi_change_pct"), market.get("oi_delta_pct"), session.get("oi_change_pct")
+    )
+    px_d = _first_present(
+        market.get("price_change_pct"), row.get("chg_24h_pct"), session.get("change_24h_pct")
     )
     try:
         oi_f = float(oi_d) if oi_d is not None else None
