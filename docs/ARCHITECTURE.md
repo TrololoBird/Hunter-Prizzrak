@@ -61,7 +61,7 @@ mistake — and is currently *why the scanner mis-fires* (§5).
 | Edge | mechanical — price respects ПОК levels | behavioural — MM engineers a repeatable манипуляция |
 | Stance | **reactive** to a level/structure | **predictive** of where the MM drives price |
 | Crowd relation | trades *with* structure | trades *against* the trapped/liquidated crowd |
-| **Frequency** | **high / continuous**, any liquid coin | **rare: ~5–6 per MONTH**, hand-picked |
+| **Frequency** | **high / continuous**, any liquid coin | **trader hand-picks ~5–6/mo on watched coins**; across 600+ coins the detector fires often — selective PER SYMBOL, not globally rare |
 | Selectivity | every valid level is tradeable | only specific formations qualify (§2.3) |
 | Asset universe | BTC/majors + any liquid perp | specific profiles: заскамленные one-candle dumps, coins в нисходящем канале обновляющие минимумы |
 | **Stop** | **за структуру с запасом 1–3%** (стр.33) — behind накопление/тень-свечи/стоповый | **WIDE**, за экстремум манипуляции с запасом |
@@ -81,8 +81,15 @@ long у низа / on слом нисходящей; **(2)** восходящи�
 **финальный** свип максимумов **когда выше уже нет ликвидности** → частичный шорт → LTF
 подтверждение разворота → ride the dump. Everything else is NOT a manipulation setup.
 
-**Architectural consequence:** the scanner must be **rare and selective** (a few per month),
-not fire like Prizrak on every zone. See §5.
+**Architectural consequence:** the scanner must be **selective PER SYMBOL** — only the
+clean engineered formations of §2.3 qualify, not every zone like Prizrak. But "~5–6 per
+month" is the trader's PERSONAL take-cadence on the handful of coins THEY watch, NOT a
+universe detection rate: across the 600+ coins we sweep, engineered pump/dumps happen
+every day, several times over — something is always being manipulated somewhere. So the
+detector legitimately fires often; the gate is the QUALITY of each individual setup
+(clean formation, sweep depth, pump magnitude), NEVER a cap on signals-per-month. §6
+already removed an earlier global-frequency "selectivity gate" for exactly this reason —
+it was the wrong lever. See §5.
 
 **⚠ The word «манипуляция» is overloaded — do not conflate:** (1) the **STRATEGY** here =
 an engineered pump/dump of **20+%, reaching 60–180%** (`scanner/`, the `.txt` transcripts);
