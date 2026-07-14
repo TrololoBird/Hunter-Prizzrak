@@ -80,5 +80,5 @@ warn_unused_ignores = false
 exclude = ["_archive", "build", "dist"]
 
 [[tool.mypy.overrides]]
-module = ["hunt_core.toolkit.*", "hunt_core.research.*"]
+module = ["hunt_core.toolkit.*"]
 ignore_errors = true
