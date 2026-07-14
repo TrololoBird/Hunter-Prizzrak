@@ -206,6 +206,28 @@ class AnalystReport:
             t = f" ({z['touches']} касаний)" if z.get("touches") else ""
             return f"<code>{fmt_price(z['lo'])}–{fmt_price(z['hi'])}</code>{t}"
 
+        def _confluence_line(single: Any, *, side: str) -> None:
+            # Fuse the already-computed maps at the zone — POC/liq-magnet/wall/funding
+            # corroboration is what turns a limit level into a conviction добор.
+            if not isinstance(single, dict):
+                return
+            lo, hi = single.get("lo"), single.get("hi")
+            if not (isinstance(lo, (int, float)) and isinstance(hi, (int, float))):
+                return
+            from hunt_core.deliver.zone_confluence import score_zone_confluence
+
+            _m = self.row.get("market")
+            _mp = self.row.get("maps")
+            conf = score_zone_confluence(
+                lo=float(lo), hi=float(hi), side=side,
+                market=_m if isinstance(_m, dict) else {},
+                maps=_mp if isinstance(_mp, dict) else {},
+                price=float(self.row.get("price") or 0),
+            )
+            if conf["score"] >= 2:  # only surface a genuine multi-map confluence
+                joined = " + ".join(conf["factors"])
+                lines.append(f"   🔗 <i>конфлюенс {conf['score']} ({conf['label']}): {joined}</i>")
+
         def _refs_line(single: Any, *, side: str) -> None:
             # Ориентиры (не план сделки): инвалидация за структурой + первая реакция.
             if not isinstance(single, dict):
@@ -249,6 +271,7 @@ class AnalystReport:
             else:
                 return
             _refs_line(single, side=side)
+            _confluence_line(single, side=side)
             _bias_warn(side)
 
         _side("🟢 Лонг:", iz.get("long"), iz.get("long_ladder"), side="long")
