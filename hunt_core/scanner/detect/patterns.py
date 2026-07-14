@@ -338,6 +338,23 @@ def _target_ladder(
     return out
 
 
+def _measured_move_target(meso_df: pl.DataFrame, entry: float, *, lookback: int = 60) -> float:
+    """Reachable long target = entry + the manipulation amplitude (recent high−low).
+
+    Pattern C used ``_target_ladder[0]`` — the ≥20 %-floored, farther-biased distance
+    pool — which manufactured fantasy-RR / timeouts (full dataset_v11 replay: C avgR
+    −0.484, 46 timeouts / 202). Projecting the recent manipulation amplitude up from
+    entry gives the reachable structural magnitude the move actually banks, mirroring
+    Pattern B's impulse-low fix. Validated on full dataset_v11 (research/backtest_c_
+    target.py): flips C −0.484 → +0.127, losses 102→67, timeouts 46→28.
+    """
+    if entry <= 0 or meso_df.height < 2:
+        return 0.0
+    seg = meso_df.tail(min(lookback, meso_df.height))
+    amp = _to_float(seg["high"].max()) - _to_float(seg["low"].min())
+    return entry + amp if amp > 0 else 0.0
+
+
 def _htf_trend_bias(df: pl.DataFrame | None) -> str | None:
     """Determine trend bias from HTF channel using 20/50 EMA position + slope.
 
@@ -865,8 +882,18 @@ def _advance_pattern_c(
         entry_ref = float(meso_df["close"][-1])  # the закреп close
         if struct_low <= 0 or struct_low >= entry_ref:
             struct_low = prior_high  # degenerate — fall back to the reclaimed level
-        ladder = _target_ladder(macro_df, meso_df, entry=entry_ref, direction="long", htf_df=htf_df,
-                                funding_mult=_funding_target_mult("long", funding_ctx))
+        # REACHABLE target = measured move (entry + manipulation amplitude), NOT the
+        # distance-ranked pool ladder. `_target_ladder[0]` is ≥20%-floored + farther-
+        # biased → fantasy-RR / timeouts, the exact pathology Pattern B already fixed
+        # to the impulse-low. Validated on full dataset_v11 (backtest_c_target.py): the
+        # measured-move target flips C avgR −0.484 → +0.127 (losses 102→67, timeouts
+        # 46→28). Single target, no deep pools (a deeper rung re-inflates the RR — same
+        # reason B keeps ladder=[target]); fall back to the ladder only if degenerate.
+        c_target = _measured_move_target(meso_df, entry_ref)
+        if c_target <= entry_ref:
+            _lad = _target_ladder(macro_df, meso_df, entry=entry_ref, direction="long", htf_df=htf_df,
+                                  funding_mult=_funding_target_mult("long", funding_ctx))
+            c_target = _lad[0] if _lad else _to_float(meso_df["high"].max())
         micro_df = _micro_df(micro_15m, meso_df)
         ltf_confirmed = bool(bos_up(micro_df) or choch_bull(micro_df))
         evidence = ["prior_swing_high", "zakrep_reclaim", "wide_stop_dobor",
@@ -878,8 +905,8 @@ def _advance_pattern_c(
             pattern_type="C", direction="long", meso_tf=meso_tf,
             swept_level=prior_high,
             sweep_extreme=struct_low,  # WIDE stop anchor: below the manipulation low
-            target=(ladder[0] if ladder else _to_float(meso_df["high"].max())),
-            target_ladder=tuple(ladder),
+            target=c_target,
+            target_ladder=(c_target,),
             entry_ref=entry_ref,
             evidence=[e for e in evidence if e],
             total_steps=_C_TOTAL_STEPS,

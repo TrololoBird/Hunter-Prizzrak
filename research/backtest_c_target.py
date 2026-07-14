@@ -108,14 +108,27 @@ def run_symbol(ds: str, sym: str, mode: str):
     return completed
 
 
+def _sym_rows(args: tuple[str, str, str]) -> list[tuple[str, str, float]]:
+    ds, sym, mode = args
+    try:
+        return [(s.pattern_type, o, r) for s, _e, _st, _t, o, r in run_symbol(ds, sym, mode)]
+    except Exception:
+        return []
+
+
 def main(ds: str, mode: str) -> None:
+    import multiprocessing as mp
+
     syms = sorted({os.path.basename(f).rsplit("_", 1)[0] for f in glob.glob(f"{ds}/*.parquet")})
     per_pattern: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
     per_pattern_r: dict[str, list[float]] = collections.defaultdict(list)
-    for sym in syms:
-        for setup, _e, _s, _t, outcome, r_mult in run_symbol(ds, sym, mode):
-            per_pattern[setup.pattern_type][outcome] += 1
-            per_pattern_r[setup.pattern_type].append(r_mult)
+    # Symbols are independent → fan out across cores (the O(bars²) replay is the cost).
+    workers = max(1, (os.cpu_count() or 2) - 1)
+    with mp.Pool(workers) as pool:
+        for rows in pool.imap_unordered(_sym_rows, [(ds, s, mode) for s in syms]):
+            for ptype, outcome, r_mult in rows:
+                per_pattern[ptype][outcome] += 1
+                per_pattern_r[ptype].append(r_mult)
     print(f"===== C-TARGET MODE={mode} · dataset={os.path.basename(ds)} =====")
     for p in sorted(per_pattern):
         c = per_pattern[p]
