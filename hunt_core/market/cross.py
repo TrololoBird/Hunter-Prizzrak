@@ -26,9 +26,19 @@ _VENUE_FETCH_TIMEOUT_S = 10.0
 
 
 def _venue_is_skipped(venue: str) -> bool:
+    """True while a venue is inside its circuit-breaker cooldown.
+
+    The error budget must only be cleared when a cooldown actually EXPIRES. Clearing it
+    on every check (the old behaviour) reset the counter before each call, so
+    _record_venue_error could never accumulate to _VENUE_CIRCUIT_BREAKER_MAX_ERRORS and
+    the breaker never tripped — a permanently failing venue was retried forever.
+    """
     expiry = _venue_temp_skip.get(venue)
-    if expiry is not None and time.monotonic() < expiry:
+    if expiry is None:
+        return False
+    if time.monotonic() < expiry:
         return True
+    # Cooldown elapsed — lift the breaker and grant a fresh error budget.
     _venue_temp_skip.pop(venue, None)
     _venue_error_count.pop(venue, None)
     return False
@@ -614,13 +624,23 @@ async def fetch_cross_exchange_taker_flow(
         tasks.extend(_secondary(ex) for ex in cfg.exchanges)
     rows = await asyncio.gather(*tasks)
     per_ex = {ex: val for ex, val in rows if val is not None}
-    values = list(per_ex.values())
-    consensus = round(sum(values) / len(values), 4) if values else None
+    # The primary reports the TAKER buy/sell VOLUME ratio (flow); the secondaries report
+    # longShortRatio — ACCOUNT POSITIONING. Different quantities. Averaging them into one
+    # number produced a meaningless "consensus" that the card then rendered as an
+    # order-flow reading. Average like with like: consensus is over taker-flow venues
+    # only; positioning is reported separately, under its own name.
+    taker_per_ex = {ex: v for ex, v in per_ex.items() if ex == _PRIMARY}
+    position_per_ex = {ex: v for ex, v in per_ex.items() if ex != _PRIMARY}
+    taker_values = list(taker_per_ex.values())
+    consensus = (
+        round(sum(taker_values) / len(taker_values), 4) if taker_values else None
+    )
     return {
         "period": period,
-        "per_exchange": per_ex,
+        "per_exchange": taker_per_ex,
         "consensus": consensus,
-        "venues": len(per_ex),
+        "position_ratio_per_exchange": position_per_ex,
+        "venues": len(taker_per_ex),
         "source": "cross_exchange",
     }
 
@@ -769,15 +789,21 @@ async def fetch_cross_exchange_liquidation_estimate(
             {
                 "price_center": round(center, 6),
                 "intensity": round(row["total"] / max_f, 4),
-                "source": "entry_anchored_cross",
+                "source": "entry_anchored_binance_oi",
             }
         )
+    # HONEST PROVENANCE (invariant: realized != estimated). Every input here is Binance:
+    # the OI bars, the leverage brackets (get_cached_leverage_tiers) and the global L/S
+    # ratio. Labelling the result "cross_exchange" and listing bybit/okx/bitget as its
+    # venues claimed a multi-venue basis the estimate does not have — cross-venue OI is
+    # not built. Say what it is; the realized tape is the only multi-venue part.
     return {
-        "source": "cross_exchange",
+        "source": "binance_oi_estimate",
+        "oi_source": _PRIMARY,
         "forward_zones": zones,
         "oi_bars_used": len(oi_bars),
         "oi_bars": oi_bars,
-        "venues": [_PRIMARY, *cfg.exchanges] if cfg.enabled else [_PRIMARY],
+        "venues": [_PRIMARY],
     }
 
 
