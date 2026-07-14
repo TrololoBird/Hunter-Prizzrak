@@ -502,8 +502,16 @@ def btc_beta_1h(sym_work_1h: Any, btc_work_1h: Any, *, lookback: int = 48) -> fl
         return None
     tmp = pl.DataFrame({"y": sym_r.tail(n), "x": btc_r.tail(n)})
     try:
-        result = polars_ols.compute_least_squares(tmp["y"], features=[tmp["x"]], add_intercept=True)
-        beta = float(result.get_column("x")[0])
+        # compute_least_squares takes features as POSITIONAL Expr/str (not features=[...]),
+        # returns a pl.Expr → must run inside a Polars context. mode="coefficients" yields a
+        # struct {x, const}; the x coefficient is the beta. The old features=/Series/
+        # get_column form raised every tick ("unexpected keyword argument 'features'").
+        result = tmp.select(
+            polars_ols.compute_least_squares(
+                pl.col("y"), pl.col("x"), add_intercept=True, mode="coefficients"
+            ).alias("coef")
+        )
+        beta = float(result["coef"].struct.field("x")[0])
         return round(beta, 4)
     except Exception:
         LOG.debug("btc_beta_1h polars_ols failed", exc_info=True)

@@ -499,7 +499,6 @@ from hunt_core.track.pump_history import score_bonus
 
 import contextlib
 import json
-from dataclasses import asdict
 from datetime import UTC, datetime
 
 import structlog
@@ -554,8 +553,6 @@ def enrich_candidates_with_percentile_ranks(candidates: list["HuntCandidate"]) -
     """Attach cross-section percentile metadata for rank-budget scanner."""
     if not candidates:
         return candidates
-    from dataclasses import replace
-
     changes = [abs(c.change_24h_pct) for c in candidates]
     out: list[HuntCandidate] = []
     for c in candidates:
@@ -564,7 +561,9 @@ def enrich_candidates_with_percentile_ranks(candidates: list["HuntCandidate"]) -
         reasons = list(c.reasons) + [f"move_pctile={pct:.2f}"]
         if pct >= 0.9:
             flags.append("top_decile_move")
-        out.append(replace(c, flags=tuple(flags), reasons=tuple(reasons)))
+        # HuntCandidate is a frozen Pydantic model (G-26) — model_copy, not
+        # dataclasses.replace (which raises "should be called on dataclass instances").
+        out.append(c.model_copy(update={"flags": tuple(flags), "reasons": tuple(reasons)}))
     return out
 
 # P1.18 — 60d volume-baseline z-score overlay thresholds.
@@ -948,7 +947,7 @@ async def run_scan(
             "pinned_overlap": sorted({c.symbol for c in priority if c.symbol in pinned}),
             "watchlist": [
                 {
-                    **asdict(c),
+                    **c.model_dump(),
                     "in_pinned": c.symbol in pinned,
                     "suggest_minute_watch": c.hunt_score >= HUNT_SCORE_PRIORITY_THRESHOLD,
                     "in_hot_funnel": c.symbol in {h.symbol for h in hot},
@@ -964,7 +963,7 @@ async def run_scan(
                 }
                 for h in prescan_hits[:15]
             ],
-            "hot_funnel": [asdict(c) for c in hot],
+            "hot_funnel": [c.model_dump() for c in hot],
         }
         WATCHLIST.parent.mkdir(parents=True, exist_ok=True)
         WATCHLIST.write_text(json.dumps(summary, indent=2), encoding="utf-8")
