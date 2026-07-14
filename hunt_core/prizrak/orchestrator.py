@@ -110,6 +110,37 @@ def _management_plan(direction: Literal["long", "short"]) -> list[str]:
     ]
 
 
+def _rr_conservative(
+    *,
+    direction: str,
+    entry_lo: float | None,
+    entry_hi: float | None,
+    stop: float | None,
+    tp1: float | None,
+) -> float | None:
+    """R:R measured from the WORST fill in the entry band (long → hi, short → lo).
+
+    ``rr_primary`` is measured from the anchor entry; this is the same trade priced at
+    the least-favourable fill, so a wide band cannot flatter the ratio. signal_queue uses
+    it to cap an inflated rr_primary. Returns None when the geometry is incomplete.
+    """
+    try:
+        lo = float(entry_lo or 0)
+        hi = float(entry_hi or 0)
+        sl = float(stop or 0)
+        tp = float(tp1 or 0)
+    except (TypeError, ValueError):
+        return None
+    if lo <= 0 or hi <= 0 or sl <= 0 or tp <= 0:
+        return None
+    edge = hi if direction == "long" else lo
+    risk = (edge - sl) if direction == "long" else (sl - edge)
+    reward = (tp - edge) if direction == "long" else (edge - tp)
+    if risk <= 0 or reward <= 0:
+        return None
+    return round(reward / risk, 2)
+
+
 def _entry_orders(entry: float, *, poc: float | None, zone: dict[str, Any], tf: str) -> list[float]:
     """The manual entry plan: order price levels per course стр.30/32.
 
@@ -526,6 +557,18 @@ def _base_summary(
         "tp3": (geo or {}).get("tp3"),
         "tp_ladder": (geo or {}).get("tp_ladder", []),
         "rr_primary": (geo or {}).get("rr_primary"),
+        # R:R from the WORST fill in the entry band. signal_queue caps a fantasy
+        # rr_primary against this (`rr > rr_cons*1.8 → rr = rr_cons`) — but nothing ever
+        # produced the field, so rr_cons was always 0 and the anti-fantasy cap was dead:
+        # setups with an inflated rr_primary took the full rr_norm weight and crowded the
+        # honest ones out of TOP-3. Now it is a real number.
+        "rr_conservative": _rr_conservative(
+            direction=direction,
+            entry_lo=entry_lo,
+            entry_hi=entry_hi,
+            stop=(geo or {}).get("stop"),
+            tp1=(geo or {}).get("tp1"),
+        ),
         "strength": 0.5,
         "path": f"{setup_kind}_{direction}",
         "fragility": 0.5,
