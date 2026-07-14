@@ -878,7 +878,10 @@ async def run_scan(
         hot = funnel_hot_candidates(candidates)
         for row in tickers:
             sym = str(row.get("symbol") or "").strip().upper()
-            chg = row.get("price_change_percent") or row.get("price_change_pct")
+            # is-None fallthrough: a 24h change of exactly 0.0 is a real reading.
+            chg = row.get("price_change_percent")
+            if chg is None:
+                chg = row.get("price_change_pct")
             if sym and chg is not None:
                 with contextlib.suppress(TypeError, ValueError):
                     update_change_24h(adaptive_store, sym, float(chg))

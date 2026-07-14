@@ -91,8 +91,18 @@ def compute_expansion_readiness(
     pos = _pos_in_range(last, high, low)
     funding = _safe_float(row.get("funding_rate"))
     oi_chg = oi_change_pct if oi_change_pct is not None else _safe_float(row.get("oi_change_pct"))
-    delta = _safe_float(row.get("delta_ratio") or row.get("agg_trade_delta_30s"))
-    cvd_slope = _safe_float(row.get("cvd_slope") or row.get("session_cvd_slope"))
+    # is-None fallthrough: a delta/CVD of exactly 0.0 means BALANCED FLOW — a real
+    # measurement — and `or` discarded it, falling through to the alternate key and,
+    # when that was absent, reporting flow as UNKNOWN. That would silently defeat the
+    # flow_known guard below (a measured 0.0 must count as measured).
+    _delta = row.get("delta_ratio")
+    if _delta is None:
+        _delta = row.get("agg_trade_delta_30s")
+    _cvd = row.get("cvd_slope")
+    if _cvd is None:
+        _cvd = row.get("session_cvd_slope")
+    delta = _safe_float(_delta)
+    cvd_slope = _safe_float(_cvd)
 
     vol_z = zs.get("volume_z_5m") or zs.get("volume_z")
     oi_z = zs.get("oi_z_5m") or zs.get("oi_z")

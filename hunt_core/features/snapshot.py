@@ -670,8 +670,17 @@ def apply_rest_enrichments_local(
     prepared.global_account_ls_ratio = prepared.global_ls_ratio
     if prepared.ls_ratio is not None and prepared.global_ls_ratio is not None:
         prepared.top_vs_global_ls_gap = float(prepared.ls_ratio) - float(prepared.global_ls_ratio)
-    prepared.taker_ratio = pack.get("taker_1h") or client.get_cached_taker_ratio(symbol, "1h")
-    prepared.funding_rate = pack.get("funding") or client.get_cached_funding_rate(symbol)
+    # is-None fallthrough, NOT `or`: a funding rate of exactly 0.0 is a REAL, common
+    # reading (flat funding), and `or` discarded that fresh zero in favour of a stale
+    # cached value. Same for a 0.0 taker ratio. Absent means absent; zero means zero.
+    _taker = pack.get("taker_1h")
+    prepared.taker_ratio = (
+        _taker if _taker is not None else client.get_cached_taker_ratio(symbol, "1h")
+    )
+    _funding = pack.get("funding")
+    prepared.funding_rate = (
+        _funding if _funding is not None else client.get_cached_funding_rate(symbol)
+    )
     prepared.funding_trend = client.get_cached_funding_trend(symbol)
     funding_z = client.get_cached_funding_rate_zscore(symbol)
     if funding_z is not None:

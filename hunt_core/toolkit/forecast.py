@@ -119,7 +119,11 @@ def build_ignition_forecast(row: dict[str, Any]) -> dict[str, Any] | None:
         targets.append(atr_target)
         factors.append("atr_1h_magnet")
 
-    funding = market.get("funding_rate") or market.get("live_funding_rate")
+    # is-None fallthrough: funding of exactly 0.0 is a real, common reading (flat), and
+    # `or` discarded it in favour of the other source.
+    funding = market.get("funding_rate")
+    if funding is None:
+        funding = market.get("live_funding_rate")
     if funding is not None and float(funding) < -0.0001:
         factors.append("neg_funding")
     if market.get("map_cvd_divergence") == "bullish_div":
