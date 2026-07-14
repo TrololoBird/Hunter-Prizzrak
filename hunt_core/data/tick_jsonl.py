@@ -214,10 +214,11 @@ def prepare_tick_row_for_jsonl(row: dict[str, Any]) -> dict[str, Any]:
         }
 
     out.setdefault("plane", "hunt")
-
-    from hunt_core.prizrak.engines.serialize import strip_prizrak_for_jsonl
-
-    return strip_prizrak_for_jsonl(out)
+    # Previously handed off to prizrak.engines.serialize.strip_prizrak_for_jsonl — a
+    # spine→strategy import inversion (data/ must not reach into a strategy) for a
+    # function that was a no-op: it popped row["scenario"], a key nothing has ever
+    # written. Dropped along with the module.
+    return out
 
 
 def hydrate_tick_row_from_jsonl(row: dict[str, Any]) -> dict[str, Any]:

@@ -924,7 +924,9 @@ def format_setup_lines(
     pos: dict[str, Any],
     price: float,
 ) -> list[str]:
-    from hunt_core.runtime.cycle._cycle_format import _format_setup_lines
+    # Formatter now lives in deliver (was runtime/cycle/_cycle_format — a deliver→runtime
+    # inversion, and in fact a deliver→runtime→deliver cycle since it imports from here).
+    from hunt_core.deliver._setup_lines import _format_setup_lines
 
     return _format_setup_lines(
         row,

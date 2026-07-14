@@ -20,12 +20,7 @@ LOG = logging.getLogger(__name__)
 ActivationState = Literal["idle", "near_entry", "in_entry_zone", "near_catalyst", "at_catalyst"]
 
 
-def assess_activation(
-    row: dict[str, Any],
-    summary: dict[str, Any],
-    *,
-    entry_type: str | None = None,
-) -> dict[str, Any]:
+def assess_activation(row: dict[str, Any], summary: dict[str, Any]) -> dict[str, Any]:
     price = safe_float(row.get("price"))
     if price <= 0:
         return {"state": "idle", "dist_catalyst_pct": None, "dist_entry_pct": None, "detail": ""}
@@ -33,7 +28,6 @@ def assess_activation(
     state: ActivationState = "idle"
     dist_cat: float | None = None
     dist_entry: float | None = None
-    et = str(entry_type or summary.get("entry_type") or "")
 
     cat = summary.get("catalyst_level")
     if cat is not None:
@@ -53,21 +47,17 @@ def assess_activation(
     try:
         el, eh = safe_float(lo), safe_float(hi)
         if el > 0 and eh > 0:
-            zone_mid = (el + eh) / 2.0
-            at_resistance = False
-            raw_struct = row.get("structure")
-            struct = raw_struct if isinstance(raw_struct, dict) else {}
-            raw_kl = struct.get("key_levels")
-            kl = raw_kl if isinstance(raw_kl, dict) else {}
-            resist = safe_float(kl.get("resistance") or kl.get("last_swing_high"))
-            if resist > 0 and price >= resist * 0.997:
-                at_resistance = True
+            # A "вход по факту реакции, не по касанию" downgrade used to live here, gated
+            # on entry_type == "pullback_limit". It was doubly broken: `entry_type` is
+            # produced by NOTHING (so the branch never ran, and with it the whole
+            # at_resistance computation), and the test itself was direction-blind —
+            # `price > zone_mid` is the WORSE fill for a long but the BETTER one for a
+            # short, and at_resistance confirms a short rather than blocking it. Wiring it
+            # as written would have shipped that bug. The reaction-vs-touch gate is a real
+            # method concept, but it belongs in the orchestrator with direction awareness,
+            # not as a decoy reading a phantom key. Touching the zone = in_entry_zone.
             if el <= price <= eh:
-                if et == "pullback_limit" and (price > zone_mid or at_resistance):
-                    state = "near_entry"
-                    dist_entry = min(abs(price - el), abs(price - eh)) / price * 100.0
-                else:
-                    state = "in_entry_zone"
+                state = "in_entry_zone"
             else:
                 dist_entry = min(abs(price - el), abs(price - eh)) / price * 100.0
                 if dist_entry <= 0.35 and state in {"idle", "near_catalyst"}:

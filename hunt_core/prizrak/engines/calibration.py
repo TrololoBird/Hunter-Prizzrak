@@ -129,11 +129,15 @@ def suggest_gates(
             "min_samples": min_samples,
         }
 
+    # `path_direction` was never produced by anything, so this filter always emptied the
+    # list and `pool` silently fell back to ALL summaries — the directional split the
+    # function exists to make never happened. The direction is already encoded in `path`,
+    # which the orchestrator builds as f"{setup_kind}_{direction}".
     directional = [
         s
         for s in summaries
         if str(s.get("path") or "") not in {"", "range"}
-        and str(s.get("path_direction") or "") in {"long", "short"}
+        and str(s.get("path") or "").rsplit("_", 1)[-1] in {"long", "short"}
     ]
     pool = directional if len(directional) >= max(4, min_samples // 2) else summaries
     passing = [

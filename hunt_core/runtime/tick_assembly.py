@@ -146,11 +146,9 @@ def _update_rolling_quote_vol_baseline(
     if not isinstance(market, dict):
         return
     tf15 = (tf or {}).get("15m") if isinstance(tf, dict) else {}
-    quote_vol = (
-        market.get("quote_volume_24h")
-        or session.get("quote_volume")
-        or (tf15 or {}).get("quote_volume")
-    )
+    # `quote_volume_24h` is a PHANTOM key — nothing in the codebase produces it. Kept out
+    # of the chain so a future producer cannot silently change this baseline's units.
+    quote_vol = session.get("quote_volume") or (tf15 or {}).get("quote_volume")
     try:
         qv = float(quote_vol if quote_vol is not None else 0)
     except (TypeError, ValueError):
@@ -1011,8 +1009,17 @@ async def snapshot_symbol(
             bracket_tiers=client.get_cached_leverage_tiers(symbol) if hasattr(client, "get_cached_leverage_tiers") else None,
             oi_bars=oi_bars,
             oi_usd=float(market.get("oi_usd") or 0) or None,
-            global_ls_ratio=float(market.get("top_ls_1h") or market.get("global_ls_1h") or 0) or None,
-            daily_volume=float(market.get("quote_volume_24h") or market.get("vol_24h_m") or 0) * 1_000_000,
+            # `global_ls_ratio` must be the GLOBAL account ratio; top-trader L/S is a
+            # different population. Prefer the global series and fall back to top only
+            # when it is missing (was the other way round, so forward-zone long_share
+            # reflected top accounts while calling itself global).
+            global_ls_ratio=float(market.get("global_ls_1h") or market.get("top_ls_1h") or 0) or None,
+            # vol_24h_m is in MILLIONS of quote currency, hence the 1e6. `quote_volume_24h`
+            # (raw USD by its name) used to sit first in this chain but is produced by
+            # NOTHING — a phantom key that, the day someone added a producer, would have
+            # been multiplied by 1e6 too, inflating daily_volume a millionfold and silently
+            # zeroing every wall-significance score (sig = notional / daily_volume).
+            daily_volume=float(market.get("vol_24h_m") or 0) * 1_000_000,
             price_change_pct=float(px_chg) if px_chg is not None else None,
             deep_bids=deep_bids,
             deep_asks=deep_asks,
@@ -1075,11 +1082,14 @@ async def snapshot_symbol(
                     "long_htf_count": summary.get("long_htf_count"),
                     "short_htf_count": summary.get("short_htf_count"),
                 }
-            # Level C: expose the aggregated HTF bias on the row so the direction
-            # gate (analyst + scanner) can veto counter-trend signals.
-            from hunt_core.confluence.mtf import htf_bias_from_signals
-
-            result["htf_bias"] = htf_bias_from_signals(mtf_obj.tf_signals)
+            # NB: row["htf_bias"] used to be written here, with a comment claiming the
+            # "direction gate (analyst + scanner) can veto counter-trend signals" from it.
+            # NOTHING ever read it: prizrak computes its own _htf_bias (vocabulary
+            # long/short/neutral) and the scanner its own _htf_trend_bias (bull/bear).
+            # Publishing a THIRD bias under a name the other two also use — in yet another
+            # vocabulary — was a live trap: any `row["htf_bias"] == "bull"` a future reader
+            # wrote would have silently no-op'd against a long/short value. Removed rather
+            # than left as a decoy; the two engines that DO gate own their own bias.
     except Exception as exc:
         LOG.debug("mtf_confluence_skipped | symbol=%s error=%s", symbol, exc)
     if hunt_fusion:

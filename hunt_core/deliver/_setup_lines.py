@@ -1,4 +1,10 @@
-"""Watch tick Telegram / digest line formatters (cycle split)."""
+"""Watch-tick Telegram setup/digest line formatters.
+
+Lived under runtime/cycle/_cycle_format.py, which made deliver import runtime — a
+boundary inversion (I-2) and, since this module already imports deliver.readiness and
+deliver._math, an outright deliver -> runtime -> deliver cycle. It is a DELIVERY
+formatter (its only consumer in the codebase is deliver/telegram.py) and now lives here.
+"""
 from __future__ import annotations
 
 import html

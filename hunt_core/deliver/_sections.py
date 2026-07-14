@@ -516,8 +516,9 @@ def format_liquidity_heatmap_section(row: dict[str, Any]) -> str:
     """Liquidity heatmap — sticky walls, spoof flags, depth bands (time-weighted book)."""
     maps = row.get("maps") or {}
     ob = maps.get("orderbook") if isinstance(maps, dict) else None
-    market = row.get("market") or {}
-    if not isinstance(ob, dict) and not market.get("map_sticky_bid"):
+    # The guard used to also accept `market["map_sticky_bid"]` — a phantom key nothing
+    # produces, so that half always evaluated False. The section needs an orderbook map.
+    if not isinstance(ob, dict):
         return ""
     sticky = (ob or {}).get("sticky_walls") or []
     spoof = (ob or {}).get("spoof_flags") or []
