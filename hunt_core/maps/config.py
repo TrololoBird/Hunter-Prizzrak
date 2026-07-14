@@ -34,9 +34,16 @@ class MapsConfig:
     # Liquidation-propensity exponent: cluster mass = OI-share × leverage^exp.
     # Realized liquidations skew to HIGH leverage (Cheng et al. 2021: ~60× mean
     # effective leverage of liquidated positions), which the pure OI weighting
-    # under-represents. exp=1.0 models propensity ∝ leverage (mass-preserving, so
-    # $-notional scale is kept); exp=0.0 reproduces the old OI-only weighting.
-    # Literature-anchored, Binance-USDⓈ-M-calibration-pending — overridable here.
+    # under-represents. exp=1.0 is NOT hand-picked: on the default tiers
+    # (10,25,50,100) it yields a mass-weighted mean leverage of ~61.7× — i.e. it
+    # is ANCHOR-CONSISTENT with Cheng's ~60× by construction (exp=0 gives 36×, the
+    # old OI-only weighting). Mass-preserving, so $-notional scale is kept.
+    # CAVEATS: the 60× anchor is BitMEX-2021 (different MMR regime / max-lev /
+    # audience than Binance USDⓈ-M 2026), so the map is "expected-better by
+    # construction", NOT validated on our data — real validation waits on the 1в
+    # realized tape (backtest forward hotspots vs actual liq clusters). Magnet
+    # POSITION uses the MMR-tiered liq price on the real-bracket path; the default
+    # fallback caps at 100× (real symbols get 125× via leverageBracket). Overridable.
     liq_leverage_propensity_exp: float = 1.0
     vp_periods: tuple[str, ...] = _DEFAULT_VP_PERIODS
     # 24→60: display "Карта уровней" POC/VAH/VAL at trader-grade resolution (see prizrak

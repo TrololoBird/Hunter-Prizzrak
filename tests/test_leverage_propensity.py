@@ -35,6 +35,17 @@ def test_mass_preserved_so_notional_scale_is_kept() -> None:
         assert math.isclose(sum(w.values()), base_sum, rel_tol=1e-9)
 
 
+def test_exp_one_is_anchor_consistent_with_60x() -> None:
+    # exp=1.0 is not hand-picked: the mass-weighted mean leverage of the resulting
+    # distribution reproduces Cheng et al.'s ~60× anchor (exp=0 → 36×).
+    w = _leverage_propensity_weights(_TIERS, _DEFAULT_LEVERAGE_WEIGHTS, propensity_exp=1.0)
+    mean_lev = sum(lev * w[lev] for lev in _TIERS) / sum(w.values())
+    assert 58.0 <= mean_lev <= 65.0, f"mean leverage {mean_lev:.1f}× should track the ~60× anchor"
+    w0 = _leverage_propensity_weights(_TIERS, _DEFAULT_LEVERAGE_WEIGHTS, propensity_exp=0.0)
+    mean0 = sum(lev * w0[lev] for lev in _TIERS) / sum(w0.values())
+    assert mean0 < 40.0  # old OI-only weighting sat far below the realized anchor
+
+
 def test_descending_tiers_ranked_correctly() -> None:
     # Real-bracket path can pass DESCENDING tiers; weight is by ascending RANK, not
     # position — the highest leverage must still get the highest propensity weight.
