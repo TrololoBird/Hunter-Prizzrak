@@ -272,6 +272,20 @@ def _format_manipulation_signal(symbol: str, setup: ManipulationSetup, *, price:
         tag = "подтверждён" if setup.micro_confirmed else "не найден"
         micro_line = f"Разворот на {setup.micro_tf}: <b>{tag}</b>\n"
     supporting, risks = _split_evidence(setup)
+    # Micro-confirmation gates ACTIONABILITY of the plan, not just the score. Before the
+    # LTF reversal (bos/choch) is found, a full «📍 Вход» plan reads as go-now and the
+    # trader enters into an unconfirmed continuation of the sweep (realized downside:
+    # ALLO −13.55%). When unconfirmed, disavow the entry: show the levels as REFERENCE
+    # only, explicitly «ожидание подтверждения — не вход». (Workorder #1, minimal variant.)
+    confirmed = bool(getattr(setup, "micro_confirmed", False))
+    if confirmed:
+        entry_line = f"📍 Вход (рыночный / лимит): <code>{fmt_price(geo['entry_lo'])} — {fmt_price(geo['entry_hi'])}</code>"
+    else:
+        entry_line = (
+            f"⏳ <b>ОЖИДАНИЕ подтверждения разворота ({setup.micro_tf or 'LTF'}) — НЕ вход.</b>\n"
+            f"   <i>ориентиры (входить только ПОСЛЕ подтверждения): "
+            f"{fmt_price(geo['entry_lo'])} — {fmt_price(geo['entry_hi'])}</i>"
+        )
     lines = [
         f"{emoji} <b>Манипуляция {pattern_label}</b> · <code>{sym}</code> · <b>{side_label}</b>",
         "━━━━━━━━━━━━━━━━━━━━━━",
@@ -279,8 +293,8 @@ def _format_manipulation_signal(symbol: str, setup: ManipulationSetup, *, price:
         f"Свип уровня {setup.macro_tf} <code>{fmt_price(setup.swept_level)}</code> → "
         f"экстремум <code>{fmt_price(setup.sweep_extreme)}</code> ({setup.meso_tf})",
         micro_line.rstrip("\n") if micro_line else "",
-        f"📍 Вход (рыночный / лимит): <code>{fmt_price(geo['entry_lo'])} — {fmt_price(geo['entry_hi'])}</code>",
-        _dobor_ladder_line(geo),
+        entry_line,
+        _dobor_ladder_line(geo) if confirmed else "",
         f"🛑 Стоп (за структуру): <code>{fmt_price(geo['stop'])}</code>",
         _tp_ladder_line(geo, setup),
         _rr_line(geo, setup),
