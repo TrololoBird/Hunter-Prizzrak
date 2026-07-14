@@ -51,6 +51,19 @@ class MapsConfig:
     # config vp_buckets note — 24 buckets is ~$150/bucket on BTC, too coarse to be useful).
     vp_buckets: int = 60
     vp_value_area_pct: float = 0.70
+    # HVN/LVN node classification: a bucket is a High-Volume Node when its volume
+    # exceeds the profile mean × vp_hvn_ratio, a Low-Volume Node when below mean ×
+    # vp_lvn_ratio. Were hardcoded 1.3/0.5 inside _hvn_lvn_nodes; moved here
+    # value-for-value (pinned) so the node sensitivity is a visible knob, not a magic
+    # literal buried in a comprehension.
+    vp_hvn_ratio: float = 1.3
+    vp_lvn_ratio: float = 0.5
+    # Per-period VP lookback (bars). 15m/1h come from the VP_LOOKBACK_* constants;
+    # 4h/1d/1w were inline literals in build_volume_profile_map. Moved here so the
+    # profile window is config-driven like every other VP knob.
+    vp_lookback_4h: int = 42
+    vp_lookback_1d: int = 30
+    vp_lookback_1w: int = 12
     # CVD-divergence threshold as a FRACTION of window turnover (signed CVD ÷ Σ
     # notional), not an absolute $. This IS the VPIN construction (imbalance ÷
     # volume) §5.3 grounds on — a dimensionless net-imbalance share in [0,1], so
@@ -136,6 +149,11 @@ class MapsConfig:
             vp_periods=periods,
             vp_buckets=int(section.get("vp_buckets", 60)),
             vp_value_area_pct=float(section.get("vp_value_area_pct", 0.70)),
+            vp_hvn_ratio=float(section.get("vp_hvn_ratio", 1.3)),
+            vp_lvn_ratio=float(section.get("vp_lvn_ratio", 0.5)),
+            vp_lookback_4h=int(section.get("vp_lookback_4h", 42)),
+            vp_lookback_1d=int(section.get("vp_lookback_1d", 30)),
+            vp_lookback_1w=int(section.get("vp_lookback_1w", 12)),
             cvd_div_ratio=_env_float(
                 "HUNT_CVD_DIV_RATIO",
                 # 0.15 (not 0.25): matches the dataclass default and the documented

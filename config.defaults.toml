@@ -177,6 +177,14 @@ vp_periods = ["1h", "4h", "1d", "1w"]
 # BTC, too coarse to place a usable level (matches maps/config.py code intent).
 vp_buckets = 60
 
+# HVN/LVN node sensitivity + per-period lookback (were hardcoded in volume_profile.py).
+# Moved value-for-value; pinned by tests/test_vp_config_knobs.py.
+vp_hvn_ratio = 1.3
+vp_lvn_ratio = 0.5
+vp_lookback_4h = 42
+vp_lookback_1d = 30
+vp_lookback_1w = 12
+
 # --- Orderbook detector thresholds (were hardcoded in maps/orderbook.py) -------------
 # Moved here value-for-value; pinned by tests/test_ob_detector_calibration.py so a typo
 # cannot silently retune a detector. KNOWN LIMITATION: the absorption/spoof floors are

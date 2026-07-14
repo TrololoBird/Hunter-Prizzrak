@@ -31,6 +31,18 @@ from hunt_core.track._cooldowns import (
 from hunt_core.track.tracker import has_active_signal, register_signal_open
 
 _LOG = structlog.get_logger(__name__)
+
+# ── Manipulation geometry — calibration surface (code-intent, deliberately NOT TOML) ──
+# G-30 disposition: unlike the maps OB/VP thresholds (which moved to config.defaults.toml),
+# these constants stay as documented code. Per the spec §5 drift-resolution precedent —
+# code-intent wins over TOML when the code carries the rationale — every number below is
+# grounded on the manipulation corpus itself (sweep depths, ESPORTS/BSB/ZEREBRO move
+# sizes, the трети/две-трети добор ladder), i.e. they are METHOD INVARIANTS, not deployment
+# knobs a operator would retune. Two further reasons: (1) the deliver path threads no config
+# object, so relocating would mean plumbing cfg through ~8 hot-path functions purely to move
+# a literal; (2) exposing corpus-grounded numbers as TOML invites blind retuning of the
+# method. Relocation was CONSIDERED and rejected here — same disposition the OB absolute-USD
+# floors carry ("making them relative is a calibration decision, not a config move").
 _MIN_RR = 1.2
 # Minimum structural sweep depth (|swept_level − sweep_extreme| / swept_level) for a
 # dip to count as a liquidity-grab «свип». Grounded on real bars: the corpus winners

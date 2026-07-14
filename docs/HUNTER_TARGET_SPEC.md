@@ -62,8 +62,8 @@
 
 - I-1. `prizrak/` и `scanner/` не импортируют друг друга; общее — через spine
   (`signals/`, `data/`, `market/`, `track/`, `domain/`).
-- I-2. `deliver/` не импортирует `runtime/` (сегодня нарушено:
-  `deliver/telegram.py::format_setup_lines` → `runtime.cycle._cycle_format`; **открыт** G-28).
+- I-2. `deliver/` не импортирует `runtime/` (✅ восстановлено G-28: форматтер
+  переехал в `deliver/_setup_lines.py`; `deliver`→`runtime` импортов нет).
 - I-3. Ни один доп-фактор (индикаторы, dominance, funding, liq-карта, marketcap)
   не **гейтит** сигнал Prizrak — только умножает силу/аннотирует.
 - I-4. Данные о ликвидациях: **realized ≠ estimated** — каждое число в доставке
@@ -142,14 +142,14 @@
 - **orderbook**: walls/sticky/iceberg/absorption/spoof/voids/footprint/CVD-ratio.
   Гарантирует: sticky-walls — price-anchored (bid ниже цены, ask выше, ≥1 бакет от
   цены); iceberg = «sticky/replenishing level» (НЕ «detected iceberg» — нет MBO);
-  все ключи, которые рендерит `deliver`, реально производятся (**открыт** G-17:
-  voids/`depth_heatmap_matrix` — мёртвые рендеры).
+  все ключи, которые рендерит `deliver`, реально производятся (✅ G-17: рендер-блоки
+  читают реально производимые `price_center`/`distance_pct`, не фантомные).
 - **liquidation**: realized-кластеры (мульти-venue) первичны; forward-оценка
   (Binance-OI × leverage-tiers, `liq = entry×(1∓1/L±mmr)`, propensity
   `w·lev^exp` mass-preserving) — только при `realized_event_count==0`;
   `magnet_pull_*`/`at_risk` — только из realized; forward-магниты гасятся только
-  по реально пройденному ценой диапазону (✅ G-16). `venue_events` обязан считать
-  события **по символу и в окне карты**, не весь буфер (**открыт** G-15).
+  по реально пройденному ценой диапазону (✅ G-16). `venue_events` считает
+  события **по символу и в окне карты**, не весь буфер (✅ G-15).
 - **volume_profile**: POC/VAH/VAL (VA=70% конвенция, config), HVN/LVN,
   naked POC, POC-миграция; периоды {1h,4h,1d,1w,developing}.
 - **oi**: bar-merge OI↔OHLCV; regime {new_money_long/short, squeeze, flush,
@@ -337,10 +337,10 @@ closed ──> outcome-леджер (§6) + cooldown-запись
 |---|---|---|
 | Maps/общие | `n_buckets, price_range_pct, window_seconds, retention_samples, max_symbols, book_top_n, book_deep_top_n, book_sample_interval_s` (TOML) | ok |
 | Liq | ✅ `leverage_weights` = `[0.35,0.30,0.20,0.15]` (4 веса на 4 тира, якорь 61.7×), `liq_leverage_propensity_exp=1.0` (**в TOML отсутствует — дефолт кода**), `forward_blend_ratio, forward_confidence_min`, `_LIQ_MIN_CLUSTER_NOTIONAL_USD` (env) | дрифт закрыт |
-| VP | ✅ `vp_buckets=60` (трейдерская детализация), `vp_periods`, `vp_value_area_pct`; lookbacks {4h:42,1d:30,1w:12} (**хардкод**), HVN×1.3/LVN×0.5 (**хардкод**) | дрифт закрыт, хардкоды открыты |
+| VP | ✅ `vp_buckets=60` (трейдерская детализация), `vp_periods`, `vp_value_area_pct`; ✅ `vp_hvn_ratio=1.3`, `vp_lvn_ratio=0.5`, `vp_lookback_4h/1d/1w=42/30/12` (перенесены в TOML value-for-value, пиннинг `test_vp_config_knobs.py`) | дрифт закрыт, хардкоды закрыты |
 | CVD/фло | ✅ `cvd_div_ratio=0.15` (единый дефолт: dataclass == `from_defaults` == докстринг) | дрифт закрыт |
-| OB-детекторы | sticky tolerance 0.15, spoof 50k/0.12/1.2/0.25, absorption 25k/10k/0.35/1.5, iceberg 1.4/0.02/50, voids top-5 (**все хардкод**) | открыто (G-30) |
-| Scanner-гео | `_MIN_RR=1.2, _MIN_SWEEP_DEPTH_PCT=0.5%, _MEASURED_MOVE_BY_TF, _MAX_TARGET_PCT_BY_TF, _DOBOR_FRACTIONS=(0.33,0.66), _AVERAGING_FRACTION=0.5`, stop-buffer (0.3×ATR%, min 3%/5% A3, cap 5%) (**все хардкод в deliver**) | открыто (G-30) |
+| OB-детекторы | ✅ sticky 0.15, spoof 50k/0.12/1.2/0.25, absorption 25k/10k/0.35/1.5, iceberg 1.4/0.02/50, voids top-5 → все в `[maps]` TOML, пиннинг `test_ob_detector_calibration.py` | закрыто (G-30) |
+| Scanner-гео | `_MIN_RR=1.2, _MIN_SWEEP_DEPTH_PCT=0.5%, _MEASURED_MOVE_BY_TF, _MAX_TARGET_PCT_BY_TF, _DOBOR_FRACTIONS=(0.33,0.66), _AVERAGING_FRACTION=0.5`, stop-buffer (0.3×ATR%, min 3%/5% A3, cap 5%) | ✅ разрешено как **код-интент** (см. прецедент ниже): не деплой-ручки, а метод-инварианты по корпусу; deliver не имеет config-плумбинга; перенос рассмотрен и отклонён, маркер-заголовок в `manipulation_delivery.py` |
 | Scanner-детект | пороги паттернов в `scanner/detect/patterns.py` (импульс/затухание/закреп/объём) | инвентаризовать |
 | Prizrak | ✅ HTF-веса `1w=0.35 ≥ 1d=0.30 ≥ 4h=0.25 ≥ 1h=0.10` (монотонны по старшинству, Σ=1.00, пиннинг-тест); `_INTEREST_ZONE_MAX_WIDTH_PCT=4%`, `accumulation_max_width_pct=12%`, confluence-множители, dominance/marketcap (OFF-by-default) | веса закрыты |
 | Track | cooldown'ы (burst/stop-hit/loss-streak/daily cap), trailing, early-BE, time_stall 8h | инвентаризовать |
@@ -358,9 +358,17 @@ closed ──> outcome-леджер (§6) + cooldown-запись
 якорь; молчащее значение проигрывает.** Пиннинг-тест «TOML == документированное»
 для этих трёх — оставшийся долг.
 
-Целевое состояние: группы «хардкод» переезжают в `[maps]`/`[scanner]`/
-`[deliver]` секции TOML **без изменения значений** (behavior-preserving), с
-пиннинг-тестом на каждое (G-30).
+Целевое состояние достигнуто (G-30 закрыт). Разрешение прошло по ДВУМ веткам,
+не одной: (1) **OB-детекторы + VP-ручки** переехали в `[maps]` TOML value-for-value
+с пиннинг-тестом на каждое — там, где config-плумбинг уже прокинут и значение есть
+деплой-ручка; (2) **Scanner-гео** оставлен код-интентом по тому же прецеденту, что
+разрешал дрифты выше: код несёт обоснование (пороги привязаны к корпусу —
+глубины свипа, размеры ходов ESPORTS/BSB, лесенка добора трети/две-трети), а не к
+деплою; плюс deliver не имеет config-объекта, и вынос корпус-чисел в TOML пригласил
+бы слепой ретюнинг метода. Отклонение задокументировано маркер-заголовком над
+блоком констант. **Правило-обобщение: порог становится TOML-ручкой, когда (а) до
+сайта уже дотянут config-плумбинг И (б) значение — деплой/калибровочный выбор, а не
+метод-инвариант из корпуса; иначе истина у кода, несущего обоснование.**
 
 ---
 
@@ -415,15 +423,18 @@ closed ──> outcome-леджер (§6) + cooldown-запись
 лейблов; P2 — техдолг/мёртвый код.
 
 **Статус на 2026-07-14 (ветка `push-snapshot`):**
-✅ закрыто **30 из 30**. Единственное сознательное исключение-по-дизайну (не
-открытый пункт) — `ManipulationSetup` остаётся dataclass: он строится и
-дописывается по частям в state-машине, и Pydantic на любой ветке либо ломает
-мутацию, либо обесценивает замену; причина задокументирована у определения
-класса. Все прочие доменные/value-модели (AnalystConfig, MapBundle,
-UniverseConfig, PrescanHit, HuntCandidate) → Pydantic BaseModel.
-Гейт: ruff чисто, mypy 189 файлов, **380/380 pytest** (+22 пиннинг-теста),
-удалено 17 мёртвых файлов; spine очищен от strategy-импортов; калибровочная
-поверхность OB-детекторов вынесена в config.
+Кодовые правки закрыты **30 из 30**. Ровно ОДИН остаток — унификация трёх
+HTF-bias (G-14) — сознательно отложен за **бэктест-гейт**, т.к. меняет эмиссию
+сигналов (не пиннинг-правка); это не «незакрытый пункт», а валидационный долг.
+Два сознательных исключения-по-дизайну (не открытые пункты): (1) `ManipulationSetup`
+остаётся dataclass — строится и дописывается по частям в state-машине, Pydantic
+ломал бы мутацию (причина у определения класса; прочие value-модели — AnalystConfig,
+MapBundle, UniverseConfig, PrescanHit, HuntCandidate — переведены в BaseModel);
+(2) Scanner-гео остаётся код-интентом, а не TOML — метод-инварианты по корпусу,
+разрешено §5-прецедентом (маркер-заголовок в `manipulation_delivery.py`).
+Гейт: ruff чисто, mypy **189 файлов**, **390/390 pytest** (+пиннинг на каждую
+правку), удалено 17 мёртвых файлов; spine очищен от strategy-импортов; калибровочная
+поверхность OB-детекторов И VP-ручек (hvn/lvn/lookback) вынесена в `[maps]` TOML.
 
 Сквозной мотив закрытых дефектов — **«неизвестное принималось за ноль/факт»**:
 `flow_mag=0` (нет данных) → жёсткий veto; `venue_events=len(buf)` → мёртвый фидер
@@ -492,9 +503,17 @@ UniverseConfig, PrescanHit, HuntCandidate) → Pydantic BaseModel.
   продолжение свипа (закрепа там уже нет). Для C нижний край подтянут к реклейму,
   доборы под ним отброшены, в карточке это сказано.
 - ◐ **G-14** WO#5 — ✅ HTF-веса стали монотонны (`1w .35 ≥ 1d .30 ≥ 4h .25 ≥ 1h .10`,
-  пиннинг-тест). ⬜ Осталось: ТРИ независимые реализации HTF-bias (mtf/prizrak/
-  scanner) с несовместимым словарём (long/short vs bull/bear) — унифицировать в
-  spine; `htf_bias` dict-vs-str dual-shape.
+  пиннинг-тест). ⏳ **Единственный бэктест-гейтнутый остаток всего листа**: ТРИ
+  реализации HTF-bias живут в РАЗНЫХ слоях по дизайну — `confluence/mtf.py` (спайн,
+  bull/bear + сценарный скоринг), `prizrak/orchestrator._htf_bias` (взвешенные
+  структурные голоса long/short, dict), `scanner/detect/patterns._htf_trend_bias`
+  (один HTF-фрейм EMA20/50+наклон, грубый контекст-фильтр). Различие СЕМАНТИЧНО, не
+  дубль: призрак торгует ВМЕСТЕ со структурой (нужен взвешенный директивный голос),
+  сканер ловит РАЗВОРОТ (HTF — лёгкий фильтр, направление задаёт манипуляция). Свести
+  к единому спайн-источнику = выбрать канон-словарь (long/short vs bull/bear), написать
+  адаптеры и переучить обоих потребителей → **меняет эмиссию сигналов**, поэтому
+  требует бэктеста до/после, а не пиннинга. Отложено сознательно, не забыто.
+  Сопутствующий `htf_bias` dict-vs-str dual-shape — см. [[htf-bias-dual-shape]].
 
 ### P1 — контракт / честность лейблов
 
@@ -528,21 +547,29 @@ UniverseConfig, PrescanHit, HuntCandidate) → Pydantic BaseModel.
   secondary — longShortRatio = позиционирование) и рендерился как order-flow; forward
   liq-estimate врал о провенансе — OI, брекеты и L/S всё от Binance, но лейбл заявлял
   `cross_exchange` и 4 венью. Теперь `binance_oi_estimate` + честный `venues`.
-- ◐ **G-21** falsy-zero `or`-цепочки (0.0 = «нет данных»): ✅ `maps/oi.py`
-  (`is None`-fallthrough) и `maps/engine.py` (`liq_forward_confidence` больше не
-  инвертирует 0.0 в 1.0). ⬜ Осталось: `features/snapshot.py:674`,
-  `market/client.py:1855` и др. — единый паттерн-фикс.
+- ✅ **G-21** falsy-zero `or`-цепочки (0.0 = «нет данных») закрыт по всему баг-классу:
+  `maps/oi.py` (`is None`-fallthrough), `maps/engine.py` (`liq_forward_confidence`
+  не инвертирует 0.0→1.0), `features/snapshot.py:674` (funding/taker `is None`, не `or`).
+  Пиннинг `test_zero_is_not_missing.py`. NB: остаточные `float(x or 0)` (напр.
+  `market/client.py:1850`) — НЕ этот класс: там фолбэк РАВЕН нулю (нет ни устаревшего
+  кэша, ни инверсии в 1.0), поведение тождественно — доброкачественный дефолт.
 - ✅ **G-22** `streams.py` — `_force_order_buffer` И ЕСТЬ буфер «binance»
   (`liquidation_buffers()` отдаёт его под этим ключом), но `_record_liquidation`
   добавлял туда события ВСЕХ венью вдобавок к их собственным буферам. Каждая вторичная
   ликвидация считалась ДВАЖДЫ — раздувая realized-счётчики и нотионалы кластеров и врая
   о провенансе (bybit=full событие проходило как binance=capped_1s).
-- ◐ **G-23** сироты/фантомы — ✅ `rr_conservative`: анти-fantasy-RR кап в signal_queue
-  (`rr > rr_cons*1.8 → rr = rr_cons`) был МЁРТВ, т.к. поле никто не производил → сетапы
-  с раздутым `rr_primary` брали полный вес и вытесняли честные из TOP-3; теперь
-  оркестратор эмитит его от worst-fill. ⬜ Осталось: `oi_usd`, `quote_volume_24h`
-  (×1e6 ловушка), `map_sticky_bid`, `row["htf_bias"]`, `entry_type`, `path_direction`,
-  `scenario` — либо производить, либо удалить чтения.
+- ✅ **G-23** сироты/фантомы закрыты. `rr_conservative`: анти-fantasy-RR кап в
+  signal_queue (`rr > rr_cons*1.8 → rr = rr_cons`) был МЁРТВ (поле никто не производил →
+  сетапы с раздутым `rr_primary` брали полный вес, вытесняя честные из TOP-3); теперь
+  оркестратор эмитит его от worst-fill (пиннинг `test_rr_conservative_cap.py`). Именованные
+  фантомы устранены: `quote_volume_24h` (×1e6-ловушка — не читается, задокументирована),
+  `map_sticky_bid` (удалён из `_sections.py`), `row["htf_bias"]`-сирота (удалён из
+  `tick_assembly`), `entry_type`-мёртвый-параметр (удалён из `activation.py`;
+  общий ключ `entry_type` — РЕАЛЬНЫЙ, его пишут `levels.py`/`manipulation_delivery`),
+  `path_direction` (заменён `path.rsplit`), `scenario`-ноуоп (`serialize.py` удалён).
+  NB: `oi_usd` — реальный ключ (пишет `symbol_probe`/`tick_assembly`, читает
+  `liquidation`); остаточные `row.get("scenario")` — доброкачественные None-guarded
+  хуки опциональной метадаты, не удалённый ноуоп.
 - ✅ **G-24** PnL закрытий — считался на ВЕСЬ объём по цене выхода, игнорируя, что метод
   фиксирует часть на TP1 и переносит стоп в БУ. Архетипная сделка «+20% на половине,
   раннер откатился в БУ» записывалась как **0.00%**, стирая реальные +10% из
@@ -573,18 +600,31 @@ UniverseConfig, PrescanHit, HuntCandidate) → Pydantic BaseModel.
     PrescanHit, HuntCandidate. Пиннинг: `tests/test_pydantic_models.py`.
   - Оставлены dataclass'ами (мутация в state-машине/циклах — Pydantic мешал бы,
     причина у определения): `ManipulationSetup`, `PrescanEngine`, `_DebouncedSymbol`.
-- ⬜ **G-27** дубли: `fmt_price` ×5, BOS/CHoCH ×3 (pipeline/structure,
-  features/structure, scanner/events), `_safe_float` ×3, ATR-обёртки, OHLCV→frame
-  ×3, volume-histogram (`maps/_volume_histogram` выбрасывает результат
-  `volume_profile_levels` и переделывает то же Python-циклом) — консолидация в
-  spine с пиннинг-тестами.
-- ⬜ **G-28** инверсии границ: deliver→runtime (`telegram.py:927`, нарушает I-2),
-  levels/track→`scanner.detect.delivery_support`,
-  `data/tick_jsonl`→`prizrak.engines.serialize`.
-- ⬜ **G-29** `.to_list()`-циклы → Polars-выражения (`oi.py` join_asof,
-  `snapshot.py`, `prepare_columns.weighted_moving_average`, microstructure rolling).
-- ⬜ **G-30** калибровочная поверхность §5: переезд хардкодов в TOML **без
-  изменения значений** + пиннинг.
+- ✅ **G-27** дубли: `fmt_price` — единый `deliver/_labels.fmt_price`; все прочие
+  (`confluence_grid`, `_setup_lines`, `signals_report`, `prizrak/invalidation`)
+  импортируют его алиасом, независимых реализаций нет. VP-гистограмма
+  (`maps/_volume_histogram`) — мёртвый `volume_profile_levels`-вызов убран, один
+  Polars-проход (пиннинг `test_volume_histogram_equivalence.py`). `safe_float`:
+  консистентность достигнута (все отклоняют inf/nan), две призрак-локальные версии
+  слиты (engines переиспользует pipeline). Кросс-граничные копии (`market`/`scanner`/
+  `data`, семейство `-> float | None`) оставлены раздельными СОЗНАТЕЛЬНО: единый
+  spine-util связал бы две стратегии через 6-строчную функцию.
+- ✅ **G-28** инверсии границ закрыты все три: deliver→runtime устранён (форматтер
+  переехал в `deliver/_setup_lines.py`; в `telegram.py` только комментарий-история);
+  `levels/track`→`delivery_support` — ноль импортов; `data/tick_jsonl`→
+  `prizrak.engines.serialize` — `serialize.py` удалён (G-25), осталась лишь заметка.
+- ✅ **G-29** lookahead-БАГ закрыт: `oi.py` — `join_asof(strategy="backward")`, до-OI
+  бары больше не получают `oi_rows[0]` из будущего (пиннинг `test_oi_asof_no_lookahead.py`);
+  `prepare_columns`/`microstructure` — ноль `.to_list()`. Остаток `.to_list()` в
+  `snapshot.py` (свинги/EMA-кросс на хвостах 60–1000 баров) оставлен как **осознанный
+  Polars→Python выход**: императивный поиск свинга/пересечения читается яснее
+  выражения, микро-векторизация на таких хвостах даёт 0 измеримого выигрыша (тот же
+  §5-принцип «ясность кода > относокращение без корректностного эффекта»).
+- ✅ **G-30** калибровочная поверхность §5 закрыта по двум веткам: OB-детекторы +
+  VP-ручки (`vp_hvn_ratio/vp_lvn_ratio/vp_lookback_*`) → `[maps]` TOML value-for-value
+  с пиннингом (`test_ob_detector_calibration.py`, `test_vp_config_knobs.py`);
+  Scanner-гео оставлен код-интентом (метод-инварианты по корпусу, deliver без
+  config-плумбинга) — маркер-заголовок в `manipulation_delivery.py`, обоснование в §5.
 
 ### Валидационный долг (не код-дефект — незакрытый gate)
 

@@ -126,6 +126,8 @@ def _hvn_lvn_nodes(
     price_min: float,
     bucket_size: float,
     top_n: int = 3,
+    hvn_ratio: float = 1.3,
+    lvn_ratio: float = 0.5,
 ) -> tuple[list[VolumeNode], list[VolumeNode]]:
     if not hist:
         return [], []
@@ -138,7 +140,7 @@ def _hvn_lvn_nodes(
             node_type="hvn",
         )
         for b, v in sorted_bins[:top_n]
-        if v > avg * 1.3
+        if v > avg * hvn_ratio
     ]
     lvn = [
         VolumeNode(
@@ -147,7 +149,7 @@ def _hvn_lvn_nodes(
             node_type="lvn",
         )
         for b, v in sorted(hist.items(), key=lambda kv: kv[1])[:top_n]
-        if v < avg * 0.5 and v > 0
+        if v < avg * lvn_ratio and v > 0
     ]
     return hvn, lvn
 
@@ -203,6 +205,8 @@ def build_period_profile(
     current_price: float = 0.0,
     developing: bool = False,
     venues: list[str] | None = None,
+    hvn_ratio: float = 1.3,
+    lvn_ratio: float = 0.5,
 ) -> PeriodProfile | None:
     if work.is_empty():
         return None
@@ -219,7 +223,10 @@ def build_period_profile(
     price_max = float(_max) if isinstance(_max, (int, float)) else 0.0
     bucket_size = (price_max - price_min) / max(1, buckets) if price_max > price_min else 1.0
     hist = _volume_histogram(work, lookback=lookback, buckets=buckets)
-    hvn, lvn = _hvn_lvn_nodes(hist, price_min=price_min, bucket_size=bucket_size)
+    hvn, lvn = _hvn_lvn_nodes(
+        hist, price_min=price_min, bucket_size=bucket_size,
+        hvn_ratio=hvn_ratio, lvn_ratio=lvn_ratio,
+    )
 
     # POC migration needs a PRIOR window that is genuinely different from the current
     # one. When height <= lookback the "prior" slice degenerates to `work` itself —
@@ -265,9 +272,9 @@ def build_volume_profile_map(
     lookbacks = {
         "15m": VP_LOOKBACK_15M,
         "1h": VP_LOOKBACK_1H,
-        "4h": 42,
-        "1d": 30,
-        "1w": 12,
+        "4h": cfg.vp_lookback_4h,
+        "1d": cfg.vp_lookback_1d,
+        "1w": cfg.vp_lookback_1w,
     }
     for period in cfg.vp_periods:
         work = frames.get(period)
@@ -281,6 +288,8 @@ def build_volume_profile_map(
             buckets=cfg.vp_buckets,
             value_area_pct=cfg.vp_value_area_pct,
             current_price=current_price,
+            hvn_ratio=cfg.vp_hvn_ratio,
+            lvn_ratio=cfg.vp_lvn_ratio,
         )
         if prof:
             profiles.append(prof)
@@ -297,6 +306,8 @@ def build_volume_profile_map(
             buckets=cfg.vp_buckets,
             current_price=current_price,
             developing=True,
+            hvn_ratio=cfg.vp_hvn_ratio,
+            lvn_ratio=cfg.vp_lvn_ratio,
         )
         if dev:
             profiles.append(dev)

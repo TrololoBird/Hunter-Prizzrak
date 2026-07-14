@@ -8,22 +8,16 @@ Confirmed zero external callers by grep before removal, not assumed.
 """
 from __future__ import annotations
 
-import math
-from typing import Any
+# safe_float is the SAME finite-coercion helper the structure pipeline uses; both live
+# inside prizrak/ and pipeline/_helpers is a leaf (no prizrak imports), so re-exporting it
+# here removes the byte-identical duplicate the audit flagged (G-27) without an import cycle.
+# The cross-boundary copies (market/, scanner/, data/) stay separate on purpose: a spine
+# util everyone imports would couple the two strategies through it for a 6-line function.
+from hunt_core.prizrak.pipeline._helpers import safe_float
 
 
 def clamp01(v: float) -> float:
     return max(0.0, min(1.0, v))
-
-
-def safe_float(val: Any, default: float = 0.0) -> float:
-    if val is None:
-        return default
-    try:
-        f = float(val)
-        return f if math.isfinite(f) else default
-    except (TypeError, ValueError):
-        return default
 
 
 __all__ = ["clamp01", "safe_float"]
