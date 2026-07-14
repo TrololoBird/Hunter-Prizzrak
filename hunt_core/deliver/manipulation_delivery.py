@@ -109,6 +109,9 @@ _AVERAGING_FRACTION = 0.5  # how far from entry toward stop the averaging limit 
 # структурных доборов между входом и стопом. Доли отсчитываются от дистанции вход→стоп;
 # 0.5 сохранён для обратной совместимости (_AVERAGING_FRACTION == средний рунг).
 _DOBOR_FRACTIONS = (0.33, 0.66)  # два добора: треть и две трети пути к стопу
+# Полоса входа шире этого — не ошибка (широкий стоп метода → широкая полоса), но исход
+# начинает определяться филом, а не сетапом. Помечаем в сообщении, НЕ подавляем сигнал.
+_WIDE_ENTRY_BAND_PCT = 5.0
 
 
 def _stop_buffer(meso_bars: list[list[float]], *, pattern_a3: bool = False) -> float:
@@ -218,9 +221,28 @@ def _geometry(setup: ManipulationSetup, *, price: float, stop_buffer: float | No
     # для всей позиции). Аддитивно к геометрии — гейты rr/target выше не тронуты, поэтому
     # набор живых сигналов не меняется, богаче только управление позицией.
     dobor_ladder = [price + (stop - price) * f for f in _DOBOR_FRACTIONS]
+    entry_lo = min(price, averaging_price)
+    entry_hi = max(price, averaging_price)
+
+    # WO#3 — «вход ниже реклейма». Доборы ВНИЗ — это метод (усреднение/пересиживание
+    # под широким стопом), поэтому ширину полосы мы НЕ режем. Но Pattern C — это
+    # «закреп ВЫШЕ предыдущего максимума»: цена под реклеймнутым уровнем означает, что
+    # закрепа больше нет (тезис сломан), а не что подвернулась цена получше. Такой добор
+    # покупает продолжение свипа. Поэтому для C нижний край полосы не опускается ниже
+    # реклейм-уровня (swept_level = prior_high; entry_ref = закреп-клоуз всегда выше него).
+    reclaim_clamped = False
+    if setup.pattern_type == "C" and setup.direction == "long" and setup.swept_level > 0:
+        if entry_lo < setup.swept_level < entry_hi:
+            entry_lo = setup.swept_level
+            reclaim_clamped = True
+        dobor_ladder = [d for d in dobor_ladder if d >= setup.swept_level]
+
+    # Ширина полосы — не гейт, а честная метка: при широком стопе полоса широкая
+    # ЗАКОНОМЕРНО, и исход тогда сильно зависит от фила. Помечаем, не подавляем.
+    band_width_pct = (entry_hi - entry_lo) / price * 100.0 if price > 0 else 0.0
     return {
-        "entry_lo": min(price, averaging_price),
-        "entry_hi": max(price, averaging_price),
+        "entry_lo": entry_lo,
+        "entry_hi": entry_hi,
         "averaging_price": averaging_price,
         "dobor_ladder": dobor_ladder,
         "stop": stop,
@@ -230,6 +252,9 @@ def _geometry(setup: ManipulationSetup, *, price: float, stop_buffer: float | No
         "nearest_target": nearest_target,
         "ladder": ladder,
         "projected": projected,
+        "band_width_pct": band_width_pct,
+        "band_wide": band_width_pct > _WIDE_ENTRY_BAND_PCT,
+        "reclaim_clamped": reclaim_clamped,
     }
 
 
@@ -278,8 +303,20 @@ def _format_manipulation_signal(symbol: str, setup: ManipulationSetup, *, price:
     # ALLO −13.55%). When unconfirmed, disavow the entry: show the levels as REFERENCE
     # only, explicitly «ожидание подтверждения — не вход». (Workorder #1, minimal variant.)
     confirmed = bool(getattr(setup, "micro_confirmed", False))
+    band_note = ""
+    if geo.get("reclaim_clamped"):
+        # Полоса упиралась бы ниже реклейма — там закреп уже сломан, это не добор.
+        band_note += f"\n   <i>нижний край подтянут к реклейму {fmt_price(setup.swept_level)} — ниже него закрепа нет</i>"
+    if geo.get("band_wide"):
+        band_note += (
+            f"\n   <i>⚠️ широкая зона ({float(geo.get('band_width_pct') or 0):.1f}%) — "
+            f"исход сильно зависит от фила</i>"
+        )
     if confirmed:
-        entry_line = f"📍 Вход (рыночный / лимит): <code>{fmt_price(geo['entry_lo'])} — {fmt_price(geo['entry_hi'])}</code>"
+        entry_line = (
+            f"📍 Вход (рыночный / лимит): "
+            f"<code>{fmt_price(geo['entry_lo'])} — {fmt_price(geo['entry_hi'])}</code>{band_note}"
+        )
     else:
         entry_line = (
             f"⏳ <b>ОЖИДАНИЕ подтверждения разворота ({setup.micro_tf or 'LTF'}) — НЕ вход.</b>\n"

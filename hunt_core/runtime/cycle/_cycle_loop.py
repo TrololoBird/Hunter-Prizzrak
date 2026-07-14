@@ -6,6 +6,7 @@ import faulthandler
 import json
 import os
 import time
+from collections.abc import Sequence
 from typing import Any
 
 from hunt_core import clock
@@ -142,7 +143,7 @@ def _build_digest_candidates(
 
 
 async def _manipulation_scan_loop(
-    symbols: list[str],
+    cli_symbols: Sequence[str],
     client: Any,
     broadcaster: Any | None,
     send_telegram: bool,
@@ -155,14 +156,27 @@ async def _manipulation_scan_loop(
     Pattern B (short: HTF sweep→fade→LTF_confirm) across the non-pinned
     universe. Each scan fetches OHLCV for all tracked symbols, runs the
     state machine, and delivers if score ≥ 0.50.
+
+    The universe is re-resolved EVERY cycle. It used to be a list captured once at
+    process start, so the watchlist that prescan keeps rewriting never reached the
+    scanner: a coin that started coiling after boot was invisible until the next
+    restart — and the whole point of the prescan is to surface exactly those.
     """
     from hunt_core.deliver.manipulation_delivery import deliver_manipulation_setups
     from hunt_core.data.lake import buffer_tracker_state, flush_tracker_state
+    from hunt_core.data.universe import PINNED_SYMBOLS, load_watchlist_symbols
     from hunt_core.track.tracker import load_tracker_state
 
-    LOG.info("manipulation_scan_loop_started interval=%s symbols=%s", interval_s, len(symbols))
+    LOG.info("manipulation_scan_loop_started interval=%s", interval_s)
     while not should_stop():
         try:
+            # Pinned symbols are Prizrak's exclusive domain; scanner owns the rest.
+            pinned_upper = {str(s).upper() for s in PINNED_SYMBOLS}
+            symbols = [
+                s
+                for s in dict.fromkeys(list(cli_symbols) + load_watchlist_symbols())
+                if str(s).upper() not in pinned_upper
+            ]
             if send_telegram and broadcaster is not None and symbols:
                 ts = load_tracker_state()
                 await deliver_manipulation_setups(symbols, client, broadcaster, tracker_state=ts)
@@ -320,20 +334,14 @@ async def run_loop(
     last_bias: dict[str, str] = {}
     last_lifecycle_phase: dict[str, str] = {}
     symbol_state = new_session_state()
-    from hunt_core.data.universe import PINNED_SYMBOLS, load_watchlist_symbols
-    # Pinned symbols are Prizrak's exclusive domain (Deep module — continuous
-    # analysis, structural накопление/PP/traps, its own HTF-gated candidates).
-    # Scanner owns only the non-pinned universe.
-    pinned_upper = {str(s).upper() for s in PINNED_SYMBOLS}
-    all_intra_bar_syms = [
-        s for s in dict.fromkeys(list(cli_symbols) + load_watchlist_symbols())
-        if str(s).upper() not in pinned_upper
-    ]
+    from hunt_core.data.universe import PINNED_SYMBOLS
 
     manipulation_task: asyncio.Task[None] | None = None
     if not once:
+        # Pass the CLI seed only — the loop re-resolves watchlist ∪ cli minus pinned on
+        # every pass, so freshly-prescanned coins are actually scanned (see docstring).
         manipulation_task = asyncio.create_task(
-            _manipulation_scan_loop(all_intra_bar_syms, client, broadcaster, send_telegram),
+            _manipulation_scan_loop(cli_symbols, client, broadcaster, send_telegram),
             name="manipulation_scan_loop",
         )
         LOG.info("manipulation_scan_loop_scheduled")
