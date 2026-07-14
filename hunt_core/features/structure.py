@@ -197,9 +197,12 @@ def _tf_block(tf: dict[str, Any], *keys: str) -> dict[str, Any]:
     return {}
 
 
+# Candidate liquidity levels from a TF block (used by _liquidity_pools to build equal-
+# high/low clusters). ``pp_short_zone_hi`` / ``pp_long_zone_lo`` were listed here too but
+# no code in the repo ever produces them — phantom keys, silently contributing nothing.
 def _swing_highs_from_block(block: dict[str, Any]) -> list[float]:
     levels: list[float] = []
-    for key in ("pp_short_zone_hi", "donchian_high20", "prev_high"):
+    for key in ("donchian_high20", "prev_high"):
         px = _f(block.get(key))
         if px > 0:
             levels.append(px)
@@ -208,23 +211,36 @@ def _swing_highs_from_block(block: dict[str, Any]) -> list[float]:
 
 def _swing_lows_from_block(block: dict[str, Any]) -> list[float]:
     levels: list[float] = []
-    for key in ("pp_long_zone_lo", "donchian_low20"):
+    for key in ("donchian_low20",):
         px = _f(block.get(key))
         if px > 0:
             levels.append(px)
     return levels
 
 
-def _swing_trend(highs: list[float], lows: list[float]) -> Literal["bull", "bear", "neutral"]:
-    if len(highs) >= 2 and len(lows) >= 2:
-        hh = highs[-1] > highs[-2]
-        hl = lows[-1] > lows[-2]
-        lh = highs[-1] < highs[-2]
-        ll = lows[-1] < lows[-2]
-        if hh and hl:
-            return "bull"
-        if lh and ll:
-            return "bear"
+def _block_trend(block: dict[str, Any]) -> Literal["bull", "bear", "neutral"]:
+    """Trend of one TF block from the EMA stack (produced fields only).
+
+    This replaces a `_swing_trend` that compared a list of DIFFERENT level types as if
+    they were the same swing level at two points in time: the "highs" list mixed
+    ``pp_short_zone_hi`` (never produced by anything — a phantom key), ``donchian_high20``
+    and ``prev_high``, while the "lows" list held ``pp_long_zone_lo`` (also phantom) and
+    ``donchian_low20``. With the phantoms absent the lows list held a single element, so
+    the ``len(lows) >= 2`` guard never passed and the trend was PERMANENTLY "neutral" —
+    which in turn made ``choch = htf_trend == "bull"``永 false, so CHoCH was never
+    detected and every structural break was labelled BOS.
+
+    A close/EMA50/EMA200 stack is a real, produced, cross-TF-comparable trend.
+    """
+    close = _f(block.get("close"))
+    ema50 = _f(block.get("ema50"))
+    ema200 = _f(block.get("ema200"))
+    if close <= 0 or ema50 <= 0 or ema200 <= 0:
+        return "neutral"
+    if close > ema50 and ema50 > ema200:
+        return "bull"
+    if close < ema50 and ema50 < ema200:
+        return "bear"
     return "neutral"
 
 
@@ -234,7 +250,7 @@ def _htf_trend(tf: dict[str, Any]) -> Literal["bull", "bear", "neutral"]:
         block = _tf_block(tf, key)
         if not block:
             continue
-        trend = _swing_trend(_swing_highs_from_block(block), _swing_lows_from_block(block))
+        trend = _block_trend(block)
         if trend != "neutral":
             trends.append(trend)
     if not trends:
@@ -258,22 +274,22 @@ def _detect_bos_choch(
     if close <= 0:
         return None, False, None, 0.0
 
+    # A break is the REAL detector's verdict (detect_pp → pp_short_true / pp_long_true).
+    # The old fallback also declared a break whenever `close` merely sat on one side of
+    # `pp_short_zone_lo` / `pp_long_zone_hi` — position, not a break event — but those two
+    # keys are produced by NOTHING in the codebase, so the `> 0` guards kept the fallback
+    # permanently off. Dropping it removes dead code reading phantom keys rather than
+    # changing behaviour; a genuine break must come from detect_pp.
     bear_break = bool(block.get("pp_short_true"))
     bull_break = bool(block.get("pp_long_true"))
-    swing_high = _f(block.get("pp_short_zone_lo"))
-    swing_low = _f(block.get("pp_long_zone_hi"))
-    if not bear_break and swing_high > 0 and close < swing_high:
-        bear_break = True
-    if not bull_break and swing_low > 0 and close > swing_low:
-        bull_break = True
 
     if bear_break:
-        level = swing_high or _f(block.get("prev_high"))
+        level = _f(block.get("prev_high"))
         choch = htf_trend == "bull"
         event = "choch_bear" if choch else "bos_bear"
         return "bear", choch, event, level
     if bull_break:
-        level = swing_low or _f(block.get("donchian_low20"))
+        level = _f(block.get("donchian_low20"))
         choch = htf_trend == "bear"
         event = "choch_bull" if choch else "bos_bull"
         return "bull", choch, event, level
