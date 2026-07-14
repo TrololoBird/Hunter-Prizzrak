@@ -529,28 +529,34 @@ def format_liquidity_heatmap_section(row: dict[str, Any]) -> str:
         "🌡 <b>Тепловая карта ликвидности</b> "
         "<i>(история стакана · sticky/spoof · не ликвидации)</i>"
     ]
-    # Nearest sticky wall PER SIDE — sticky[:2] could show two bids and no ask.
-    by_side: dict[str, dict[str, Any]] = {}
-    for s in sticky:
-        if isinstance(s, dict) and s.get("price") is not None:
-            by_side.setdefault(str(s.get("side") or "?"), s)
+    # Top sticky walls PER SIDE by notional within ±4% — not just the nearest. Deep
+    # walls (1.5-3% off price) are detected (_detect_sticky_walls tracks distance_pct)
+    # but the old nearest-only render hid them, so a large wall a couple % away never
+    # reached the text. Sort by notional so the biggest defended level shows first. (WO #6)
+    _WALL_MAX_DIST_PCT = 4.0
+    _WALL_TOP_N = 3
     for side in ("bid", "ask"):
-        s = by_side.get(side)
-        if s is None:
-            continue
-        sticky_px = float(s["price"])
-        bits = [f"Sticky {side} @ <code>{_fmt_price(sticky_px)}</code>"]
-        notional = s.get("notional_usd")
-        if isinstance(notional, (int, float)) and notional > 0:
-            bits.append(_fmt_usd_compact(float(notional)))
-        dist = s.get("distance_pct")
-        if isinstance(dist, (int, float)):
-            arrow = "ниже" if side == "bid" else "выше"
-            bits.append(f"{float(dist):.2f}% {arrow}")
-        samples = s.get("samples")
-        if samples:
-            bits.append(f"{samples} snap")
-        lines.append(bits[0] + " (" + " · ".join(bits[1:]) + ")" if len(bits) > 1 else bits[0])
+        side_walls = [
+            s for s in sticky
+            if isinstance(s, dict) and s.get("price") is not None
+            and str(s.get("side") or "?") == side
+            and abs(float(s.get("distance_pct") or 0.0)) <= _WALL_MAX_DIST_PCT
+        ]
+        side_walls.sort(key=lambda w: float(w.get("notional_usd") or 0.0), reverse=True)
+        for s in side_walls[:_WALL_TOP_N]:
+            sticky_px = float(s["price"])
+            bits = [f"Sticky {side} @ <code>{_fmt_price(sticky_px)}</code>"]
+            notional = s.get("notional_usd")
+            if isinstance(notional, (int, float)) and notional > 0:
+                bits.append(_fmt_usd_compact(float(notional)))
+            dist = s.get("distance_pct")
+            if isinstance(dist, (int, float)):
+                arrow = "ниже" if side == "bid" else "выше"
+                bits.append(f"{float(dist):.2f}% {arrow}")
+            samples = s.get("samples")
+            if samples:
+                bits.append(f"{samples} snap")
+            lines.append(bits[0] + " (" + " · ".join(bits[1:]) + ")" if len(bits) > 1 else bits[0])
     for sp in spoof[:2]:
         if not isinstance(sp, dict):
             continue
