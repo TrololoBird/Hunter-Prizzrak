@@ -82,13 +82,17 @@ class PrizrakConfig(BaseModel):
     structure_lookback_hh_ll: int = Field(default=20, ge=5)
     structure_bos_buffer_pct: float = Field(default=0.003, ge=0.0)
 
-    # HTF-bias gate (course: "для новых ТВХ нужно дождаться слома на МТФ"). Net weighted
-    # multi-TF structural trend agreement needed to call a directional bias. Weights
-    # are per-TF: 1w gets highest weight (macro), 4h lowest (still affects the vote).
+    # HTF-bias gate (course: "для новых ТВХ нужно дождаться слома на МТФ" + "анализ
+    # со старших ТФ к младшим"). Net weighted multi-TF structural trend agreement.
+    # Weights MUST be monotone by seniority (1w ≥ 1d ≥ 4h ≥ 1h): the method reads
+    # senior TFs as dominant. Previously 4h (0.30) outweighed 1d (0.25) — non-monotone,
+    # contradicting both the method and this comment. The 4h-counter-to-senior case
+    # (accumulation/distribution) is handled specially in _htf_bias, so 4h does not
+    # need an inflated weight in the plain vote. Fixed to descending 0.35/0.30/0.25/0.10.
     htf_bias_threshold: float = Field(default=0.30, ge=0.0, le=1.0)
     htf_1w_weight: float = Field(default=0.35, ge=0.0)
-    htf_1d_weight: float = Field(default=0.25, ge=0.0)
-    htf_4h_weight: float = Field(default=0.30, ge=0.0)
+    htf_1d_weight: float = Field(default=0.30, ge=0.0)
+    htf_4h_weight: float = Field(default=0.25, ge=0.0)
     htf_1h_weight: float = Field(default=0.10, ge=0.0)
     # Legacy aliases — keep for backward compat but unused internally.
     htf_macro_weight: float = Field(default=0.6, ge=0.0)

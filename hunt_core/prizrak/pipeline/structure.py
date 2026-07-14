@@ -2,48 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from hunt_core.prizrak.pipeline._helpers import safe_float
-from hunt_core.prizrak.pipeline.types import ModuleResult
-
-
-def _resolve_ohlcv(row: dict[str, Any], tf_key: str) -> list[dict[str, float]]:
-    prep = row.get("_prepared")
-    if prep is not None:
-        work = getattr(prep, "work_4h", None)
-        if work is not None and hasattr(work, "height") and work.height >= 4:
-            try:
-                tail = work.tail(24)
-                closes = tail["close"].to_list()
-                highs = tail["high"].to_list()
-                lows = tail["low"].to_list()
-                return [
-                    {"high": highs[i], "low": lows[i], "close": closes[i]}
-                    for i in range(len(closes))
-                ]
-            except Exception:
-                import structlog
-
-                structlog.get_logger("hunt_core.prizrak.pipeline.structure").debug(
-                    "htf_bars_from_prepared_failed", exc_info=True
-                )
-
-    _tf_raw = row.get("timeframes")
-    tf: dict[str, Any] = _tf_raw if isinstance(_tf_raw, dict) else {}
-    snap = tf.get(tf_key) or {}
-    ohlcv_raw = snap.get("ohlcv")
-    if isinstance(ohlcv_raw, list) and len(ohlcv_raw) >= 4:
-        result = []
-        for bar in ohlcv_raw:
-            if isinstance(bar, dict):
-                h = safe_float(bar.get("high"))
-                l = safe_float(bar.get("low"))
-                c = safe_float(bar.get("close"))
-                if h > 0 and l > 0 and c > 0:
-                    result.append({"high": h, "low": l, "close": c})
-        return result
-    return []
-
-
 LOOKBACK_PIVOT = 5
 BOS_BUFFER = 0.003
 LOOKBACK_HH_LL = 20
@@ -117,8 +75,14 @@ def _detect_structure(
     lows = [b["low"] for b in bars]
     lookback = min(lookback_hh_ll, len(bars))
 
-    hh_last = max(highs[-lookback:]) if len(highs) >= lookback else max(highs)
-    ll_last = min(lows[-lookback:]) if len(lows) >= lookback else min(lows)
+    # Prior extreme over the lookback window EXCLUDING the current (last) bar: a BOS
+    # requires the freshly-closed bar to break BEYOND the prior structure, so the level
+    # being broken must not include the breaking bar itself. Including it made
+    # close > hh_last*(1+buf) unsatisfiable (close <= this-bar-high <= hh_last), so
+    # bos_up/bos_down were mathematically always False. len(bars) >= 4 (guard above)
+    # keeps the slice non-empty.
+    hh_last = max(highs[-lookback:-1])
+    ll_last = min(lows[-lookback:-1])
     # Prior confirmed swing low/high (for CHoCH) — the most recent swing pivot
     # still within the lookback window, from the same fractal pivots above.
     cutoff = len(bars) - lookback
@@ -184,75 +148,3 @@ def _detect_structure(
         "all_swing_highs": _all_swing_highs[-6:],  # nearest 6 above price
         "all_swing_lows": _all_swing_lows[:6],      # nearest 6 below price
     }
-
-
-def run_structure_module(row: dict[str, Any], direction: str = "long") -> ModuleResult:
-    tf_key = "4h_closed" if row.get("timeframes", {}).get("4h_closed") else "4h"
-    bars = _resolve_ohlcv(row, tf_key)
-
-    if len(bars) < 4:
-        return ModuleResult(
-            status="UNKNOWN",
-            reason=f"Недостаточно баров для анализа структуры ({len(bars)}<4)",
-            details={"tf_key": tf_key, "bar_count": len(bars)},
-        )
-
-    s = _detect_structure(bars)
-    evidence: list[str] = []
-    for k, v in s.items():
-        if k in ("close", "prev_close", "bar_count"):
-            continue
-        evidence.append(f"{k}={v}")
-
-    if direction == "long":
-        bullish = s.get("hl") and s.get("bos_up")
-        choch_up = s.get("choch_bull")
-        if bullish:
-            return ModuleResult(
-                status="PASS",
-                reason="HL + BOS вверх — бычья структура",
-                details={"structure": s, "evidence": evidence},
-            )
-        if choch_up:
-            return ModuleResult(
-                status="PASS",
-                reason="CHoCH вверх — смена характера на бычий",
-                details={"structure": s, "evidence": evidence},
-            )
-        if s.get("hl"):
-            return ModuleResult(
-                status="CAUTION",
-                reason="HL сформирован, но BOS не подтверждён",
-                details={"structure": s, "evidence": evidence},
-            )
-        return ModuleResult(
-            status="FAIL",
-            reason="Структура не для лонга: нет HL/BOS",
-            details={"structure": s, "evidence": evidence},
-        )
-
-    bearish = s.get("lh") and s.get("bos_down")
-    choch_down = s.get("choch_bear")
-    if bearish:
-        return ModuleResult(
-            status="PASS",
-            reason="LH + BOS вниз — медвежья структура",
-            details={"structure": s, "evidence": evidence},
-        )
-    if choch_down:
-        return ModuleResult(
-            status="PASS",
-            reason="CHoCH вниз — смена характера на медвежий",
-            details={"structure": s, "evidence": evidence},
-        )
-    if s.get("lh"):
-        return ModuleResult(
-            status="CAUTION",
-            reason="LH сформирован, но BOS не подтверждён",
-            details={"structure": s, "evidence": evidence},
-        )
-    return ModuleResult(
-        status="FAIL",
-        reason="Структура не для шорта: нет LH/BOS",
-        details={"structure": s, "evidence": evidence},
-    )
