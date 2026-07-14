@@ -300,6 +300,31 @@ def format_grid_telegram(grid: list[dict[str, Any]], *, price: float = 0) -> str
                 parts.append(f"{_K_RU.get(k, k)}={tok}")
         if parts:
             lines.append(f"· {tf}: " + ", ".join(parts[:6]))
+
+    # Multi-TF confluence: the SAME structural level across ≥2 TFs is stronger than a
+    # single-TF one, but the per-TF layout buried it in separate lines (57758.6 shown
+    # twice as 1w AND 1d support). Surface it as a dedicated «усиленный» highlight.
+    _tf_rank = {t: i for i, t in enumerate(("1m", "5m", "15m", "1h", "4h", "1d", "1w"))}
+    conf_bits: list[str] = []
+    for k in ("support", "resistance"):
+        groups: list[dict[str, Any]] = []
+        pts = sorted((v, tf) for tf in order for v in num_by[tf].get(k, []))
+        for pv, tf in pts:
+            matched: dict[str, Any] | None = None
+            for g in groups:
+                if pv > 0 and abs(g["price"] - pv) / pv <= 0.001:
+                    matched = g
+                    break
+            if matched is None:
+                groups.append({"price": pv, "tfs": {tf}})
+            else:
+                matched["tfs"].add(tf)
+        for g in groups:
+            if len(g["tfs"]) >= 2:
+                tfs = "+".join(sorted(g["tfs"], key=lambda t: _tf_rank.get(t, 99)))
+                conf_bits.append(f"{_K_RU[k]} {_fmt_price(g['price'])} ({tfs})")
+    if conf_bits:
+        lines.append("🔗 <b>мульти-ТФ конфлюенс</b> (усиленные): " + ", ".join(conf_bits))
     return "\n".join(lines) if len(lines) > 1 else ""
 
 

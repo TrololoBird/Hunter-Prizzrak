@@ -33,3 +33,16 @@ def test_aligned_bias_long_has_no_counter_warning() -> None:
     # Long zone under a LONG bias is with-trend → no counter-bias note.
     txt = _report("long").interest_zones_text()
     assert "против HTF-bias" not in txt
+
+
+def test_co_trend_zone_confirmed_symmetrically() -> None:
+    # A co-trend zone must get a positive «✓ по HTF-bias» confirmation, symmetric to
+    # the counter-trend warning — and surface its touch-count as structural strength.
+    txt = _report("long").interest_zones_text()
+    assert "по HTF-bias — ко-тренд" in txt
+    assert "структурно крепкая (5 касаний)" in txt  # touches folded into strength
+
+
+def test_counter_trend_also_shows_structural_strength() -> None:
+    txt = _report("short").interest_zones_text()
+    assert "структурно крепкая (5 касаний)" in txt

@@ -251,7 +251,15 @@ class AnalystReport:
             if parts:
                 lines.append("   " + " · ".join(parts))
 
-        def _bias_warn(side: str) -> None:
+        def _bias_note(single: Any, side: str) -> None:
+            # SYMMETRIC bias annotation. Counter-trend zones were warned; co-trend zones
+            # got no matching confirmation, so an operator couldn't tell which side is
+            # structurally firmer. Also fold the zone's touch-count into a strength note
+            # (touches ARE structural strength — the author reads an 8-touch zone as
+            # strong — but it was shown and never surfaced as conviction).
+            touches = int(single.get("touches") or 0) if isinstance(single, dict) else 0
+            strength = f" · структурно крепкая ({touches} касаний)" if touches >= 4 else ""
+            _is_co = (bias == "short" and side == "short") or (bias == "long" and side == "long")
             # A zone AGAINST the HTF bias is a counter-trend REACTION/добор — not a
             # standalone trend signal, but a valid play the way the author works it
             # (video 2026-07-13: «здесь буду добирать долонговую позицию … кто берёт
@@ -264,8 +272,10 @@ class AnalystReport:
                 lines.append(
                     "   ⚠️ <i>против HTF-bias — не самостоятельный сигнал, а реакция/добор"
                     " от касания с подтверждением; стоп прячем за всю HTF-структуру"
-                    " (шире зоны), доборы по сетке зон интереса</i>"
+                    f" (шире зоны), доборы по сетке зон интереса{strength}</i>"
                 )
+            elif _is_co:
+                lines.append(f"   ✓ <i>по HTF-bias — ко-тренд{strength or ' (структурная зона)'}</i>")
 
         def _side(label: str, single: Any, ladder: Any, *, side: str) -> None:
             # Лесенка доборов (Д1/Д2/Д3) when present — the author works a GRID of levels,
@@ -280,7 +290,7 @@ class AnalystReport:
                 return
             _refs_line(single, side=side)
             _confluence_line(single, side=side)
-            _bias_warn(side)
+            _bias_note(single, side=side)
 
         _side("🟢 Лонг:", iz.get("long"), iz.get("long_ladder"), side="long")
         _side("🔴 Шорт:", iz.get("short"), iz.get("short_ladder"), side="short")
