@@ -410,8 +410,9 @@ closed ──> outcome-леджер (§6) + cooldown-запись
 
 **Статус на 2026-07-14 (ветка `push-snapshot`):**
 ✅ закрыто **29 из 30** (все P0, все P1, весь P2); ◐ остаётся один суб-пункт —
-dataclass→Pydantic для tick-path моделей в G-26, осознанно отложен (риск для
-горячего пути ради стиля; аудит сам допускал tick-path-исключение).
+dataclass→Pydantic в G-26 (см. честный разбор в самом G-26 ниже: «горячий путь»
+как причина ОПРОВЕРГНУТ замером, реальная причина — только мутация
+ManipulationSetup).
 Гейт: ruff чисто, mypy 189 файлов, **380/380 pytest** (+22 пиннинг-теста),
 удалено 17 мёртвых файлов; spine очищен от strategy-импортов; калибровочная
 поверхность OB-детекторов вынесена в config.
@@ -553,9 +554,22 @@ dataclass→Pydantic для tick-path моделей в G-26, осознанно
   *Остаток:* `delivery_policy.filter_notify_candidates` (+мёртвый конфиг
   `signal_queue_tg_min_rank`), `AdvisoryDigest.enqueue` (нет продюсера) — решение
   «удалить или подключить» по каждому.
-- ⬜ **G-26** stdlib logging → structlog (37 файлов); dataclass → Pydantic для
-  доменных моделей (ManipulationSetup, PrescanHit, MapBundle, AnalystConfig…) —
-  или задокументированное исключение для tick-path.
+- ◐ **G-26** ✅ stdlib logging → structlog (34 модуля мигрированы). ⬜ Остаток:
+  dataclass → Pydantic для доменных моделей. **Честная причина отложить (замерено,
+  не на веру):**
+  - «Горячий путь» ОПРОВЕРГНУТ: Pydantic v2 vs `frozen+slots` dataclass = 926 vs
+    651 нс/инстанс (1.4×); на самой частой модели (PrescanHit, ~400/цикл) это
+    +0.11 мс против 30-сек цикла — пренебрежимо. Производительность НЕ причина.
+  - **ManipulationSetup** — единственная реальная причина, и она про МУТАЦИЮ, не
+    скорость: строится и дописывается по частям (`score`/`steps`/`evidence`) в
+    state-машине; `frozen` ломает это, `validate_assignment` меняет семантику,
+    `mutable` без валидации не даёт выгоды. Конверсия = рефактор ядра сканера,
+    регресс-риск непропорционален — отложено с пиннингом.
+  - **PrescanHit / MapBundle / AnalystConfig** — техпричины НЕТ. Не сделаны как
+    осознанный выбор не гнать массовую замену моделей в конце сессии без пиннинга;
+    `AnalystConfig` — чистый выигрыш (валидация конфига), кандидат №1 на закрытие.
+  - Аргумент ЗА (в пользу конверсии): Pydantic ловит дрейф контракта/фантом-поля —
+    ровно класс багов инварианта I-6.
 - ⬜ **G-27** дубли: `fmt_price` ×5, BOS/CHoCH ×3 (pipeline/structure,
   features/structure, scanner/events), `_safe_float` ×3, ATR-обёртки, OHLCV→frame
   ×3, volume-histogram (`maps/_volume_histogram` выбрасывает результат
