@@ -55,35 +55,44 @@ def oi_bars_from_frames(
             oi_rows.append((ts_i, oi_f))
     if not oi_rows:
         return []
-    oi_rows.sort(key=lambda x: x[0])
-    if "time" in ohlcv.columns:
-        ts_list = ohlcv["time"].to_list()
-    elif "timestamp" in ohlcv.columns:
-        ts_list = ohlcv["timestamp"].to_list()
-    elif "ts" in ohlcv.columns:
-        ts_list = ohlcv["ts"].to_list()
-    else:
+
+    ts_col = next((c for c in ("time", "timestamp", "ts") if c in ohlcv.columns), None)
+    if ts_col is None:
         return []
-    hi_list = ohlcv["high"].cast(pl.Float64).to_list()
-    lo_list = ohlcv["low"].cast(pl.Float64).to_list()
-    cl_list = ohlcv["close"].cast(pl.Float64).to_list()
-    out: list[dict[str, Any]] = []
-    oi_idx = 0
-    for ts, hi, lo, cl in zip(ts_list, hi_list, lo_list, cl_list, strict=False):
-        bar_ts = _ts_to_ms(ts)
-        if bar_ts is None:
-            continue
-        try:
-            h, l, c = float(hi), float(lo), float(cl)
-        except (TypeError, ValueError):
-            continue
-        if h <= 0 or l <= 0 or c <= 0:
-            continue
-        while oi_idx + 1 < len(oi_rows) and oi_rows[oi_idx + 1][0] <= bar_ts:
-            oi_idx += 1
-        oi_val = oi_rows[oi_idx][1]
-        out.append({"ts": bar_ts, "oi": oi_val, "high": h, "low": l, "close": c})
-    return out
+
+    bars = ohlcv.select(
+        pl.col(ts_col).alias("_ts_raw"),
+        pl.col("high").cast(pl.Float64),
+        pl.col("low").cast(pl.Float64),
+        pl.col("close").cast(pl.Float64),
+    )
+    ts_expr = (
+        pl.col("_ts_raw").dt.epoch(time_unit="ms")
+        if bars.schema["_ts_raw"] == pl.Datetime
+        else pl.col("_ts_raw").cast(pl.Int64)
+    )
+    bars = (
+        bars.with_columns(ts_expr.alias("ts"))
+        .drop("_ts_raw")
+        .drop_nulls()
+        .filter((pl.col("high") > 0) & (pl.col("low") > 0) & (pl.col("close") > 0))
+        .sort("ts")
+    )
+    if bars.is_empty():
+        return []
+
+    oi_df = pl.DataFrame(
+        {"ts": [r[0] for r in oi_rows], "oi": [r[1] for r in oi_rows]},
+        schema={"ts": pl.Int64, "oi": pl.Float64},
+    ).sort("ts")
+
+    # BACKWARD as-of: each bar takes the last OI observed AT OR BEFORE it. The old
+    # two-pointer loop left oi_idx at 0 for every bar preceding the first OI sample, so
+    # those bars were stamped with oi_rows[0] — a value from their FUTURE. That is
+    # lookahead (invariant I-5) leaking into the forward-liquidation model. Bars with no
+    # prior OI observation have no known OI and are dropped, not guessed.
+    merged = bars.join_asof(oi_df, on="ts", strategy="backward").drop_nulls("oi")
+    return merged.select("ts", "oi", "high", "low", "close").to_dicts()
 
 
 def oi_bars_from_scalar_series(
