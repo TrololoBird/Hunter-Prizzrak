@@ -452,9 +452,17 @@ def _advance_pattern_a(
     data: dict[str, Any] = dict(state.get("data") or {})
 
     if stage == 0:
-        imp_ok, imp_idx = detect_impulse(meso_df, lookback=30, direction="down")
+        # Method (MANIPULATION_METHODOLOGY §2 / Type 1): the opening leg is an
+        # AGGRESSIVE PUMP UP, then a one-candle ABSORPTION back down, then bokovik →
+        # sweep down → bokovik-2 → BOS/CHoCH up. The impulse to seed on is therefore
+        # the UP pump — detecting a DOWN impulse (the old code) treated the absorption
+        # dump as the impulse and inverted the whole formation (a falling-knife
+        # V-recovery long, not the engineered pump→absorb→accumulate setup). detect_
+        # absorption is direction-agnostic: on an UP impulse it correctly measures the
+        # down retrace (the "поглощение").
+        imp_ok, imp_idx = detect_impulse(meso_df, lookback=30, direction="up")
         if not imp_ok:
-            imp_ok, imp_idx = detect_consecutive_impulse(meso_df, min_count=3, direction="down")
+            imp_ok, imp_idx = detect_consecutive_impulse(meso_df, min_count=3, direction="up")
         if imp_ok and imp_idx is not None:
             return {
                 "pattern": "A", "stage": 1, "anchor_ts": now_ms, "first_ts": now_ms,
