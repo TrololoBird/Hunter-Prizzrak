@@ -109,7 +109,12 @@ def build_factor_panel(row: dict[str, Any]) -> dict[str, float | None]:
             try:
                 fp = float(funding)
                 if math.isfinite(fp):
-                    panel["deriv_funding"] = _clamp11(fp * 5000.0)
+                    # funding_pct is in PERCENTAGE POINTS (funding_rate*100, see
+                    # snapshot.py). The 5000 factor was calibrated for the raw FRACTION
+                    # (0.0001·5000=0.5), so on pp-scale input it over-scaled ×100 and
+                    # saturated ±1 at any real funding. 50 restores the intended slope
+                    # (0.01pp≈0.0001 fraction → 0.5).
+                    panel["deriv_funding"] = _clamp11(fp * 50.0)
             except (TypeError, ValueError):
                 LOG.debug("funding_pct float conversion failed", exc_info=True)
                 pass

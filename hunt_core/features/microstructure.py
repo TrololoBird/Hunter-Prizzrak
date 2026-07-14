@@ -19,8 +19,12 @@ CANONICAL_FEATURE_API = "hunt_core.features.prepare_frame._prepare_frame"
 
 
 def _warn_if_direct_imported() -> None:
+    # Canonical importer is hunt_core/features/prepare.py (prepare.py:55). The allowlist
+    # previously only matched the stale /engine/features/prepare.py path, so the LEGIT
+    # importer tripped the DeprecationWarning on every run. Accept both paths.
     for frame_info in inspect.stack()[1:20]:
-        if frame_info.filename.replace("\\", "/").endswith("/engine/features/prepare.py"):
+        fn = frame_info.filename.replace("\\", "/")
+        if fn.endswith("/features/prepare.py"):
             return
     warnings.warn(
         (
@@ -535,20 +539,29 @@ def _score_open_interest(snapshot: MicrostructureSnapshot) -> MicrostructureScor
     direction = _direction_sign(snapshot.direction)
     raw = 0.0
     label = "flat"
+    # Four OI×price quadrants must be read from the SIGN OF EACH, not sign(product):
+    # collapsing to price_change*oi_change merged (↑P,↑OI new-longs) with (↓P,↓OI
+    # long-liquidation) and, worse, (↓P,↑OI NEW SHORTS — the strongest bearish confirm)
+    # with (↑P,↓OI short-covering), so a confirmed short's new-money quadrant scored
+    # −0.20 instead of a positive confirm.
     if abs(oi_change) < 0.15:
         label = "flat"
-    elif price_change is not None and price_change * oi_change > 0.0:
-        raw = 0.35 if price_change * direction > 0.0 else -0.25
-        label = "trend_confirming"
-    elif price_change is not None and price_change * oi_change < 0.0:
-        raw = -0.20 if price_change * direction > 0.0 else 0.15
-        label = "covering_or_deleveraging"
-    elif oi_change > 0.0:
-        raw = 0.10
-        label = "positions_building"
+    elif price_change is None or direction == 0:
+        # No price/direction context — only a mild build/close read.
+        raw = 0.10 if oi_change > 0.0 else -0.05
+        label = "positions_building" if oi_change > 0.0 else "positions_closing"
     else:
-        raw = -0.05
-        label = "positions_closing"
+        new_money = oi_change > 0.0            # OI rising = fresh positions opening
+        price_bull = price_change > 0.0
+        aligned = (price_bull and direction > 0) or ((not price_bull) and direction < 0)
+        if new_money and aligned:
+            raw, label = 0.35, "trend_confirming"     # new money in the trade's favour
+        elif new_money and not aligned:
+            raw, label = -0.25, "trend_opposing"      # new counter-positions against us
+        elif not new_money and aligned:
+            raw, label = 0.15, "covering_favorable"   # opposite side covering into us
+        else:
+            raw, label = -0.10, "deleveraging"        # our side unwinding against us
     return MicrostructureScore(
         "open_interest",
         round(_clamp(raw, -1.0, 1.0), 6),
