@@ -140,4 +140,35 @@ def assess_universe_health(
     )
 
 
-__all__ = ["assess_universe_health", "classify_row_health", "UniverseHealth"]
+def should_self_restart_on_blackout(
+    *,
+    critical: bool,
+    degraded_streak: int,
+    supervised: bool,
+    is_ban: bool,
+    streak_threshold: int,
+) -> bool:
+    """Whether a sustained critical data blackout warrants a supervised self-restart.
+
+    A data blackout (bot ticking, but the data universe-wide stale) does NOT trip the
+    progress watchdog — the alert fires but nothing recovers, so the bot can sit blind
+    until an operator notices (2026-07-13 incident: a stalled 15m WS mux froze the whole
+    universe ~2h while 1m/5m kept flowing). When the blackout is critical and persists,
+    exit for a clean supervised respawn (cheap now — HTF frames are persisted/reloaded,
+    so no warmup blackout).
+
+    Guards: only when SUPERVISED (else exit = a dead bot), and NOT on an IP ban (a ban
+    self-heals when it lifts; restarting just re-hits the same banned IP and thrashes).
+    Pure predicate — the os._exit lives in the tick loop.
+    """
+    if not supervised or is_ban:
+        return False
+    return bool(critical) and degraded_streak >= streak_threshold
+
+
+__all__ = [
+    "assess_universe_health",
+    "classify_row_health",
+    "should_self_restart_on_blackout",
+    "UniverseHealth",
+]

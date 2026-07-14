@@ -73,6 +73,10 @@ from hunt_core.market.network import detect_local_proxies
 
 _ORPHAN_WS_LOG_STATE: dict[str, float] = {"count": 0.0, "next_emit": 0.0}
 _ORPHAN_WS_LOG_INTERVAL_S = 60.0
+# Consecutive critical-blackout ticks before a supervised self-restart (auto-recovery
+# for a stalled WS plane that the progress watchdog can't see). The alert fires at
+# streak≥3, so this leaves ~7 ticks of warning first; never fires on an IP ban.
+_BLACKOUT_RESTART_STREAK = int(os.getenv("HUNT_BLACKOUT_RESTART_STREAK", "10"))
 
 
 def _log_orphan_ws(exc: BaseException) -> None:
@@ -894,7 +898,10 @@ async def run_loop(
                 # signal instead of letting it run until the watchdog hard-kills a
                 # hung loop hours later (2026-07-11 incident).
                 if not once and rows:
-                    from hunt_core.diagnostics.universe_health import assess_universe_health
+                    from hunt_core.diagnostics.universe_health import (
+                        assess_universe_health,
+                        should_self_restart_on_blackout,
+                    )
 
                     _health = assess_universe_health(rows)
                     if _health.degraded:
@@ -904,6 +911,16 @@ async def run_loop(
                             streak=_degraded_streak,
                             **_health.telemetry(),
                         )
+                        # IP-ban detection — computed once, used by BOTH the alert
+                        # (cause hint) and the self-restart guard (never restart on a
+                        # ban: it self-heals, and a respawn just re-hits the banned IP).
+                        _guard = getattr(getattr(client, "rest_gate", None), "guard", None)
+                        try:
+                            _ban_pause = _guard.remaining_pause_s() if _guard is not None else 0.0
+                        except Exception:
+                            _ban_pause = 0.0
+                        _last_kind = getattr(getattr(_guard, "telemetry", None), "last_kind", None)
+                        _is_ban = _ban_pause > 0 or _last_kind == "ip_ban"
                         # Escalate to an ops alert once the blackout persists (not a
                         # one-off blip) — near-total failure across several ticks.
                         if (
@@ -918,13 +935,7 @@ async def run_loop(
                             # klines blackout is a Binance IP rate-limit ban (418/429)
                             # that pauses the REST plane and starves the 4h refresh —
                             # detect it and say so (it self-heals when the ban lifts).
-                            _guard = getattr(getattr(client, "rest_gate", None), "guard", None)
-                            try:
-                                _ban_pause = _guard.remaining_pause_s() if _guard is not None else 0.0
-                            except Exception:
-                                _ban_pause = 0.0
-                            _last_kind = getattr(getattr(_guard, "telemetry", None), "last_kind", None)
-                            if _ban_pause > 0 or _last_kind == "ip_ban":
+                            if _is_ban:
                                 _cause_hint = (
                                     f"⏳ Binance IP-бан/rate-limit — REST на паузе (~{_ban_pause:.0f}s). "
                                     "Частота запросов уже снижена; ждём снятия, процесс восстановится сам."
@@ -945,6 +956,32 @@ async def run_loop(
                                 )
                             except Exception:
                                 LOG.exception("hunt_universe_degraded_alert_failed")
+                        # AUTO-RECOVERY: a sustained critical NON-ban blackout (e.g. a
+                        # stalled WS mux — 2026-07-13) doesn't trip the progress watchdog,
+                        # so recover by exiting for a clean supervised respawn. HTF frames
+                        # are persisted first (os._exit skips `finally`) so the respawn has
+                        # no warmup blackout.
+                        if should_self_restart_on_blackout(
+                            critical=_health.critical,
+                            degraded_streak=_degraded_streak,
+                            supervised=os.getenv("HUNT_WATCH_SUPERVISE", "0").strip().lower()
+                            in {"1", "true", "yes"},
+                            is_ban=_is_ban,
+                            streak_threshold=_BLACKOUT_RESTART_STREAK,
+                        ):
+                            LOG.critical(
+                                "hunt_data_blackout_self_restart",
+                                streak=_degraded_streak,
+                                **_health.telemetry(),
+                            )
+                            try:
+                                from hunt_core.data.frame_cache import get_frame_cache as _gfc
+                                from hunt_core.paths import HTF_FRAMES as _HTF
+
+                                _gfc().persist_htf_frames(_HTF)
+                            except Exception:
+                                LOG.exception("blackout_restart_persist_failed")
+                            os._exit(1)
                     else:
                         _degraded_streak = 0
                 if (
