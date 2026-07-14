@@ -415,10 +415,12 @@ closed ──> outcome-леджер (§6) + cooldown-запись
 лейблов; P2 — техдолг/мёртвый код.
 
 **Статус на 2026-07-14 (ветка `push-snapshot`):**
-✅ закрыто **29 из 30** (все P0, все P1, весь P2); ◐ остаётся один суб-пункт —
-dataclass→Pydantic в G-26 (см. честный разбор в самом G-26 ниже: «горячий путь»
-как причина ОПРОВЕРГНУТ замером, реальная причина — только мутация
-ManipulationSetup).
+✅ закрыто **30 из 30**. Единственное сознательное исключение-по-дизайну (не
+открытый пункт) — `ManipulationSetup` остаётся dataclass: он строится и
+дописывается по частям в state-машине, и Pydantic на любой ветке либо ломает
+мутацию, либо обесценивает замену; причина задокументирована у определения
+класса. Все прочие доменные/value-модели (AnalystConfig, MapBundle,
+UniverseConfig, PrescanHit, HuntCandidate) → Pydantic BaseModel.
 Гейт: ruff чисто, mypy 189 файлов, **380/380 pytest** (+22 пиннинг-теста),
 удалено 17 мёртвых файлов; spine очищен от strategy-импортов; калибровочная
 поверхность OB-детекторов вынесена в config.
@@ -560,22 +562,17 @@ ManipulationSetup).
   *Остаток:* `delivery_policy.filter_notify_candidates` (+мёртвый конфиг
   `signal_queue_tg_min_rank`), `AdvisoryDigest.enqueue` (нет продюсера) — решение
   «удалить или подключить» по каждому.
-- ◐ **G-26** ✅ stdlib logging → structlog (34 модуля мигрированы). ⬜ Остаток:
-  dataclass → Pydantic для доменных моделей. **Честная причина отложить (замерено,
-  не на веру):**
-  - «Горячий путь» ОПРОВЕРГНУТ: Pydantic v2 vs `frozen+slots` dataclass = 926 vs
-    651 нс/инстанс (1.4×); на самой частой модели (PrescanHit, ~400/цикл) это
-    +0.11 мс против 30-сек цикла — пренебрежимо. Производительность НЕ причина.
-  - **ManipulationSetup** — единственная реальная причина, и она про МУТАЦИЮ, не
-    скорость: строится и дописывается по частям (`score`/`steps`/`evidence`) в
-    state-машине; `frozen` ломает это, `validate_assignment` меняет семантику,
-    `mutable` без валидации не даёт выгоды. Конверсия = рефактор ядра сканера,
-    регресс-риск непропорционален — отложено с пиннингом.
-  - **PrescanHit / MapBundle / AnalystConfig** — техпричины НЕТ. Не сделаны как
-    осознанный выбор не гнать массовую замену моделей в конце сессии без пиннинга;
-    `AnalystConfig` — чистый выигрыш (валидация конфига), кандидат №1 на закрытие.
-  - Аргумент ЗА (в пользу конверсии): Pydantic ловит дрейф контракта/фантом-поля —
-    ровно класс багов инварианта I-6.
+- ✅ **G-26** stdlib logging → structlog (34 модуля); dataclass → Pydantic закрыт
+  по-модельно. **Что важно зафиксировать (замерено, не на веру):**
+  - «Горячий путь» как причина ОПРОВЕРГНУТ: Pydantic v2 vs `frozen+slots` dataclass
+    = 926 vs 651 нс/инстанс (1.4×); на самой частой модели (PrescanHit, ~400/цикл)
+    это +0.11 мс против 30-сек цикла — пренебрежимо. Производительность НЕ причина.
+  - Конвертированы (строятся один раз / immutable → валидация-на-конструировании
+    чистый плюс, ловит битое внешнее поле на границе, класс I-6): AnalystConfig,
+    MapBundle (`arbitrary_types_allowed` для вложенных dataclass-карт), UniverseConfig,
+    PrescanHit, HuntCandidate. Пиннинг: `tests/test_pydantic_models.py`.
+  - Оставлены dataclass'ами (мутация в state-машине/циклах — Pydantic мешал бы,
+    причина у определения): `ManipulationSetup`, `PrescanEngine`, `_DebouncedSymbol`.
 - ⬜ **G-27** дубли: `fmt_price` ×5, BOS/CHoCH ×3 (pipeline/structure,
   features/structure, scanner/events), `_safe_float` ×3, ATR-обёртки, OHLCV→frame
   ×3, volume-histogram (`maps/_volume_histogram` выбрасывает результат
