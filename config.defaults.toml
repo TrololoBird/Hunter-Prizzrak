@@ -176,6 +176,26 @@ vp_periods = ["1h", "4h", "1d", "1w"]
 # 60 (not 24): trader-grade POC/VAH/VAL resolution — 24 buckets is ~$150/bucket on
 # BTC, too coarse to place a usable level (matches maps/config.py code intent).
 vp_buckets = 60
+
+# --- Orderbook detector thresholds (were hardcoded in maps/orderbook.py) -------------
+# Moved here value-for-value; pinned by tests/test_ob_detector_calibration.py so a typo
+# cannot silently retune a detector. KNOWN LIMITATION: the absorption/spoof floors are
+# ABSOLUTE USD, so they do not scale across symbols — mute on a thin alt, noisy on a
+# major. Making them relative is a calibration decision, not a config move.
+sticky_tolerance_pct = 0.15
+iceberg_tolerance_pct = 0.08
+iceberg_min_fill_ratio = 1.4
+iceberg_floor_frac = 0.02
+iceberg_ratio_cap = 50.0
+absorption_min_notional_usd = 25000.0
+absorption_min_delta_usd = 10000.0
+absorption_near_bin_pct = 0.35
+absorption_max_distance_pct = 1.5
+spoof_tolerance_pct = 0.12
+spoof_min_wall_usd = 50000.0
+spoof_max_distance_pct = 1.2
+spoof_vanish_frac = 0.25
+voids_top_n = 5
 vp_value_area_pct = 0.70
 
 [intra_bar]

@@ -938,6 +938,12 @@ def _apply_confluence(
         + ([d["name"] for d in drivers if d["delta"] < -0.01][:3] if any(d["delta"] < -0.01 for d in drivers) else [])
     )
     if htf_bias is not None:
+        # CONTRACT (deliberate, two shapes — do not "fix" one into the other):
+        #   prizrak_structure["htf_bias"] -> the full dict {bias, score, votes, weights…}
+        #   prizrak_summary["htf_bias"]   -> the bare VERDICT string ("long"/"short"/…)
+        # An isinstance(x, dict) guard on the SUMMARY side silently no-ops (it has caused
+        # a dead-code bug before), so read the summary field as a string and the structure
+        # field as a dict. build.py::interest_zones_text does exactly that.
         summary["htf_bias"] = htf_bias.get("bias")
     return tag_squeeze_pattern(summary, ohlcv=ohlcv, cfg=cfg)
 

@@ -61,6 +61,28 @@ class MapsConfig:
     # by gap-finding. Env HUNT_CVD_DIV_RATIO.
     cvd_div_ratio: float = 0.15
 
+    # ---- Orderbook detector thresholds (were hardcoded inside orderbook.py) ----------
+    # Moved here VALUE-FOR-VALUE (pinned by tests/test_ob_detector_calibration.py) so the
+    # calibration surface is config-driven, per the spec's §5 rule: a threshold is a knob,
+    # not structure. NOTE the known limitation these numbers carry: the absorption/spoof
+    # floors are ABSOLUTE USD, so they do not scale across symbols — on a thin alt the
+    # detectors are structurally mute, on a major they are noisy. Making them relative is
+    # a calibration decision, not a config move, and is deliberately NOT done here.
+    sticky_tolerance_pct: float = 0.15
+    iceberg_tolerance_pct: float = 0.08
+    iceberg_min_fill_ratio: float = 1.4     # filled > shown × this ⇒ replenishing level
+    iceberg_floor_frac: float = 0.02        # displayed-size floor as a fraction of fill
+    iceberg_ratio_cap: float = 50.0
+    absorption_min_notional_usd: float = 25_000.0
+    absorption_min_delta_usd: float = 10_000.0
+    absorption_near_bin_pct: float = 0.35
+    absorption_max_distance_pct: float = 1.5
+    spoof_tolerance_pct: float = 0.12
+    spoof_min_wall_usd: float = 50_000.0
+    spoof_max_distance_pct: float = 1.2
+    spoof_vanish_frac: float = 0.25         # wall counts as pulled below this × its size
+    voids_top_n: int = 5
+
     @classmethod
     def from_defaults(cls, raw: Mapping[str, Any] | None = None) -> MapsConfig:
         section = dict(raw or {})
@@ -121,6 +143,24 @@ class MapsConfig:
                 # the calibrated 5-10% target on the main (TOML) path.
                 section.get("cvd_div_ratio", 0.15),
             ),
+            sticky_tolerance_pct=float(section.get("sticky_tolerance_pct", 0.15)),
+            iceberg_tolerance_pct=float(section.get("iceberg_tolerance_pct", 0.08)),
+            iceberg_min_fill_ratio=float(section.get("iceberg_min_fill_ratio", 1.4)),
+            iceberg_floor_frac=float(section.get("iceberg_floor_frac", 0.02)),
+            iceberg_ratio_cap=float(section.get("iceberg_ratio_cap", 50.0)),
+            absorption_min_notional_usd=float(
+                section.get("absorption_min_notional_usd", 25_000.0)
+            ),
+            absorption_min_delta_usd=float(section.get("absorption_min_delta_usd", 10_000.0)),
+            absorption_near_bin_pct=float(section.get("absorption_near_bin_pct", 0.35)),
+            absorption_max_distance_pct=float(
+                section.get("absorption_max_distance_pct", 1.5)
+            ),
+            spoof_tolerance_pct=float(section.get("spoof_tolerance_pct", 0.12)),
+            spoof_min_wall_usd=float(section.get("spoof_min_wall_usd", 50_000.0)),
+            spoof_max_distance_pct=float(section.get("spoof_max_distance_pct", 1.2)),
+            spoof_vanish_frac=float(section.get("spoof_vanish_frac", 0.25)),
+            voids_top_n=int(section.get("voids_top_n", 5)),
         )
 
 

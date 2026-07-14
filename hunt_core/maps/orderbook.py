@@ -192,6 +192,7 @@ def _detect_voids(
     n_buckets: int,
     price_range_pct: float,
     void_pctile: float,
+    top_n: int = 5,
 ) -> list[dict[str, Any]]:
     if current_price <= 0:
         return []
@@ -223,7 +224,7 @@ def _detect_voids(
                     "distance_pct": round(abs(center - current_price) / current_price * 100.0, 3),
                 }
             )
-    return sorted(voids, key=lambda x: x["distance_pct"])[:5]
+    return sorted(voids, key=lambda x: x["distance_pct"])[:top_n]
 
 
 def _stacked_imbalance(bins: list[FootprintBin], *, min_run: int = 3) -> str | None:
@@ -292,12 +293,13 @@ def _detect_iceberg(
     asks: list[tuple[float, float]],
     *,
     current_price: float,
-    tolerance_pct: float = 0.08,
+    cfg: MapsConfig | None = None,
 ) -> list[dict[str, Any]]:
     """Repeated fills at a level without proportional displayed size depletion."""
+    cfg = cfg or MapsConfig()
     if current_price <= 0 or not trades:
         return []
-    tol = current_price * tolerance_pct / 100.0
+    tol = current_price * cfg.iceberg_tolerance_pct / 100.0
     # Bids and asks share one price-bucket dict. Near the spread a bid and an
     # ask can round to the SAME bucket; the asks loop must not blindly overwrite
     # the bid (that mislabeled a support level as a hidden "sell" BELOW price —
@@ -338,11 +340,11 @@ def _detect_iceberg(
             continue
         key = round(px / tol) * tol if tol else px
         fill_at[key] = fill_at.get(key, 0.0) + qty * px
-    _RATIO_CAP = 50.0
+    _RATIO_CAP = cfg.iceberg_ratio_cap
     out: list[dict[str, Any]] = []
     for key, filled in fill_at.items():
         shown = book_by_px.get(key)
-        if shown and filled > shown[0] * 1.4:
+        if shown and filled > shown[0] * cfg.iceberg_min_fill_ratio:
             # Side sanity (mirrors _detect_sticky_walls): a hidden BID (absorption
             # buyer) rests at/below price, a hidden ASK (distribution seller)
             # at/above. Drop the straddle bucket (within one tol of price) where
@@ -358,7 +360,7 @@ def _detect_iceberg(
             # (e.g. a few cents shown) blow the ratio up into the tens of thousands —
             # not a meaningful "replenishment" reading. Floor against a fraction of the
             # fill itself instead, and cap the displayed figure so it stays interpretable.
-            floor = max(shown[0], filled * 0.02)
+            floor = max(shown[0], filled * cfg.iceberg_floor_frac)
             raw_ratio = filled / floor
             out.append(
                 {
@@ -379,25 +381,32 @@ def _detect_absorption(
     *,
     current_price: float,
     price_change_pct: float | None,
+    cfg: MapsConfig | None = None,
 ) -> list[dict[str, Any]]:
     """Large resting notional + aggressive opposite flow + price stall."""
+    cfg = cfg or MapsConfig()
     if current_price <= 0 or not footprint or not clusters:
         return []
     stall = price_change_pct is not None and abs(float(price_change_pct)) <= 0.12
     out: list[dict[str, Any]] = []
     for cluster in clusters[:4]:
-        if cluster.distance_pct > 1.5:
+        if cluster.distance_pct > cfg.absorption_max_distance_pct:
             continue
         near_bins = [
             b
             for b in footprint
-            if abs(b.price_center - cluster.price_center) / current_price * 100.0 <= 0.35
+            if abs(b.price_center - cluster.price_center) / current_price * 100.0
+            <= cfg.absorption_near_bin_pct
         ]
         if not near_bins:
             continue
         delta = sum(b.delta for b in near_bins)
         opposite = (cluster.side == "bid" and delta < 0) or (cluster.side == "ask" and delta > 0)
-        if opposite and cluster.total_notional >= 25_000 and (stall or abs(delta) >= 10_000):
+        if (
+            opposite
+            and cluster.total_notional >= cfg.absorption_min_notional_usd
+            and (stall or abs(delta) >= cfg.absorption_min_delta_usd)
+        ):
             out.append(
                 {
                     "price_center": cluster.price_center,
@@ -419,7 +428,8 @@ def _detect_spoof(
     current_asks: list[tuple[float, float]],
     *,
     current_price: float,
-    tolerance_pct: float = 0.12,
+    cfg: MapsConfig | None = None,
+    tolerance_pct: float | None = None,
 ) -> list[dict[str, Any]]:
     """Wall vanishes as price approaches (present across several prior samples, gone now).
 
@@ -432,9 +442,11 @@ def _detect_spoof(
     single-tick noise — a real spoof wall sits there to be seen, a
     rebalance-in-progress wall doesn't have a multi-sample history to erase.
     """
+    cfg = cfg or MapsConfig()
     if len(history) < _SPOOF_MIN_PRIOR_SAMPLES + 1 or current_price <= 0:
         return []
-    tol = current_price * tolerance_pct / 100.0
+    tol_pct = cfg.spoof_tolerance_pct if tolerance_pct is None else tolerance_pct
+    tol = current_price * tol_pct / 100.0
     prior_samples = list(history)[-(_SPOOF_MIN_PRIOR_SAMPLES + 1):-1]
     flags: list[dict[str, Any]] = []
 
@@ -457,13 +469,13 @@ def _detect_spoof(
         candidate_prices = set(per_sample[0].keys()) if per_sample else set()
         for px in candidate_prices:
             notionals = [m.get(px, 0.0) for m in per_sample]
-            if any(n < 50_000 for n in notionals):
+            if any(n < cfg.spoof_min_wall_usd for n in notionals):
                 continue  # must have been a genuinely large wall on EVERY prior sample
             dist = abs(px - current_price) / current_price * 100.0
-            if dist > 1.2:
+            if dist > cfg.spoof_max_distance_pct:
                 continue
             prev_n = notionals[-1]  # most recent prior sample, for the reported drop size
-            if cur_map.get(px, 0.0) < min(notionals) * 0.25:
+            if cur_map.get(px, 0.0) < min(notionals) * cfg.spoof_vanish_frac:
                 flags.append(
                     {
                         "side": side,
@@ -669,6 +681,7 @@ def build_orderbook_map(
         book_history or deque(),
         current_price=current_price,
         min_samples=cfg.sticky_min_samples,
+        tolerance_pct=cfg.sticky_tolerance_pct,
     )
     voids = _detect_voids(
         zone_bids,
@@ -677,6 +690,7 @@ def build_orderbook_map(
         n_buckets=cfg.n_buckets,
         price_range_pct=cfg.price_range_pct,
         void_pctile=cfg.void_depth_pctile,
+        top_n=cfg.voids_top_n,
     )
     footprint = _trade_footprint(
         trades or [],
@@ -686,9 +700,17 @@ def build_orderbook_map(
         window_seconds=cfg.window_seconds,
     )
     stacked = _stacked_imbalance(footprint)
-    icebergs = _detect_iceberg(trades or [], zone_bids, zone_asks, current_price=current_price)
-    absorption = _detect_absorption(footprint, clusters, current_price=current_price, price_change_pct=price_change_pct)
-    spoofs = _detect_spoof(hist, zone_bids, zone_asks, current_price=current_price)
+    icebergs = _detect_iceberg(
+        trades or [], zone_bids, zone_asks, current_price=current_price, cfg=cfg
+    )
+    absorption = _detect_absorption(
+        footprint,
+        clusters,
+        current_price=current_price,
+        price_change_pct=price_change_pct,
+        cfg=cfg,
+    )
+    spoofs = _detect_spoof(hist, zone_bids, zone_asks, current_price=current_price, cfg=cfg)
     cvd_div = _detect_cvd_divergence(
         trades or [],
         price_change_pct=price_change_pct,
