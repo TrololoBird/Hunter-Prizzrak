@@ -10,10 +10,15 @@ from hunt_core.params.store import tracker_thresholds
 _SQUEEZE_TRAIL_TIGHTEN = 0.70
 
 def _worst_entry(active: dict[str, Any], *, direction: str) -> float:
-    """Worst-case fill edge for R:R and breakeven SL."""
+    """Worst-case (least-favorable) fill edge for R:R, MFE and breakeven SL.
+
+    Long → entry HIGH (paid the most), short → entry LOW (sold cheapest). Kept in
+    lockstep with contract.worst_entry_edge; the old inverted convention over-stated
+    MFE and moved BE too early.
+    """
     if direction == "short":
-        return float(active.get("entry_hi") or 0)
-    return float(active.get("entry_lo") or 0)
+        return float(active.get("entry_lo") or 0)
+    return float(active.get("entry_hi") or 0)
 
 
 def _mfe_pct(active: dict[str, Any], *, direction: str) -> float:

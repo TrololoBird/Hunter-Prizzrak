@@ -524,7 +524,15 @@ async def deliver_manipulation_setups(
             scanner_states[symbol] = new_state
             states_changed = True
 
-        if tracker_state is not None:
+        # WO#1: an UNCONFIRMED setup is rendered as «ОЖИДАНИЕ подтверждения — НЕ вход»
+        # (advisory watch card, see _format_manipulation_signal). It must NOT become a
+        # tracked open position: registering it made auto_resolve fire TRIGGERED/TP/stop
+        # follow-ups on a non-entry, wrote its outcome to the ledger, burned the global
+        # confirm-burst budget, and — worst — made has_active_signal SWALLOW the later
+        # CONFIRMED signal on the same symbol (the LTF break finally landing). So the
+        # tracker only opens a position for confirmed setups; the advisory card was
+        # already sent above. (Short unconfirmed setups are suppressed earlier, ~471.)
+        if tracker_state is not None and bool(getattr(setup, "micro_confirmed", False)):
             # The message shows the whole pool ladder and promises «тейки частями …
             # держим до цели/стопа», but the tracker used to receive tp1 ONLY (the
             # nearest pool) and no tp2 — so auto_resolve_active_signals closed the

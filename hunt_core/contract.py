@@ -710,15 +710,22 @@ def normalize_funding_fraction(value: Any) -> float | None:
 
 
 def worst_entry_edge(setup: Mapping[str, Any], *, direction: str) -> float | None:
-    """Worst-case fill edge for R:R (short → entry high, long → entry low)."""
+    """Worst-case (least-favorable) fill edge for a conservative R:R.
+
+    A LONG's worst fill is the HIGH of the entry band (you paid the most → smallest
+    reward, largest risk); a SHORT's worst fill is the LOW (you sold cheapest). The
+    prior version returned the opposite (long→lo, short→hi) — the BEST fill — which
+    over-stated R:R everywhere and contradicted the display fallback that already used
+    the correct edge. R:R computed from this edge is now genuinely conservative.
+    """
     ez = setup.get("entry_zone")
     try:
         if isinstance(ez, (list, tuple)) and len(ez) >= 2:
             lo = float(ez[0])
             hi = float(ez[1])
             if direction == "short":
-                return hi if hi > 0 else None
-            return lo if lo > 0 else None
+                return lo if lo > 0 else None
+            return hi if hi > 0 else None
     except (TypeError, ValueError, IndexError):
         pass
     return None
