@@ -89,6 +89,15 @@ _MACRO_MIN_BARS: dict[str, int] = {"1w": 40}
 _MACRO_MIN_BARS_DEFAULT = _MACRO_LOOKBACK_BARS // 2
 
 
+# NB: stays a dataclass, NOT Pydantic (project rule), on purpose. The state machine
+# builds it and then AMENDS it in place — setup.score / steps_covered / macro_tf /
+# evidence are assigned after construction as later stages confirm. A Pydantic model
+# would force a choice with no good side: frozen forbids the mutation; validate_assignment
+# re-validates on every write and changes semantics; mutable-without-validation gains
+# nothing over a dataclass. Converting it means restructuring build-then-amend in the
+# scanner core — a real refactor with regression risk, not a mechanical swap. (The
+# non-mutated value/config models — PrescanHit, HuntCandidate, UniverseConfig — ARE
+# Pydantic; only the mutated ones stay dataclasses.)
 @dataclass
 class ManipulationSetup:
     direction: Direction

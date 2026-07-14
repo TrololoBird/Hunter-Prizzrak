@@ -13,13 +13,17 @@ from __future__ import annotations
 
 import os
 import tomllib
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel
 
-@dataclass
-class AnalystConfig:
+
+class AnalystConfig(BaseModel):
+    """Deep-delivery cadence config. Pydantic BaseModel (project rule) — validation on
+    load is pure upside here: this is built once from TOML+env, never mutated, and a bad
+    value now fails loudly at config load instead of surfacing as a weird cadence later."""
+
     enabled: bool = True
     tg_verbose: bool = False
     signal_queue_enabled: bool = True

@@ -8,10 +8,20 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from pydantic import BaseModel, ConfigDict
 
-@dataclass(frozen=True, slots=True)
-class UniverseConfig:
+# Frozen value objects → Pydantic (project rule). They carry data derived from external
+# ticker rows, so validation-on-construction catches a malformed field at the boundary
+# rather than as a strange candidate later. frozen=True keeps the immutability the
+# dataclasses had. (The stateful/mutated models here — PrescanEngine, _DebouncedSymbol —
+# stay dataclasses: they are mutated in place, which Pydantic would fight.)
+_FROZEN = ConfigDict(frozen=True)
+
+
+class UniverseConfig(BaseModel):
     """Quality gates inspired by pwatch (A7)."""
+
+    model_config = _FROZEN
 
     min_quote_volume_usd: float = 10_000_000.0
     min_open_interest_usd: float = 500_000.0
@@ -53,8 +63,9 @@ def universe_config() -> UniverseConfig:
 
 
 
-@dataclass(frozen=True, slots=True)
-class PrescanHit:
+class PrescanHit(BaseModel):
+    model_config = _FROZEN
+
     symbol: str
     interval: str
     change_pct: float
@@ -628,8 +639,9 @@ def score_mtf_volume_tiers(
     return score, flags, reasons
 
 
-@dataclass(frozen=True, slots=True)
-class HuntCandidate:
+class HuntCandidate(BaseModel):
+    model_config = _FROZEN
+
     symbol: str
     hunt_score: float
     watch_bias: WatchBias

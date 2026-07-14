@@ -6,11 +6,11 @@ import structlog
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import polars as pl
+from pydantic import BaseModel, ConfigDict, Field
 
 from hunt_core.maps.config import MapsConfig, load_maps_config
 from hunt_core.maps.liquidation import (
@@ -22,15 +22,26 @@ from hunt_core.maps.orderbook import OrderbookMap, build_orderbook_map, derive_o
 from hunt_core.maps.volume_profile import VolumeProfileMap, build_volume_profile_map, derive_vp_accumulation_features
 
 LOG = structlog.get_logger("hunt_core.maps.engine")
-@dataclass
-class MapBundle:
+
+
+class MapBundle(BaseModel):
+    """Per-tick container for the three maps (project rule: Pydantic, not dataclass).
+
+    ``arbitrary_types_allowed`` because it nests plain dataclasses (OrderbookMap,
+    VolumeProfileMap) and an opaque LiquidationMap — those are stored as-is (isinstance
+    check, no deep validation), so the validation here only guards symbol/ts_ms/extra.
+    Not mutated after construction.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     symbol: str
     ts_ms: int
     orderbook: OrderbookMap | None = None
     liquidation: Any | None = None
     volume_profile: VolumeProfileMap | None = None
     # Raw cross-signal context (oi_z, funding, basis, ws_cvd) used for accumulation/squeeze fusion.
-    extra: dict[str, Any] = field(default_factory=dict)
+    extra: dict[str, Any] = Field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
