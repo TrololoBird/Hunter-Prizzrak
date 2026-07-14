@@ -63,7 +63,7 @@
 - I-1. `prizrak/` и `scanner/` не импортируют друг друга; общее — через spine
   (`signals/`, `data/`, `market/`, `track/`, `domain/`).
 - I-2. `deliver/` не импортирует `runtime/` (сегодня нарушено:
-  `deliver/telegram.py::format_setup_lines` → `runtime.cycle._cycle_format`; gap G-?).
+  `deliver/telegram.py::format_setup_lines` → `runtime.cycle._cycle_format`; **открыт** G-28).
 - I-3. Ни один доп-фактор (индикаторы, dominance, funding, liq-карта, marketcap)
   не **гейтит** сигнал Prizrak — только умножает силу/аннотирует.
 - I-4. Данные о ликвидациях: **realized ≠ estimated** — каждое число в доставке
@@ -136,22 +136,24 @@
 - **orderbook**: walls/sticky/iceberg/absorption/spoof/voids/footprint/CVD-ratio.
   Гарантирует: sticky-walls — price-anchored (bid ниже цены, ask выше, ≥1 бакет от
   цены); iceberg = «sticky/replenishing level» (НЕ «detected iceberg» — нет MBO);
-  все ключи, которые рендерит `deliver`, реально производятся (сегодня нарушено:
-  voids/`depth_heatmap_matrix` — gap).
+  все ключи, которые рендерит `deliver`, реально производятся (**открыт** G-17:
+  voids/`depth_heatmap_matrix` — мёртвые рендеры).
 - **liquidation**: realized-кластеры (мульти-venue) первичны; forward-оценка
   (Binance-OI × leverage-tiers, `liq = entry×(1∓1/L±mmr)`, propensity
   `w·lev^exp` mass-preserving) — только при `realized_event_count==0`;
-  `magnet_pull_*`/`at_risk` — только из realized. `venue_events` считает события
-  **в окне карты**, не весь буфер (gap).
+  `magnet_pull_*`/`at_risk` — только из realized; forward-магниты гасятся только
+  по реально пройденному ценой диапазону (✅ G-16). `venue_events` обязан считать
+  события **по символу и в окне карты**, не весь буфер (**открыт** G-15).
 - **volume_profile**: POC/VAH/VAL (VA=70% конвенция, config), HVN/LVN,
   naked POC, POC-миграция; периоды {1h,4h,1d,1w,developing}.
 - **oi**: bar-merge OI↔OHLCV; regime {new_money_long/short, squeeze, flush,
-  coiling}; `0.0` — валидное значение, не «нет данных» (gap: falsy-chains).
+  coiling}; `0.0` — валидное значение, не «нет данных» (✅ G-21: `is None`-цепочки).
 - **confluence (зона-лимитка)**: скор = число **независимых источников**
   (VP / liquidation / orderbook), вклад внутри источника ≤1; funding =
   направленная аннотация, не голос.
 - Запрещено: называть forward-оценку «реальной»; leverage-параметры, не
-  согласованные с якорем (§5, config-драфт leverage_weights — gap).
+  согласованные с якорем (✅ G-2: `leverage_weights` = 4 веса на 4 тира,
+  масс-взвешенное плечо 61.7× ≈ якорь Cheng ~60×).
 
 ### 2.6 `deliver/`
 
@@ -166,7 +168,11 @@
 - Гарантирует: единый FSM жизненного цикла (§4) для обеих стратегий; setup_id
   дедуп; cooldown-гейты (burst cap, stop-hit, loss-streak, daily cap, repeat
   loser); outcome-леджер с разделением **actionable vs watch-only** записей
-  (неподтверждённый «ожидание — не вход» не считается открытой позицией — gap).
+  (✅ G-4: неподтверждённый «ожидание — не вход» больше НЕ открывает позицию и не
+  ест confirm-burst; advisory-карточка при этом доставляется).
+- Требует: `worst_entry_edge` как единый консервативный базис R:R/MFE/БУ
+  (✅ G-3: long→верх зоны, short→низ; `contract.py` и `track/_trailing.py`
+  обязаны совпадать).
 - Запрещено: закрывать всю позицию по первому TP, если доставлена лестница.
 
 ### 2.8 `runtime/`
@@ -176,11 +182,14 @@
   analyst-путь (pinned + /signal) отделён от fast-tick; ротация всех
   high-volume JSONL с бюджетом размера.
 
-### 2.9 `research/`
+### 2.9 `research/` (repo-root, вне пакета)
 
 - Гарантирует: no-lookahead backtest сканера с faithful-моделью риска
-  (+20% фикс → стоп в entry → раннер, горизонт 2–5 дней);
-  `research/outcome_store.py` — единое хранилище исходов (§6).
+  (+20% фикс → стоп в entry → раннер, горизонт 2–5 дней) —
+  `research/backtest_scanner.py` на локальных parquet-датасетах (`dataset_vN`,
+  активный — `research/dataset_active_version.txt`); сеть не нужна.
+- NB: пакет `hunt_core/research/` **удалён** (✅ G-25 — ноль импортёров). Исходы
+  живут в `track/outcome_ledger.py` + `track/outcomes.py` (§6), не в hunt_core.
 
 ---
 
@@ -224,7 +233,8 @@ bias↔liq-карты — явный риск-флаг (gap из prizrak_eth raz
   проекция движения)` + `R:R ≈ … (до TP1) · … (до среднесрочной)`.
 - `micro_confirmed=False`: `⏳ ОЖИДАНИЕ подтверждения — НЕ вход` + ориентиры
   курсивом; без строки доборов. **Не регистрируется в трекере как открытая
-  позиция** (целевое; сегодня регистрируется — gap).
+  позиция** (✅ G-4 — advisory-only; позже пришедший ПОДТВЕРЖДЁННЫЙ сигнал по
+  тому же символу больше не подавляется `has_active_signal`).
 - «почему» — только варьирующиеся факторы; риски отдельной строкой ⚠️.
 - Целевое дополнение: нижний край полосы входа не ниже реклейм-уровня, либо
   явная пометка «добор ниже реклейма — против реклейма, повышенный риск»;
@@ -320,36 +330,50 @@ closed ──> outcome-леджер (§6) + cooldown-запись
 | Группа | Ручки (сегодняшнее место) | Статус |
 |---|---|---|
 | Maps/общие | `n_buckets, price_range_pct, window_seconds, retention_samples, max_symbols, book_top_n, book_deep_top_n, book_sample_interval_s` (TOML) | ok |
-| Liq | `leverage_weights` (TOML **дрифт: 5 элементов при 4 тирах — якорь 61.7× съехал на ~55.6×**), `liq_leverage_propensity_exp=1.0` (**в TOML отсутствует**), `forward_blend_ratio, forward_confidence_min`, `_LIQ_MIN_CLUSTER_NOTIONAL_USD` (env) | gap |
-| VP | `vp_periods, vp_buckets` (**TOML=24 vs код-интент 60**), `vp_value_area_pct`, lookbacks {4h:42,1d:30,1w:12} (**хардкод**), HVN×1.3/LVN×0.5 (**хардкод**) | gap |
-| CVD/фло | `cvd_div_ratio` (**дефолт-вилка 0.15 dataclass vs 0.25 from_defaults; TOML пуст**) | gap |
-| OB-детекторы | sticky tolerance 0.15, spoof 50k/0.12/1.2/0.25, absorption 25k/10k/0.35/1.5, iceberg 1.4/0.02/50, voids top-5 (**все хардкод**) | gap |
-| Scanner-гео | `_MIN_RR=1.2, _MIN_SWEEP_DEPTH_PCT=0.5%, _MEASURED_MOVE_BY_TF, _MAX_TARGET_PCT_BY_TF, _DOBOR_FRACTIONS=(0.33,0.66), _AVERAGING_FRACTION=0.5`, stop-buffer (0.3×ATR%, min 3%/5% A3, cap 5%) (**все хардкод в deliver**) | gap |
+| Liq | ✅ `leverage_weights` = `[0.35,0.30,0.20,0.15]` (4 веса на 4 тира, якорь 61.7×), `liq_leverage_propensity_exp=1.0` (**в TOML отсутствует — дефолт кода**), `forward_blend_ratio, forward_confidence_min`, `_LIQ_MIN_CLUSTER_NOTIONAL_USD` (env) | дрифт закрыт |
+| VP | ✅ `vp_buckets=60` (трейдерская детализация), `vp_periods`, `vp_value_area_pct`; lookbacks {4h:42,1d:30,1w:12} (**хардкод**), HVN×1.3/LVN×0.5 (**хардкод**) | дрифт закрыт, хардкоды открыты |
+| CVD/фло | ✅ `cvd_div_ratio=0.15` (единый дефолт: dataclass == `from_defaults` == докстринг) | дрифт закрыт |
+| OB-детекторы | sticky tolerance 0.15, spoof 50k/0.12/1.2/0.25, absorption 25k/10k/0.35/1.5, iceberg 1.4/0.02/50, voids top-5 (**все хардкод**) | открыто (G-30) |
+| Scanner-гео | `_MIN_RR=1.2, _MIN_SWEEP_DEPTH_PCT=0.5%, _MEASURED_MOVE_BY_TF, _MAX_TARGET_PCT_BY_TF, _DOBOR_FRACTIONS=(0.33,0.66), _AVERAGING_FRACTION=0.5`, stop-buffer (0.3×ATR%, min 3%/5% A3, cap 5%) (**все хардкод в deliver**) | открыто (G-30) |
 | Scanner-детект | пороги паттернов в `scanner/detect/patterns.py` (импульс/затухание/закреп/объём) | инвентаризовать |
-| Prizrak | HTF-веса (`htf_1w=0.35, 1d=0.25, 4h=0.30, 1h=0.10` — **немонотонность = открытое решение WO#5**), `_INTEREST_ZONE_MAX_WIDTH_PCT=4%`, `accumulation_max_width_pct=12%`, confluence-множители, dominance/marketcap (OFF-by-default) | частично |
+| Prizrak | ✅ HTF-веса `1w=0.35 ≥ 1d=0.30 ≥ 4h=0.25 ≥ 1h=0.10` (монотонны по старшинству, Σ=1.00, пиннинг-тест); `_INTEREST_ZONE_MAX_WIDTH_PCT=4%`, `accumulation_max_width_pct=12%`, confluence-множители, dominance/marketcap (OFF-by-default) | веса закрыты |
 | Track | cooldown'ы (burst/stop-hit/loss-streak/daily cap), trailing, early-BE, time_stall 8h | инвентаризовать |
 | Delivery | `_DOM_ACTIONABLE_MAX_AGE_S=15` (env, калиброван p95), digest-интервалы/top-N (env), `TELEGRAM_*` лимиты | ok (env) |
 | OI | `OI_REGIME_OI_MIN_PCT=15, PRICE_MIN_PCT=5` | хардкод-константы, ok как research-default |
 
-Целевое состояние: группы «gap/хардкод» переезжают в `[maps]`/`[scanner]`/
+**Прецедент разрешения дрифта (зафиксирован 2026-07-14).** Все три случая
+«TOML молча перекрывает код-интент» разрешены **в пользу код-интента**, потому
+что TOML оказался устаревшим, а код нёс обоснование + якорь:
+`leverage_weights` (comment: «5-й вес — мёртвый код»; 4 веса дают
+документированные 61.7×), `vp_buckets` (24 = ~$150/бакет на BTC = «слишком
+грубо для уровня»), `cvd_div_ratio` (докстринг обосновывает 0.15 как
+принципиальный дефолт). **Правило на будущее: при расхождении TOML и
+задокументированного код-интента истина — у того, кто несёт ОБОСНОВАНИЕ и
+якорь; молчащее значение проигрывает.** Пиннинг-тест «TOML == документированное»
+для этих трёх — оставшийся долг.
+
+Целевое состояние: группы «хардкод» переезжают в `[maps]`/`[scanner]`/
 `[deliver]` секции TOML **без изменения значений** (behavior-preserving), с
-пиннинг-тестом на каждое; три обнаруженных дрифта (leverage_weights,
-vp_buckets, cvd_div_ratio) — исправляются как баги класса «конфиг молча
-перекрывает интент» с решением владельца, какое значение истинно.
+пиннинг-тестом на каждое (G-30).
 
 ---
 
 ## 6. Валидация / исходы
 
-- **Хранилище**: `research/outcome_store.py` + `track/outcome_ledger.py` —
-  каждый закрытый сигнал: стратегия, паттерн/источник, watch-only vs
-  actionable, touch-based исходы (TP1/TP2/stop/timeout), R-мультипл по
-  faithful-модели соответствующей стратегии.
-- **Scanner**: `research/backtest_scanner.py` (no-lookahead replay реального
-  детектора) — обязательный before/after на любое изменение детекции;
-  метрика — R-сумма и win-rate на **репрезентативной** вселенной
-  (низкокапы/заскамленные; dataset_v9 непредставителен — токенизированные
-  акции). Match-author ≠ profit: сверка с автором отдельно от touch-backtest.
+- **Хранилище**: `track/outcome_ledger.py` + `track/outcomes.py` — каждый
+  закрытый сигнал: стратегия, паттерн/источник, watch-only vs actionable,
+  touch-based исходы (TP1/TP2/stop/timeout), R-мультипл по faithful-модели
+  соответствующей стратегии. (Пакет `hunt_core/research/` удалён — G-25; его
+  `outcome_store` был мёртвым дублем без потребителей.)
+- **Scanner**: `research/backtest_scanner.py` (repo-root, no-lookahead replay
+  реального детектора на локальных parquet-датасетах, сеть не нужна) —
+  обязательный before/after на любое изменение детекции; метрика — R-сумма и
+  win-rate на **репрезентативной** вселенной (низкокапы/заскамленные;
+  dataset_v9 непредставителен — токенизированные акции). Match-author ≠ profit:
+  сверка с автором отдельно от touch-backtest.
+  ⚠️ **Эксплуатационная заметка:** прогон на `dataset_v11` (1440 файлов) был убит
+  по памяти (exit 137). Перед использованием как гейта — прогонять по-символьно /
+  чанками либо на срезе вселенной, не весь датасет одним процессом.
 - **Prizrak**: сверка `assemble_analyst_tick` с методом (разборы corpus:
   зоны/ТВХ/стоп/цель один-в-один — эталон POL/MATIC-разбор) + touch-исходы
   зон интереса.
@@ -381,131 +405,141 @@ vp_buckets, cvd_div_ratio) — исправляются как баги клас
 
 Каждый gap = отдельная гейтнутая правка (падающий тест → минимальный фикс →
 пиннинг), НЕ переписывание. Доказательства — в отчёте аудита (карточки по
-модулям). P0 — искажает живой сигнал/статистику сегодня; P1 — контракт/
-честность лейблов; P2 — техдолг/мёртвый код.
+модулям). P0 — искажает живой сигнал/статистику; P1 — контракт/честность
+лейблов; P2 — техдолг/мёртвый код.
 
-### P0 — сигнал-искажающие (подтверждены пересчётом/чтением)
-- G-1 `prizrak/pipeline/structure.py:120,131` — bos_up/bos_down ≡ False (окно
-  экстремума включает текущий бар) → тренды МТФ разрешаются только CHoCH,
-  «fresh slom»-гейты мертвы. Фикс: экстремум по окну без последнего бара.
-- G-2 `config.defaults.toml [maps]` — три дрифта: `leverage_weights` 5 элементов
-  (якорь 55.6× вместо 61.7×), `vp_buckets=24` vs интент 60, `cvd_div_ratio`
-  отсутствует → фолбэк 0.25 vs документированные 0.15. Решение владельца +
-  пиннинг «TOML == документированное».
-- G-3 `contract.py:712 worst_entry_edge` — инверсия worst-fill (short→hi,
-  long→lo) → все TP%/SL%/R:R в карточках анти-консервативны; fallback в
-  _sections.py использует обратную (верную) конвенцию.
-- G-4 `deliver/manipulation_delivery.py:556+` — неподтверждённый лонг («НЕ
-  вход») регистрируется в трекере как открытая позиция: загрязняет outcome-
-  леджер, ест confirm-burst бюджет и через has_active_signal подавляет
-  последующий ПОДТВЕРЖДЁННЫЙ сигнал. Фикс: watch-only запись (§4).
-- G-5 `runtime/cycle/_cycle_loop.py:336` — вселенная manipulation-сканера
+**Статус на 2026-07-14 (ветка `push-snapshot`, 7 коммитов `12b990d..1e39c64`):**
+✅ закрыто 12 из 30 (включая все «сигнал-ломающие» контракт-баги), ◐ частично 2,
+⬜ открыто 16. Гейт после правок: ruff чисто, mypy 190 файлов, **356/356 pytest**
+(+7 новых пиннинг-тестов), удалено 16 мёртвых файлов.
+
+### P0 — сигнал-искажающие
+
+- ✅ **G-1** `prizrak/pipeline/structure.py` — bos_up/bos_down были ≡ False (окно
+  экстремума включало текущий бар). Экстремум берётся по окну **без** последнего
+  бара → BOS достижим, «fresh slom»-гейты и МТФ-тренды ожили.
+- ✅ **G-2** `config.defaults.toml [maps]` — три дрифта разрешены в пользу
+  код-интента (см. прецедент в §5): `leverage_weights` → 4 веса (якорь 61.7×),
+  `vp_buckets` → 60, `cvd_div_ratio` → 0.15. *Долг: пиннинг «TOML == документированное».*
+- ✅ **G-3** `contract.py::worst_entry_edge` + `track/_trailing::_worst_entry` —
+  обе реализации возвращали BEST-fill под именем worst-case. Теперь long→верх
+  зоны, short→низ → R:R/MFE/БУ консервативны. *Валидационный долг: см. ниже.*
+- ✅ **G-4** `deliver/manipulation_delivery.py` — неподтверждённый сетап больше не
+  открывает трекер-позицию и не ест confirm-burst; advisory-карточка доставляется,
+  последующий подтверждённый сигнал не подавляется `has_active_signal`.
+- ⬜ **G-5** `runtime/cycle/_cycle_loop.py:336` — вселенная manipulation-сканера
   замораживается на старте процесса; свежие watchlist-кандидаты не сканируются.
-- G-6 `scanner/detect/expansion_readiness.py:137` — fake_energy_veto режет
-  символы с OI↑+vol↑ из-за отсутствующих flow-полей (delta/cvd нигде не
-  производятся) — выкидывает архетип pre-pump из прескана. Фикс: veto только
-  при присутствующих flow-данных.
-- G-7 `scanner/detect/patterns.py:455` (класс A) — Pattern A stage 0 детектит
-  DOWN-импульс + 80% восстановление ВВЕРХ; метод: «памп → поглощение одной
-  свечой [вниз] → боковик». Примитив detect_one_candle_absorption написан и не
-  подключён. Решение владельца + бэктест before/after.
-- G-8 `toolkit/targets.py:29,115` — читает `maps["liquidation"]["forward_zones"]`,
-  producer пишет `liq_forward_zones` → forward-цели молча выпадают из
-  structural targets.
-- G-9 `maps/engine.py:379,462`, `maps/orderbook.py:754` — читают
-  `imb_1.0pct`, producer пишет `imb_1pct` → DOM-imbalance мёртв в maps-фичах
-  и prizrak/liq_reconcile.
-- G-10 `features/structure.py:220,265` — BOS-fallback без закрепа + «тренд» из
-  разнотипных уровней → систематический bear-сдвиг структурного спайна фич.
-- G-11 `features/factors.py:112` — funding-фактор ×100 (единицы: pp vs доля),
-  насыщен на ±1 при любом реальном funding; `fib.py:13` — direction=down no-op
-  (382↔618 зеркально перепутаны); `microstructure.py:541` — квадрант (↓P,↑OI)
-  мис-классифицирован.
-- G-12 `market/live_price.py:69` — live_bbo/markPrice без age-гейта: при стойле
-  WS застойная цена уходит как свежая (вход/стоп/цели от протухшей цены).
-- G-13 WO#3 (`deliver/manipulation_delivery.py:216`) — нижний край полосы входа
-  ниже реклейм-уровня без пометки; ширина полосы без капа.
-- G-14 WO#5 (`prizrak/config.py:89-92`) — немонотонные HTF-веса (4h .30 > 1d
-  .25) без обоснования; плюс ТРИ разные реализации HTF-bias с несовместимым
-  словарём (long/short vs bull/bear) — унифицировать в spine.
+- ⬜ **G-6** `scanner/detect/expansion_readiness.py:137` — `fake_energy_veto` режет
+  символы с OI↑+vol↑, т.к. flow-поля (delta/cvd) нигде не производятся →
+  `flow_mag` всегда 0. Выкидывает архетип pre-pump из прескана. Фикс: veto только
+  при ПРИСУТСТВУЮЩИХ flow-данных.
+- ✅ **G-7** `scanner/detect/patterns.py` (класс A) — Pattern A stage 0 детектил
+  DOWN-импульс (V-восстановление после дампа); метод требует **памп вверх** →
+  поглощение → боковик → свип → слом. Импульс перевёрнут на `direction="up"`,
+  цепочка стала метод-верной. *Валидационный долг: см. ниже.*
+- ✅ **G-8** `toolkit/targets.py` — читал `forward_zones`, producer пишет
+  `liq_forward_zones` → forward-цели молча выпадали из structural targets.
+- ✅ **G-9** `maps/engine.py` ×2, `maps/orderbook.py` — читали `imb_1.0pct`,
+  producer пишет `imb_1pct` → DOM-imbalance был мёртв в maps-фичах и
+  `prizrak/liq_reconcile`.
+- ⬜ **G-10** `features/structure.py:220,265` — BOS-fallback без закрепа + «тренд»
+  из разнотипных уровней → систематический bear-сдвиг структурного спайна фич.
+- ✅ **G-11** `features/` — три расчётных бага: `fib.py` (`direction="down"` был
+  no-op: ретрейсы зеркально перепутаны, экстеншены над хаем вместо под лоем),
+  `factors.py` (funding ×5000 на pp-шкале → фактор насыщен ±1; теперь ×50),
+  `microstructure.py` (4 OI×price квадранта сводились к sign(произведения) →
+  «новые шорты» получали −0.20 вместо confirm).
+- ⬜ **G-12** `market/live_price.py:69` — live_bbo/markPrice без age-гейта: при
+  стойле WS застойная цена уходит как свежая (вход/стоп/цели от протухшей цены).
+- ⬜ **G-13** WO#3 `deliver/manipulation_delivery.py` — нижний край полосы входа
+  может уйти ниже реклейм-уровня без пометки; ширина полосы без капа.
+- ◐ **G-14** WO#5 — ✅ HTF-веса стали монотонны (`1w .35 ≥ 1d .30 ≥ 4h .25 ≥ 1h .10`,
+  пиннинг-тест). ⬜ Осталось: ТРИ независимые реализации HTF-bias (mtf/prizrak/
+  scanner) с несовместимым словарём (long/short vs bull/bear) — унифицировать в
+  spine; `htf_bias` dict-vs-str dual-shape.
 
 ### P1 — контракт / честность лейблов
-- G-15 `maps/liquidation.py:600` — venue_events из всего буфера (все символы,
-  без окна): «bybit=full·5ev» при «без реальных ликвидаций»; мёртвый фидер с
-  полным буфером выглядит живым. Считать по символу+окну + last_event_ms.
-- G-16 `maps/liquidation.py:391` — `_consume_swept_levels` тавтологичен: все
-  forward-бакеты ×0.35; forward-only heatmap считается без гашения →
-  $-расхождение ×2.86 в одном payload.
-- G-17 `deliver/_sections.py:567-584` — Depth bands (ключ `price` vs
-  `price_center`) и voids (`price_lo`/`direction` не производятся) — мёртвые
-  рендеры; контракт-тест на каждый рендер-ключ (§2.6).
-- G-18 sticky walls: детектор `[:6]` ближайших + book_history из top-10 WS
-  уровней → WO#6 не может показать стены 1.5–3% на мажорах; семплировать
-  deep-book в историю, капить по нотионалу на сторону.
-- G-19 `maps/volume_profile.py:209` — POC-миграция «flat» гарантирована при
-  height≤lookback (+0.25 незаслуженного accumulation-кредита на молодых
+
+- ⬜ **G-15** `maps/liquidation.py` — `venue_events` считается из ВСЕГО буфера
+  (все символы, без окна): «bybit=full·5ev» рядом с «без реальных ликвидаций»;
+  мёртвый фидер с полным буфером выглядит живым. Считать по символу+окну +
+  `last_event_ms`.
+- ✅ **G-16** `maps/liquidation.py` — `_consume_swept_levels` был тавтологичен
+  (гасил ВСЕ forward-бакеты ×0.35); теперь гасит только магниты, через которые
+  цена реально проходила, а forward-only heatmap переиспользует уже погашенный
+  cluster_map → исчезло ×2.86 $-расхождение внутри одного payload.
+- ⬜ **G-17** `deliver/_sections.py:567-584` — Depth bands (ключ `price` vs
+  producer `price_center`) и voids (`price_lo`/`direction` не производятся) —
+  мёртвые рендеры; нужен контракт-тест на каждый рендер-ключ (§2.6).
+- ⬜ **G-18** sticky walls: детектор режет `[:6]` ближайших + `book_history`
+  хранит top-10 WS-уровней → WO#6 не может показать стены 1.5–3% на мажорах.
+  Семплировать deep-book в историю, капить по нотионалу НА СТОРОНУ.
+- ⬜ **G-19** `maps/volume_profile.py:209` — POC-миграция «flat» гарантирована при
+  `height ≤ lookback` (+0.25 незаслуженного accumulation-кредита на молодых
   листингах); `pos_in_va` без нижнего клампа (+0.20 на пробое ВНИЗ из VA).
-- G-20 `market/cross.py` — мёртвый circuit breaker (:32), taker-«консенсус»
+- ⬜ **G-20** `market/cross.py` — мёртвый circuit breaker (:32), taker-«консенсус»
   смешивает volume-ratio и position-ratio (:618), liq-estimate заявляет
-  cross-venue при Binance-only OI (:780), fetched_at из кэша штампуется как
-  свежий (:354).
-- G-21 falsy-zero `or`-цепочки на числах (0.0 = «нет данных»): maps/oi.py:165,
-  features/snapshot.py:674, engine.py:403, client.py:1855 и др. — единый
-  паттерн-фикс `is None`.
-- G-22 `streams.py:830` — secondary-venue ликвидации (bybit=full) мешаются в
-  primary-буфер, из которого считаются binance-капped роллапы snapshot'а.
-- G-23 сироты/фантомы: `oi_usd`, `quote_volume_24h` (×1e6 ловушка),
-  `map_sticky_bid`, `row["htf_bias"]`, `rr_conservative`, `entry_type`,
-  `path_direction`, `scenario` — либо производить, либо удалить чтения.
-- G-24 PnL закрытий (§3.4): считать по faithful-модели (частичные фиксы), а не
-  «весь объём от entry-mid»; отметка «≈» при оценке.
+  cross-venue при Binance-only OI (:780), `fetched_at` из кэша штампуется свежим (:354).
+- ◐ **G-21** falsy-zero `or`-цепочки (0.0 = «нет данных»): ✅ `maps/oi.py`
+  (`is None`-fallthrough) и `maps/engine.py` (`liq_forward_confidence` больше не
+  инвертирует 0.0 в 1.0). ⬜ Осталось: `features/snapshot.py:674`,
+  `market/client.py:1855` и др. — единый паттерн-фикс.
+- ⬜ **G-22** `streams.py:830` — secondary-venue ликвидации (bybit=full) мешаются
+  в primary-буфер, из которого считаются binance-capped роллапы snapshot'а.
+- ⬜ **G-23** сироты/фантомы: `oi_usd`, `quote_volume_24h` (×1e6 ловушка),
+  `map_sticky_bid`, `row["htf_bias"]`, `rr_conservative` (мёртвый анти-fantasy-RR
+  кап), `entry_type`, `path_direction`, `scenario` — либо производить, либо
+  удалить чтения.
+- ⬜ **G-24** PnL закрытий (§3.4): считать по faithful-модели (частичные фиксы), а
+  не «весь объём от entry-mid»; отметка «≈» при оценке.
 
-### P2 — техдолт / мёртвый код / библиотеки (behavior-preserving, гейтнуто)
-- G-25 мёртвые модули: hunt_core/research/* (весь пакет), scanner/telegram.py,
-  signals/opportunity.py, toolkit/kline_flow.py, domain/knowledge.py,
-  prizrak/engines/types.py, pipeline/types.py+run_structure_module,
-  regime/regime+classifier, delivery_policy.filter_notify_candidates (+конфиг),
-  AdvisoryDigest.enqueue (нет продюсера) — удалить или подключить (решение
-  владельца по каждому).
-- G-26 stdlib logging → structlog (37 файлов); dataclass → Pydantic для
+### P2 — техдолг / мёртвый код / библиотеки (behavior-preserving, гейтнуто)
+
+- ✅ **G-25** мёртвый код — удалено 16 файлов (ноль импортёров, проверено grep'ом
+  по module-path, символам, lazy/importlib, tests/scripts/pyproject):
+  пакет `hunt_core/research/` (8 файлов), `scanner/telegram.py`,
+  `signals/opportunity.py`, `toolkit/kline_flow.py`, `domain/knowledge.py`,
+  `prizrak/engines/types.py`; хирургией вырезаны entangled-кластеры —
+  `pipeline/types.py` + мёртвые `run_structure_module`/`_resolve_ohlcv` из
+  `structure.py` (живой `_detect_structure` сохранён) и `regime/regime.py` (фасад)
+  + `regime/classifier.py` (unwired regime-veto). mypy-поверхность 200→190.
+  *Остаток:* `delivery_policy.filter_notify_candidates` (+мёртвый конфиг
+  `signal_queue_tg_min_rank`), `AdvisoryDigest.enqueue` (нет продюсера) — решение
+  «удалить или подключить» по каждому.
+- ⬜ **G-26** stdlib logging → structlog (37 файлов); dataclass → Pydantic для
   доменных моделей (ManipulationSetup, PrescanHit, MapBundle, AnalystConfig…) —
-  或 задокументированное исключение для tick-path.
-- G-27 дубли: fmt_price ×5, BOS/CHoCH ×3 (pipeline/structure, features/
-  structure, scanner/events), _safe_float ×3, ATR-обёртки, OHLCV→frame ×3,
-  volume-histogram (maps/_volume_histogram выбрасывает результат
-  volume_profile_levels и переделывает циклом) — консолидация в spine с
-  пиннинг-тестами.
-- G-28 инверсии границ: deliver→runtime (telegram.py:927), levels/track→
-  scanner.detect.delivery_support, data/tick_jsonl→prizrak.engines.serialize.
-- G-29 `.to_list()`-циклы → Polars-выражения (oi.py join_asof, snapshot.py,
-  prepare_columns.weighted_moving_average, microstructure rolling).
-- G-30 калибровочная поверхность §5: переезд хардкодов в TOML без изменения
-  значений + пиннинг.
+  или задокументированное исключение для tick-path.
+- ⬜ **G-27** дубли: `fmt_price` ×5, BOS/CHoCH ×3 (pipeline/structure,
+  features/structure, scanner/events), `_safe_float` ×3, ATR-обёртки, OHLCV→frame
+  ×3, volume-histogram (`maps/_volume_histogram` выбрасывает результат
+  `volume_profile_levels` и переделывает то же Python-циклом) — консолидация в
+  spine с пиннинг-тестами.
+- ⬜ **G-28** инверсии границ: deliver→runtime (`telegram.py:927`, нарушает I-2),
+  levels/track→`scanner.detect.delivery_support`,
+  `data/tick_jsonl`→`prizrak.engines.serialize`.
+- ⬜ **G-29** `.to_list()`-циклы → Polars-выражения (`oi.py` join_asof,
+  `snapshot.py`, `prepare_columns.weighted_moving_average`, microstructure rolling).
+- ⬜ **G-30** калибровочная поверхность §5: переезд хардкодов в TOML **без
+  изменения значений** + пиннинг.
 
-### Статус реализации (2026-07-14, ветка push-snapshot)
+### Валидационный долг (не код-дефект — незакрытый gate)
 
-**Внесено и под гейтом** (ruff + mypy + 356 pytest зелёные, 7 новых пиннинг-тестов):
-G-1 (BOS-окно), G-2.1/2.2/2.3 (leverage_weights 4-эл/61.7×, vp_buckets 60, cvd_div_ratio 0.15),
-G-3 (worst_entry_edge флип обеих реализаций + тест — R:R/MFE теперь консервативны),
-G-4 (unconfirmed manip не открывает трекер), G-7 (Pattern A импульс = памп-вверх, метод + тест),
-G-8 (liq_forward_zones), G-9 (imb_1pct), G-11 (fib direction, funding×50, OI-квадранты),
-G-14 (HTF-веса монотонны 0.35/0.30/0.25/0.10 + тест), G-16 (consume_swept реальный диапазон +
-единый cluster_map), G-21 (falsy-zero oi/engine), микроструктурный allowlist (ложный warning).
-G-25 ПОЛНОСТЬЮ: удалены 5 standalone мёртвых модулей + пакет hunt_core/research/ (8 файлов) +
-pyproject-override; entangled-кластеры вырезаны хирургией — pipeline/types.py + мёртвый
-`run_structure_module`/`_resolve_ohlcv` из structure.py (живой `_detect_structure` сохранён),
-regime/regime.py (фасад) + regime/classifier.py (unwired regime-veto, восстановим из git при
-подключении `regime_range_veto_mid_fraction`); regime/__init__ и pipeline/__init__ переписаны.
-Итого удалено 16 файлов, mypy-поверхность 200→190.
+G-3 и G-7 меняют **эмиссию и управление позицией**, а не только представление:
+- G-3 делает R:R-гейты строже (консервативный entry-базис) → сигналов станет
+  меньше; порог `min_rr` — это ручка §5, а не структура: если поток пересохнет,
+  калибруется порог, а не возвращается неверный worst-fill.
+- G-7 меняет, ЧТО именно детектит Pattern A (памп-формация вместо
+  V-восстановления) → состав A-сигналов другой.
 
-**Осознанно НЕ внесено (валидационный долг, требует бэктеста перед доверием числам):**
-- G-3 и G-7 меняют эмиссию/управление — пиннинг-тесты фиксируют КОРРЕКТНОСТЬ, но не «лучше по R»;
-  прогнать `research/backtest_scanner.py` before/after на репрезентативной вселенной ДО доверия
-  абсолютным R (§6). Это единственный оставшийся класс-нефикс: не код-дефект, а gate валидации.
+Пиннинг-тесты доказывают **корректность**, но НЕ «лучше по R». Гейт (§6):
+`research/backtest_scanner.py` before/after на репрезентативной вселенной.
+⚠️ Первый прогон на `dataset_v11` убит по памяти (exit 137) — гонять чанками/
+по-символьно. **До прохождения гейта абсолютным R не доверять.**
 
 ### Не покрыто пофайлово (остаточный долг аудита)
+
 `runtime-services`, `track` (кроме tracker.py close/auto-resolve), `data/*`,
-`diagnostics/*`, `domain/*`, `levels/levels.py`, `signals/*`, `regime/*`,
-`toolkit/*` (кроме targets/forecast), `params/*`, root-файлы (кроме contract.py
-worst_entry_edge) — прошли только точечную проверку; пофайловые карточки —
-следующая итерация аудита.
+`diagnostics/*`, `domain/*`, `levels/levels.py`, `signals/*`,
+`toolkit/*` (кроме targets/forecast), `params/*`, root-файлы (кроме
+`contract.py::worst_entry_edge`) — прошли только точечную проверку; пофайловые
+карточки — следующая итерация аудита.
