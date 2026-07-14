@@ -77,7 +77,14 @@ def _volume_histogram(
     lookback: int | None,
     buckets: int,
 ) -> dict[int, float]:
-    poc, vah, val = volume_profile_levels(work, lookback=lookback, buckets=buckets)
+    """Volume spread evenly across the price buckets each bar spans.
+
+    Was preceded by a full ``volume_profile_levels()`` call whose (poc, vah, val) result
+    was DISCARDED — a dead, expensive pass run for every profile of every symbol, on top
+    of the two live ones. And the histogram itself was then rebuilt with an ``iter_rows``
+    Python loop, re-implementing the Expression-API binning that
+    ``features/volume_profile`` already does. Both gone: same output, one Polars pass.
+    """
     if work.is_empty():
         return {}
     tail = work.tail(lookback) if lookback else work
@@ -88,21 +95,29 @@ def _volume_histogram(
     if price_max <= price_min:
         return {}
     bucket_size = (price_max - price_min) / max(1, buckets)
-    bars = tail.select(
-        pl.col("high").cast(pl.Float64).alias("hi"),
-        pl.col("low").cast(pl.Float64).alias("lo"),
-        pl.col("volume").cast(pl.Float64).fill_null(0.0).alias("vol"),
-    ).filter(pl.col("vol") > 0)
-    hist: dict[int, float] = {}
-    for hi, lo, vol in bars.iter_rows():
-        if hi is None or lo is None or vol <= 0:
-            continue
-        b_lo = max(0, int((min(lo, hi) - price_min) / bucket_size))
-        b_hi = min(buckets - 1, int((max(lo, hi) - price_min) / bucket_size))
-        share = vol / max(1, b_hi - b_lo + 1)
-        for b in range(b_lo, b_hi + 1):
-            hist[b] = hist.get(b, 0.0) + share
-    return hist
+
+    def _bucket(col: str) -> pl.Expr:
+        raw = ((pl.col(col) - price_min) / bucket_size).floor().cast(pl.Int32)
+        return raw.clip(0, buckets - 1)
+
+    hist = (
+        tail.select(
+            pl.col("high").cast(pl.Float64).alias("hi"),
+            pl.col("low").cast(pl.Float64).alias("lo"),
+            pl.col("volume").cast(pl.Float64).fill_null(0.0).alias("vol"),
+        )
+        .drop_nulls(["hi", "lo"])
+        .filter(pl.col("vol") > 0)
+        .with_columns(_bucket("lo").alias("b_lo"), _bucket("hi").alias("b_hi"))
+        .with_columns((pl.col("vol") / (pl.col("b_hi") - pl.col("b_lo") + 1)).alias("share"))
+        .with_columns(pl.int_ranges(pl.col("b_lo"), pl.col("b_hi") + 1).alias("b"))
+        .explode("b")
+        .group_by("b")
+        .agg(pl.col("share").sum().alias("v"))
+    )
+    if hist.is_empty():
+        return {}
+    return dict(zip(hist["b"].to_list(), hist["v"].to_list(), strict=False))
 
 
 def _hvn_lvn_nodes(

@@ -10,17 +10,11 @@ from __future__ import annotations
 import html
 from typing import Any
 
-def _fmt_price(value: float | None) -> str:
-    if value is None:
-        return "—"
-    v = float(value)
-    if abs(v) >= 100:
-        return f"{v:.3f}"
-    if abs(v) >= 1:
-        return f"{v:.4f}"
-    if abs(v) >= 0.01:
-        return f"{v:.5f}"
-    return f"{v:.6f}"
+# Canonical magnitude-adaptive formatter. The local copy that used to live here was the
+# exact defect _labels.fmt_price documents fixing: a flat .3f rendered BTC as 63937.750 —
+# three sub-tick digits of false precision — and made the SAME price render differently
+# depending on which formatter a given line happened to reach.
+from hunt_core.deliver._labels import fmt_price as _fmt_price
 
 
 def _phase_badge(phase: str, confirmed: bool, *, direction: str = "short") -> str:

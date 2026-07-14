@@ -40,15 +40,10 @@ _LONG_STRONG_PHASES = frozenset(
 )
 
 
-def _fmt_price(value: float | None) -> str:
-    if value is None:
-        return "—"
-    v = float(value)
-    if abs(v) >= 100:
-        return f"{v:,.0f}"
-    if abs(v) >= 1:
-        return f"{v:,.2f}"
-    return f"{v:.6f}"
+# Canonical magnitude-adaptive formatter (one price → one rendering, everywhere). The
+# local copy printed >=100 as {:,.0f} — dropping every decimal — so the same level read
+# differently here than in the signal card it refers to.
+from hunt_core.deliver._labels import fmt_price as _fmt_price
 
 
 def _human_probe_error(exc: BaseException) -> str:

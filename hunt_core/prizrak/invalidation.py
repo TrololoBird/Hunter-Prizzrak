@@ -92,9 +92,7 @@ def build_invalidation(
     return conditions
 
 
-def _fmt_price(p: float) -> str:
-    if p >= 1000:
-        return f"{p:,.2f}"
-    if p >= 1:
-        return f"{p:.4f}"
-    return f"{p:.6f}"
+# Canonical magnitude-adaptive formatter (prizrak/format_telegram already imports from
+# deliver._labels, same precedent). The local copy rendered an invalidation level in a
+# different precision than the card that quotes it.
+from hunt_core.deliver._labels import fmt_price as _fmt_price
