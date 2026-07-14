@@ -171,7 +171,17 @@ def _detect_sticky_walls(
                 "distance_pct": round(distance_pct, 3),
             }
         )
-    return sorted(sticky, key=lambda x: x["distance_pct"])[:6]
+    # Keep the biggest wall PER SIDE, not the six NEAREST overall. Sorting by distance
+    # and truncating to 6 meant a cluster of small round-number levels hugging the price
+    # (routine on majors) evicted the genuinely large wall sitting 1.5-3% out — the very
+    # wall WO#6's delivery layer exists to surface, which then had nothing to render.
+    # Delivery re-sorts by notional within ±4%; give it a per-side pool to choose from.
+    out: list[dict[str, Any]] = []
+    for side in ("bid", "ask"):
+        side_walls = [w for w in sticky if w["side"] == side]
+        side_walls.sort(key=lambda w: float(w["notional_usd"]), reverse=True)
+        out.extend(side_walls[:6])
+    return out
 
 
 def _detect_voids(

@@ -564,24 +564,33 @@ def format_liquidity_heatmap_section(row: dict[str, Any]) -> str:
         px = sp.get("price")
         if px is not None:
             lines.append(f"Spoof? {side} @ <code>{_fmt_price(float(px))}</code>")
+    # Both blocks below used to read keys the producers never emit, so they rendered
+    # NOTHING: depth bands keyed on `price` while _depth_heatmap_matrix writes
+    # `price_center`, and voids keyed on `price_lo`/`price_hi`/`direction` while
+    # _detect_voids writes `price_center`/`depth_usd`/`distance_pct`. Read the real keys.
     hot = sorted(
-        [m for m in matrix if isinstance(m, dict) and m.get("price") is not None],
-        key=lambda m: float(m.get("intensity") or m.get("depth") or 0),
+        [m for m in matrix if isinstance(m, dict) and m.get("price_center") is not None],
+        key=lambda m: float(m.get("intensity") or 0),
         reverse=True,
     )[:3]
     if hot:
         bits = [
-            f"{_fmt_price(float(m['price']))} ({float(m.get('intensity') or 0):.0%})"
+            f"{_fmt_price(float(m['price_center']))} ({float(m.get('intensity') or 0):.0%})"
             for m in hot
         ]
         lines.append("Depth bands: " + " · ".join(bits))
+    try:
+        cur_px = float(row.get("price") or 0)
+    except (TypeError, ValueError):
+        cur_px = 0.0
     for v in voids[:1]:
-        if isinstance(v, dict) and v.get("price_lo") is not None:
-            lines.append(
-                f"Void {v.get('direction', '?')}: "
-                f"<code>{_fmt_price(float(v['price_lo']))}</code>–"
-                f"<code>{_fmt_price(float(v.get('price_hi') or v['price_lo']))}</code>"
-            )
+        if not isinstance(v, dict) or v.get("price_center") is None:
+            continue
+        center = float(v["price_center"])
+        arrow = "↑" if cur_px > 0 and center > cur_px else "↓"
+        dist = v.get("distance_pct")
+        tail = f" ({float(dist):.2f}%)" if isinstance(dist, (int, float)) else ""
+        lines.append(f"Разрежение {arrow} <code>{_fmt_price(center)}</code>{tail}")
     return "\n".join(lines) if len(lines) > 1 else ""
 
 

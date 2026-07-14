@@ -253,11 +253,20 @@ def build_map_bundle(
             asks = [(float(x[0]), float(x[1])) for x in raw_asks if len(x) >= 2]
 
     if bids or asks:
+        # Sample DEEP levels into the history (book_deep_top_n, default 50), not just the
+        # top 10. Sticky-wall detection runs off this history, and on a liquid symbol the
+        # top 10 levels sit within a few bps of price — so a wall 1.5-3% out was never
+        # even recorded, and WO#6's "show the deep defended level" had nothing to show.
+        deep_n = max(10, int(cfg.book_deep_top_n))
         store.sample_book(
             symbol,
             {
-                "bid_levels": [{"price": p, "qty": q, "notional_usd": p * q} for p, q in bids[:10]],
-                "ask_levels": [{"price": p, "qty": q, "notional_usd": p * q} for p, q in asks[:10]],
+                "bid_levels": [
+                    {"price": p, "qty": q, "notional_usd": p * q} for p, q in bids[:deep_n]
+                ],
+                "ask_levels": [
+                    {"price": p, "qty": q, "notional_usd": p * q} for p, q in asks[:deep_n]
+                ],
             },
         )
 
