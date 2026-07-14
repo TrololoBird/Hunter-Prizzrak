@@ -712,8 +712,25 @@ def close_signal(
         hi = float(sig.get("entry_hi") or 0)
         mid = (lo + hi) / 2.0 if lo > 0 and hi > 0 else (lo or hi)
         if mid > 0:
-            raw = (exit_price - mid) / mid * 100.0
-            sig["pnl_pct"] = round(raw if direction == "long" else -raw, 2)
+
+            def _leg(px: float) -> float:
+                raw = (px - mid) / mid * 100.0
+                return raw if direction == "long" else -raw
+
+            # Faithful money-management PnL: the method banks a partial at TP1 and moves
+            # the stop to entry (BE), so the runner is what rides on. Marking the WHOLE
+            # position at the exit price (the old behaviour) reported a trade that took
+            # +20% on half and then trailed back to BE as PnL 0.00% — erasing a real gain
+            # and poisoning the outcome ledger / win-rate the calibration reads.
+            tp1 = float(sig.get("tp1") or 0)
+            fixed_pct = float(sig.get("partial_fixed_pct") or 0)
+            if sig.get("tp1_hit") and tp1 > 0 and 0.0 < fixed_pct < 100.0:
+                frac = fixed_pct / 100.0
+                sig["pnl_pct"] = round(frac * _leg(tp1) + (1.0 - frac) * _leg(exit_price), 2)
+                sig["pnl_basis"] = "partial_fix_at_tp1"
+            else:
+                sig["pnl_pct"] = round(_leg(exit_price), 2)
+                sig["pnl_basis"] = "full_position"
     try:
         opened = datetime.fromisoformat(str(sig.get("opened_at")))
         sig["duration_min"] = round((ts - opened).total_seconds() / 60.0, 1)

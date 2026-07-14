@@ -556,6 +556,9 @@ def evaluate_levels(
         latch = {**trk._latched_levels_payload(active), "announced": announced, "tp1": tp1}
         _worst_entry(active, direction=direction)
         fix_pct = int(active.get("partial_fixed_pct") or _tp1_pct(symbol))
+        # Persist the banked fraction on the signal: the close-time PnL must know that
+        # part of the position was already realised at TP1 (see tracker._close).
+        active["partial_fixed_pct"] = fix_pct
         msg_key = f"{k}:tp1"
         if trk._followup_allowed(state, msg_key, now=ts):
             events.append(

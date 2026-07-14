@@ -37,6 +37,10 @@ LOG = logging.getLogger("hunt_core.market.streams")
 
 _MAX_SYMBOL_STREAMS = 100
 _LIQ_BUFFER_MAX = 8_000
+# The primary venue's liquidation tape lives in _force_order_buffer, which
+# liquidation_buffers() exposes under this exact key. Secondary venues get their own
+# buffers — never both, or their events get double-counted (see _record_liquidation).
+_PRIMARY_LIQ_VENUE = "binance"
 _AGG_BUFFER_MAX = 2_000
 _WS_WATCH_TIMEOUT_S: float = 120.0
 _KLINE_INTERVAL = "1m"
@@ -849,12 +853,20 @@ class HuntCcxtStreams:
         ts_ms = int(item.get("timestamp") or info.get("T") or time.time() * 1000)
         if sym and qty > 0:
             ev = (ts_ms, sym, side, qty, price)
-            self._force_order_buffer.append(ev)
-            buf = self._liq_buffers_by_venue.setdefault(
-                venue,
-                collections.deque(maxlen=_LIQ_BUFFER_MAX),
-            )
-            buf.append(ev)
+            # _force_order_buffer IS the "binance" buffer (liquidation_buffers() returns
+            # it under that key). Appending EVERY venue's events to it meant each
+            # secondary liquidation was counted TWICE downstream — once as "binance",
+            # once under its own venue — inflating realized counts and cluster notional,
+            # and mislabelling provenance (a bybit=full event booked as binance=capped_1s).
+            # Only the primary venue's tape belongs here.
+            if venue == _PRIMARY_LIQ_VENUE:
+                self._force_order_buffer.append(ev)
+            else:
+                buf = self._liq_buffers_by_venue.setdefault(
+                    venue,
+                    collections.deque(maxlen=_LIQ_BUFFER_MAX),
+                )
+                buf.append(ev)
             try:
                 from hunt_core.maps.engine import get_map_store
 
