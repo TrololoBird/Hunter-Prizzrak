@@ -239,6 +239,44 @@ def _bucket_events(
 
 
 
+def _leverage_propensity_weights(
+    leverage_tiers: tuple[int, ...],
+    leverage_weights: tuple[float, ...],
+    *,
+    propensity_exp: float = 0.0,
+) -> dict[int, float]:
+    """Per-tier weight = OI-share × liquidation-propensity, mass-preserving.
+
+    The base ``leverage_weights`` encode the OI distribution across leverage
+    (more retail OI at low leverage). But realized liquidations skew to HIGH
+    leverage — Cheng et al. (2021, BitMEX EVT) find the mean effective leverage
+    of liquidated positions ≈ 60×, because a high-leverage position sits far
+    closer to its liquidation price and is hit first on any move. Modelling
+    liquidation propensity ∝ leverage^exp lifts the near-price high-leverage
+    magnets that dominate the realized tape.
+
+    ``propensity_exp=0`` reproduces the pure OI weighting (backward compatible).
+    The factor is renormalized to preserve Σweight, so displayed cluster $-notional
+    keeps its scale — only the RELATIVE distribution across tiers shifts.
+    NB: literature-anchored, Binance-USDⓈ-M-calibration-pending (config-overridable).
+    """
+    asc = sorted(set(int(x) for x in leverage_tiers if x))
+
+    def _base(lev: int) -> float:
+        if not leverage_weights:
+            return 1.0 / lev if lev else 0.0
+        return leverage_weights[min(asc.index(lev), len(leverage_weights) - 1)]
+
+    base = {lev: _base(lev) for lev in asc}
+    if not propensity_exp or not asc:
+        return base
+    raw = {lev: base[lev] * (float(lev) ** propensity_exp) for lev in asc}
+    base_sum = sum(base.values())
+    raw_sum = sum(raw.values()) or 1.0
+    scale = base_sum / raw_sum
+    return {lev: raw[lev] * scale for lev in asc}
+
+
 def entry_anchored_forward_zones(
     oi_bars: list[dict[str, Any]],
     *,
@@ -249,6 +287,7 @@ def entry_anchored_forward_zones(
     maintenance_margin_rates: tuple[float, ...] | None,
     leverage_weights: tuple[float, ...],
     global_ls_ratio: float | None = None,
+    leverage_propensity_exp: float = 0.0,
 ) -> dict[int, dict[str, float]]:
     """Forward squeeze density from ΔOI>0 bars at hlc3 entry anchors."""
     if current_price <= 0 or not oi_bars:
@@ -260,22 +299,19 @@ def entry_anchored_forward_zones(
     if global_ls_ratio is not None and global_ls_ratio > 0:
         long_share = global_ls_ratio / (1.0 + global_ls_ratio)
     cluster_map: dict[int, dict[str, float]] = {}
-    # leverage_weights encode "more OI sits at lower leverage" in ASCENDING-leverage
-    # order (0.35→10×, 0.15→100×). But leverage_tiers can arrive DESCENDING (real
-    # bracket path: leverage_tiers_from_brackets sorts reverse) or with more entries
-    # than there are weights — a positional weights[i % n] then inverts the intent
-    # (0.35 lands on the HIGHEST leverage) and wraps big weights onto the 5th+ tiers.
-    # Assign each tier the weight for its ascending leverage RANK instead, so the
-    # lowest-leverage band always carries the largest share regardless of tier order
-    # or count; extra high-leverage tiers clamp to the smallest weight. Tier↔mmr
-    # pairing (indexed by i) is untouched.
-    _asc_levs = sorted(set(leverage_tiers))
+    # Per-tier weight = OI-share (leverage_weights, by ascending-leverage RANK so it
+    # is robust to DESCENDING/over-long tier tuples — see MAPS-1) × liquidation
+    # propensity (∝ leverage^exp, Cheng et al. 2021). Precomputed once, mass-preserving
+    # so displayed $-notional keeps scale. Tier↔mmr pairing (indexed by i) is untouched.
+    _weight_map = _leverage_propensity_weights(
+        leverage_tiers, leverage_weights, propensity_exp=leverage_propensity_exp
+    )
 
     def _weight_for(lev: int) -> float:
-        if not leverage_weights:
-            return 1.0 / lev
-        rank = _asc_levs.index(lev)
-        return leverage_weights[min(rank, len(leverage_weights) - 1)]
+        w = _weight_map.get(lev)
+        if w is not None:
+            return w
+        return 1.0 / lev if lev else 0.0
 
     prev_oi: float | None = None
     for bar in oi_bars:
@@ -590,6 +626,7 @@ def build_liquidation_map(
             maintenance_margin_rates=mm_rates,
             leverage_weights=cfg.leverage_weights,
             global_ls_ratio=global_ls_ratio,
+            leverage_propensity_exp=cfg.liq_leverage_propensity_exp,
         )
         _consume_swept_levels(
             fwd,
@@ -625,6 +662,7 @@ def build_liquidation_map(
             maintenance_margin_rates=mm_rates,
             leverage_weights=cfg.leverage_weights,
             global_ls_ratio=global_ls_ratio,
+            leverage_propensity_exp=cfg.liq_leverage_propensity_exp,
         )
         heatmap = _build_heatmap_from_map(
             fwd_cluster_map,

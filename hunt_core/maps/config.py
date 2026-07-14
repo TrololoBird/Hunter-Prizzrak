@@ -31,6 +31,13 @@ class MapsConfig:
     forward_blend_ratio: float = 0.35
     forward_confidence_min: float = 0.25
     leverage_weights: tuple[float, ...] = _DEFAULT_LEVERAGE_WEIGHTS
+    # Liquidation-propensity exponent: cluster mass = OI-share × leverage^exp.
+    # Realized liquidations skew to HIGH leverage (Cheng et al. 2021: ~60× mean
+    # effective leverage of liquidated positions), which the pure OI weighting
+    # under-represents. exp=1.0 models propensity ∝ leverage (mass-preserving, so
+    # $-notional scale is kept); exp=0.0 reproduces the old OI-only weighting.
+    # Literature-anchored, Binance-USDⓈ-M-calibration-pending — overridable here.
+    liq_leverage_propensity_exp: float = 1.0
     vp_periods: tuple[str, ...] = _DEFAULT_VP_PERIODS
     # 24→60: display "Карта уровней" POC/VAH/VAL at trader-grade resolution (see prizrak
     # config vp_buckets note — 24 buckets is ~$150/bucket on BTC, too coarse to be useful).
@@ -92,6 +99,10 @@ class MapsConfig:
             ),
             forward_confidence_min=float(section.get("forward_confidence_min", 0.25)),
             leverage_weights=lev,
+            liq_leverage_propensity_exp=_env_float(
+                "HUNT_MAPS_LIQ_PROPENSITY_EXP",
+                section.get("liq_leverage_propensity_exp", 1.0),
+            ),
             vp_periods=periods,
             vp_buckets=int(section.get("vp_buckets", 60)),
             vp_value_area_pct=float(section.get("vp_value_area_pct", 0.70)),
