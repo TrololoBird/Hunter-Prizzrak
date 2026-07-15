@@ -54,6 +54,9 @@ include = ["hunt_core*"]
 target-version = "py314"
 line-length = 100
 exclude = [".git", ".venv", "_archive", "build", "dist", ".vulture_whitelist.py"]
+# Honour `exclude` even when a path is passed explicitly (pre-commit passes files by
+# name, which would otherwise bypass the exclude and lint .vulture_whitelist.py).
+force-exclude = true
 
 [tool.ruff.lint]
 # Hunt uses lazy imports and scan split globals().update() facades.
@@ -85,6 +88,7 @@ ignore_errors = true
 
 [dependency-groups]
 dev = [
+    "pre-commit>=4.6.0",
     "pytest-testmon>=2.2.0",
     "pytest-xdist>=3.8.0",
     "vulture>=2.16",
