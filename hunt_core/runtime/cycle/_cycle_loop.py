@@ -333,7 +333,6 @@ async def run_loop(
     last_bias: dict[str, str] = {}
     last_lifecycle_phase: dict[str, str] = {}
     symbol_state = new_session_state()
-    from hunt_core.data.universe import PINNED_SYMBOLS
 
     manipulation_task: asyncio.Task[None] | None = None
     if not once:
@@ -634,7 +633,6 @@ async def run_loop(
                 pump_stats_by_sym = {
                     sym: st.to_public() for sym, st in pump_store.symbols.items()
                 }
-                prescan_pinned_ready: set[str] = set()
                 if once:
                     merged = list(dict.fromkeys(s.upper() for s in cli_symbols))
                     mode_map = {
@@ -703,14 +701,10 @@ async def run_loop(
                             merged=len(prescan_to_merge),
                             cap=prescan_merge_cap,
                         )
-                    prescan_pinned_ready = set()
                     for d in prescan_to_merge:
                         s = d.symbol.upper()
                         if s not in merged:
                             merged.append(s)
-                        energy = float(getattr(d, "energy", 0) or 0)
-                        if s in PINNED_SYMBOLS and energy >= 20.0:
-                            prescan_pinned_ready.add(s)
                         mode_map.setdefault(
                             s, "short" if d.direction in {"dump", "bear"} else "long"
                         )

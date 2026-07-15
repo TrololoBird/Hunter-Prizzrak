@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from hunt_core import clock
@@ -56,7 +56,7 @@ def _settle_snapshot_results(
     results: Sequence[Any],
     *,
     now_iso: str,
-    tier: str,
+    tier_for: Callable[[str], SnapshotTier],
 ) -> list[tuple[str, dict[str, Any]]]:
     """Convert asyncio.gather(return_exceptions=True) output into (sym, row) pairs.
 
@@ -76,7 +76,7 @@ def _settle_snapshot_results(
                 "symbol": sym,
                 "error": repr(res),
                 "tick_path": "rest_error",
-                "snapshot_tier": tier,
+                "snapshot_tier": tier_for(sym),
             }))
         else:
             pairs.append(res)
@@ -132,9 +132,7 @@ async def run_tick(
 
     _load_state = _tick_impl._load_state
     _save_state = _tick_impl._save_state
-    _phase_long = _tick_impl._phase_long
     _overlay_ws_tickers = _tick_impl._overlay_ws_tickers
-    _refresh_live_price = _tick_impl._refresh_live_price
     HUNT_SNAPSHOT_PARALLEL = _tick_impl.HUNT_SNAPSHOT_PARALLEL
     SYMBOL_TICK_TIMEOUT_S = _tick_impl.SYMBOL_TICK_TIMEOUT_S
     state = _load_state()
@@ -250,7 +248,7 @@ async def run_tick(
                     "symbol": sym,
                     "error": "symbol_tick_timeout",
                     "tick_path": "rest_error",
-                    "snapshot_tier": tier,
+                    "snapshot_tier": sym_tier,
                 }
             except defensive_exc_types(asyncio.IncompleteReadError) as exc:
                 LOG.warning("dump_symbol_failed", symbol=sym, error=repr(exc))
@@ -259,7 +257,7 @@ async def run_tick(
                     "symbol": sym,
                     "error": repr(exc),
                     "tick_path": "rest_error",
-                    "snapshot_tier": tier,
+                    "snapshot_tier": sym_tier,
                 }
 
         sem = asyncio.Semaphore(parallel)
@@ -276,7 +274,7 @@ async def run_tick(
         raw_results = await asyncio.gather(
             *[_bounded_snapshot(s) for s in ordered], return_exceptions=True
         )
-        snap_pairs = _settle_snapshot_results(ordered, raw_results, now_iso=now.isoformat(), tier=tier)
+        snap_pairs = _settle_snapshot_results(ordered, raw_results, now_iso=now.isoformat(), tier_for=_tier_for)
         row_by_sym = dict(snap_pairs)
         snap_elapsed = round(time.monotonic() - tick_started, 2)
         if len(ordered) > 1:

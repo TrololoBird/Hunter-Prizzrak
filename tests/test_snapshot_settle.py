@@ -22,7 +22,7 @@ def test_one_failure_does_not_drop_others() -> None:
         ValueError("polars boom"),  # unhandled exception for ETH
         ("SOLUSDT", {"symbol": "SOLUSDT", "price": 2.0}),
     ]
-    pairs = _settle_snapshot_results(ordered, results, now_iso="T", tier="fast")
+    pairs = _settle_snapshot_results(ordered, results, now_iso="T", tier_for=lambda _s: "fast")
     by_sym = dict(pairs)
     assert by_sym["BTCUSDT"]["price"] == 1.0            # survivor kept
     assert by_sym["SOLUSDT"]["price"] == 2.0            # survivor kept
@@ -34,10 +34,10 @@ def test_cancellation_propagates() -> None:
     ordered = ["BTCUSDT"]
     results = [asyncio.CancelledError()]
     with pytest.raises(asyncio.CancelledError):
-        _settle_snapshot_results(ordered, results, now_iso="T", tier="fast")
+        _settle_snapshot_results(ordered, results, now_iso="T", tier_for=lambda _s: "fast")
 
 
 def test_all_success_passthrough() -> None:
     ordered = ["BTCUSDT"]
     results = [("BTCUSDT", {"symbol": "BTCUSDT"})]
-    assert _settle_snapshot_results(ordered, results, now_iso="T", tier="full") == results
+    assert _settle_snapshot_results(ordered, results, now_iso="T", tier_for=lambda _s: "full") == results

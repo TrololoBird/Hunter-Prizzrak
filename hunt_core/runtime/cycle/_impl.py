@@ -13,13 +13,12 @@ from hunt_core.domain.config import SYMBOL_TICK_TIMEOUT_S
 
 logger = structlog.get_logger(__name__)
 
-from hunt_core.market import HuntCcxtStreams, apply_live_price_to_row
+from hunt_core.market import HuntCcxtStreams
 
 from hunt_core.data.lake import (
     buffer_cooldown_state,
 )
 from hunt_core.runtime.state import (
-    LOG,
     SNIPER_CONFIG,
     STATE_PATH,
 )
@@ -61,34 +60,6 @@ def _overlay_ws_tickers(
         base = dict(base)
         base["last_price"] = last
         ticker_by_sym[sym] = base
-
-
-def _refresh_live_price(
-    row: dict[str, Any],
-    *,
-    ws_feed: HuntCcxtStreams | None,
-    symbol: str,
-) -> float:
-    prev = float(row.get("price") or 0)
-    px = apply_live_price_to_row(row, ws_feed=ws_feed)
-    delta = row.get("price_stale_delta_pct")
-    if delta is not None and abs(float(delta)) >= 0.05:
-        LOG.info(
-            "live_price_refresh",
-            symbol=symbol,
-            price=px,
-            prev=prev,
-            delta_pct=delta,
-            source=row.get("price_source"),
-        )
-    return px
-
-
-
-
-
-def _phase_long(long_setup: dict[str, Any], confirmed: bool, *, symbol: str = "") -> str:
-    return str(long_setup.get("phase") or ("pre_pump" if confirmed else "neutral"))
 
 
 def _load_state() -> dict[str, str]:

@@ -32,21 +32,6 @@ def record_outcome_ledger(
             delivered=delivered,
         )
         append_ledger_event(record, path=ledger_path_for_lane(setup=setup, row=row))
-        if not delivered:
-            from hunt_core.track.shadow import (
-                append_shadow_reject,
-                shadow_record_from_delivery,
-            )
-
-            append_shadow_reject(
-                shadow_record_from_delivery(
-                    symbol=symbol,
-                    direction=direction,
-                    row=row,
-                    setup=setup,
-                    blockers=blockers,
-                )
-            )
     except Exception as exc:
         LOG.warning(
             "outcome_ledger_failed | symbol=%s direction=%s event=%s error=%s",

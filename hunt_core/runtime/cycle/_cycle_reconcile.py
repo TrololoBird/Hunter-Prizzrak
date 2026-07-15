@@ -4,10 +4,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from hunt_core import clock
 from hunt_core.data.collect import safe_fetch
 from hunt_core.data.lake import buffer_tracker_state
-from hunt_core.deliver.telegram import TelegramBroadcaster
 from hunt_core.market import HuntCcxtClient
 from hunt_core.runtime.state import LOG
 from hunt_core.track.events import append_signal_event
@@ -129,23 +127,6 @@ async def _reconcile_orphan_signals(
     return events
 
 
-def _duration_str(opened: str) -> str:
-    """Human-readable duration from ISO opened_at to now."""
-    try:
-        from datetime import UTC, datetime
-        start = datetime.fromisoformat(opened.replace(" ", "T"))
-        if start.tzinfo is None:
-            start = start.replace(tzinfo=UTC)
-        delta = clock.now_utc() - start
-        total_m = int(delta.total_seconds() // 60)
-        h, m = divmod(total_m, 60)
-        if h > 0:
-            return f"{h}ч {m}м"
-        return f"{m}м"
-    except Exception:
-        return "—"
-
-
 async def _deliver_followup(
     broadcaster: Any,
     fu: Any,
@@ -236,29 +217,6 @@ def _split_telegram(text: str, *, limit: int = 3900) -> list[str]:
     return _split_telegram_text(text, limit=limit)
 
 
-async def _send_telegram_chunks(
-    broadcaster: TelegramBroadcaster,
-    text: str,
-    *,
-    log_key: str,
-) -> bool:
-    ok = True
-    for idx, part in enumerate(_split_telegram(text)):
-        result = await broadcaster.send_html(part)
-        if result.status != "sent":
-            LOG.warning(
-                f"{log_key}_failed",
-                part=idx + 1,
-                status=result.status,
-                reason=result.reason,
-            )
-            ok = False
-        else:
-            LOG.info(f"{log_key}_sent", part=idx + 1, message_id=result.message_id)
-    return ok
-
-
-
 __all__ = [
     "INWATCH_KLINE_RECONCILE_SECONDS",
     "ORPHAN_RECONCILE_MINUTES",
@@ -266,6 +224,5 @@ __all__ = [
     "_reconcile_inwatch_active",
     "_reconcile_orphan_signals",
     "_record_followup_side_effects",
-    "_send_telegram_chunks",
     "_split_telegram",
 ]
