@@ -28,6 +28,8 @@ uv run pytest                 # tests
   never `createOrder`, `fetchBalance`, `fetchPositions`, `withdraw`, …
 
 ## Skills
-Project skills at `.opencode/skills/<topic>/SKILL.md` (11 files).
+Project skills at `.claude/skills/<topic>/SKILL.md` (15 files: architecture, ccxt,
+config, deep-analysis, documentation, ingest-manipulation-video, logging, performance,
+polars, prohibited-api-scan, razbor-video, scanner, smoke, telegram, testing).
 CCXT Python skill at `~/.claude/skills/ccxt-python/SKILL.md`.
 Full project context in `AGENTS.md`.

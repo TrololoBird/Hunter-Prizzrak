@@ -186,47 +186,6 @@ def supertrend_series(
     )
 
 
-if False:
-    import random
-
-    def _debug_scalar_wilder_mean(
-        series: pl.Series,
-        *,
-        period: int,
-        name: str,
-        seed_offset: int = 0,
-    ) -> pl.Series:
-        size = len(series)
-        period = max(1, int(period))
-        values = [finite_float(value) for value in series.to_list()]
-        output: list[float | None] = [None] * size
-        seed_end = int(seed_offset) + period
-        if size < seed_end:
-            return pl.Series(name, output, dtype=pl.Float64)
-        average = sum(values[seed_offset:seed_end]) / period
-        output[seed_end - 1] = average
-        for idx in range(seed_end, size):
-            average = ((average * (period - 1)) + values[idx]) / period
-            output[idx] = average
-        return pl.Series(name, output, dtype=pl.Float64)
-
-    random.seed(42)
-    _debug_values = [100.0 + random.gauss(0.0, 1.0) for _ in range(100)]
-    _debug_series = pl.Series("close", _debug_values)
-    _debug_expected = _debug_scalar_wilder_mean(
-        _debug_series,
-        period=14,
-        name="expected",
-    )
-    _debug_actual = wilder_mean(_debug_series, period=14, name="actual")
-    _debug_diffs = [
-        abs(float(expected) - float(actual))
-        for expected, actual in zip(_debug_expected, _debug_actual, strict=False)
-        if expected is not None and actual is not None
-    ]
-    assert max(_debug_diffs) < 1e-10
-
-
 def true_range(df: pl.DataFrame, *, name: str = "true_range") -> pl.Series:
     ensure_columns(df, REQUIRED_OHLCV_COLUMNS, fn_name="true_range")
     high = df["high"].cast(pl.Float64, strict=False)

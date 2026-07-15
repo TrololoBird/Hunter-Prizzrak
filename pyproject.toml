@@ -53,7 +53,7 @@ include = ["hunt_core*"]
 [tool.ruff]
 target-version = "py314"
 line-length = 100
-exclude = [".git", ".venv", "_archive", "build", "dist"]
+exclude = [".git", ".venv", "_archive", "build", "dist", ".vulture_whitelist.py"]
 
 [tool.ruff.lint]
 # Hunt uses lazy imports and scan split globals().update() facades.
@@ -82,3 +82,17 @@ exclude = ["_archive", "build", "dist"]
 [[tool.mypy.overrides]]
 module = ["hunt_core.toolkit.*"]
 ignore_errors = true
+
+[dependency-groups]
+dev = [
+    "pytest-testmon>=2.2.0",
+    "pytest-xdist>=3.8.0",
+    "vulture>=2.16",
+]
+
+[tool.vulture]
+# Dead-code guard (the project's I-6 defect class). min_confidence=80 keeps it
+# signal-only (conf 60 = 396 mostly-false hits); .vulture_whitelist.py suppresses
+# the reviewed intentional cases (signature-contract params).
+min_confidence = 80
+paths = ["hunt_core", ".vulture_whitelist.py"]

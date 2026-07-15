@@ -36,3 +36,6 @@ research/dataset_active_version.txt
 # Local review artifacts
 crypto_hunter_library_review.md
 compass_artifact_*.md
+
+# pytest-testmon local state
+.testmondata
