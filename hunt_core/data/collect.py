@@ -783,15 +783,12 @@ def ws_orderflow_fresh(ws_snap: dict[str, Any] | None, *, max_age_s: float = 45.
 def sort_symbols_for_tick(
     symbols: tuple[str, ...],
     *,
-    ignition_by_sym: dict[str, Any] | None,
     last_bias: dict[str, str],
 ) -> tuple[str, ...]:
-    """Ignited / short-bias symbols first."""
+    """Short-bias symbols first."""
 
     def _rank(sym: str) -> tuple[int, str]:
         score = 0
-        if ignition_by_sym and sym in ignition_by_sym:
-            score += 200
         bias = last_bias.get(sym, "")
         if bias == "short":
             score += 80

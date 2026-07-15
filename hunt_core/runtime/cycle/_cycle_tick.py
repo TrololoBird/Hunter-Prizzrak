@@ -114,7 +114,6 @@ async def run_tick(
     broadcaster: TelegramBroadcaster | None,
     send_telegram: bool,
     ticker_by_sym: dict[str, dict[str, Any]] | None = None,
-    ignition_by_sym: dict[str, dict[str, Any]] | None = None,
     pump_stats_by_sym: dict[str, dict[str, Any]] | None = None,
     pump_store: Any | None = None,
     ws_feed: HuntCcxtStreams | None = None,
@@ -198,7 +197,6 @@ async def run_tick(
 
         ordered = sort_symbols_for_tick(
             symbols,
-            ignition_by_sym=ignition_by_sym,
             last_bias=last_bias,
         )
         if tier == "fast":
@@ -367,9 +365,6 @@ async def run_tick(
                     if mtf is not None:
                         row["mtf"] = mtf
                 rows.append(row)
-                if ignition_by_sym and symbol in ignition_by_sym:
-                    row["ignited"] = True
-                    row["ignition"] = ignition_by_sym[symbol]
                 if prescan_outlier_by_sym and symbol in prescan_outlier_by_sym:
                     row["prescan_outlier"] = prescan_outlier_by_sym[symbol]
                 if pump_stats_by_sym and symbol in pump_stats_by_sym:

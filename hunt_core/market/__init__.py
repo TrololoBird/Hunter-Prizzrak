@@ -30,7 +30,6 @@ from hunt_core.market.cross import (
 )
 from hunt_core.market.live_price import apply_live_price_to_row, resolve_live_price
 from hunt_core.market.symbol_gate import (
-    gate_symbol_dict_keys,
     gate_symbol_list,
     is_allowed_for_analysis,
 )
@@ -70,7 +69,6 @@ __all__ = [
     "apply_live_price_to_row",
     "resolve_live_price",
     "normalize_depth_levels",
-    "gate_symbol_dict_keys",
     "gate_symbol_list",
     "is_allowed_for_analysis",
 ]

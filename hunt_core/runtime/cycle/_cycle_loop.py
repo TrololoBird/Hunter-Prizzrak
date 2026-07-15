@@ -41,7 +41,6 @@ from hunt_core.market import (
     apply_cross_exchange_env,
     create_hunt_market_plane_from_settings,
     fetch_secondary_ticker_overlay,
-    gate_symbol_dict_keys,
     gate_symbol_list,
     load_cross_exchange_config,
     refresh_cross_exchange_cache,
@@ -545,12 +544,7 @@ async def run_loop(
                     timeout=120.0,
                 ) or []
                 ticker_by_sym = {str(t.get("symbol")): t for t in ticker_raw if t.get("symbol")}
-                ignition_by_sym: dict[str, Any] = {}
                 ex = client.exchange
-
-                ignition_by_sym = gate_symbol_dict_keys(
-                    ignition_by_sym, exchange=ex, label="ignition"
-                )
                 # P1.6: prescan outliers feed an internal debounce queue, NOT
                 # Telegram. Ready (debounced) symbols merge into the watch universe.
                 gated_ticker_rows = [
@@ -650,7 +644,6 @@ async def run_loop(
                     full_symbols, mode_map = resolve_watch_universe(
                         settings,
                         static_modes=SYMBOL_WATCH_MODES,
-                        ignited=ignition_by_sym,
                     )
                     merged = list(full_symbols)
                     for sym in cli_symbols:
@@ -760,7 +753,6 @@ async def run_loop(
                 hunt_active = tuple(active)
                 load_plan = load_planner.plan_tick(
                     hunt_active,
-                    ignited=set(ignition_by_sym.keys()),
                     interval_s=float(interval_s),
                 )
                 if load_plan.dropped_symbols:
@@ -791,7 +783,7 @@ async def run_loop(
                 _overlay_ws_tickers(ticker_by_sym, active, ws_feed)
                 ws_feed.set_symbols(
                     list(active),
-                    priority=list(ignition_by_sym.keys()) + list(cli_symbols),
+                    priority=list(cli_symbols),
                 )
                 ws_n = min(len(active), 24) + 1
                 if ws_feed.kline_ws_enabled:
@@ -800,7 +792,6 @@ async def run_loop(
                     "watch_universe",
                     symbols=len(hunt_active),
                     ws_symbols=len(active),
-                    ignited=len(ignition_by_sym),
                     ws_streams=ws_n,
                     kline_ws=ws_feed.kline_ws_enabled,
                     kline_interval="1m",
@@ -844,7 +835,6 @@ async def run_loop(
                     "broadcaster": broadcaster,
                     "send_telegram": send_telegram,
                     "ticker_by_sym": ticker_by_sym,
-                    "ignition_by_sym": ignition_by_sym,
                     "pump_stats_by_sym": pump_stats_by_sym,
                     "pump_store": pump_store,
                     "ws_feed": ws_feed,
