@@ -305,9 +305,10 @@ def _format_active_block(
     realert_blockers = [
         b for b in extra if b.code not in {"not_confirmed"} or not sig.get("tp1_hit")
     ]
-    if primary is not None and primary.ok:
-        lines.append("✅ <b>Re-alert</b> сейчас прошёл бы")
-    elif realert_blockers:
+    # (removed: the "✅ Re-alert прошёл бы" positive line gated on primary.ok, which is
+    # structurally always False on this report path — it never rendered. G-42. The blocker
+    # explanation below is the live branch; `primary` is still used for `secondary` above.)
+    if realert_blockers:
         lines.append(
             f"<i>Новый вход (re-alert): {html.escape(realert_blockers[0].message)}</i>"
         )

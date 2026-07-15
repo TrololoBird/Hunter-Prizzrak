@@ -27,12 +27,12 @@ _BG_REFRESH_TASKS: set[Any] = set()
 @dataclass(frozen=True, slots=True)
 class DirectionQuery:
     direction: Literal["short", "long"]
-    confirmed: bool
+    confirmed: bool  # always False since the fusion delivery engine was removed
     formation: GateResult
     blockers: tuple[GateResult, ...]
-    delivery_gate: GateResult | None
-    delivery_tier: Any | None
-    would_deliver: bool
+    # (removed dead delivery machinery delivery_gate/delivery_tier/would_deliver — the
+    # fusion detection engine is gone, so they were permanent None/None/False and only
+    # read by unreachable branches — G-41.)
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,17 +122,11 @@ def _evaluate_direction(
             fast_lane=from_store,
         )
     )
-    delivery_gate: GateResult | None = None
-    delivery_tier: Any | None = None
-    would_deliver = False
     return DirectionQuery(
         direction=direction,
         confirmed=confirmed,
         formation=formation,
         blockers=tuple(blockers),
-        delivery_gate=delivery_gate,
-        delivery_tier=delivery_tier,
-        would_deliver=would_deliver,
     )
 
 
@@ -243,28 +237,6 @@ async def resolve_query_row(
     return row, source, from_store, age_s
 
 
-def _format_blockers_section(dq: DirectionQuery) -> list[str]:
-    lines: list[str] = []
-
-    if dq.confirmed:
-        dir_ru = "ШОРТ" if dq.direction == "short" else "ЛОНГ"
-        if dq.would_deliver:
-            tier = getattr(dq.delivery_tier, "tier", None) or (
-                dq.delivery_tier.get("tier")
-                if isinstance(dq.delivery_tier, dict)
-                else None
-            )
-            tier_txt = f" · tier <code>{html.escape(str(tier))}</code>" if tier else ""
-            lines.append(f"✅ Delivery {dir_ru}: прошёл бы{tier_txt}")
-        elif dq.delivery_gate is not None:
-            g = dq.delivery_gate
-            lines.append(
-                f"🚫 Delivery {dir_ru}: "
-                f"<code>{html.escape(g.code or 'gate')}</code>"
-            )
-    return lines
-
-
 def format_query_telegram(q: QueryResult, *, added_watch: bool = False) -> str:
     """Analyst-first /signal — analysis/structure/MTF/maps; hunt scan collapsed footer."""
     from hunt_core.prizrak.build import build_deep_report as _build_deep_report
@@ -296,24 +268,19 @@ def format_query_telegram(q: QueryResult, *, added_watch: bool = False) -> str:
         from hunt_core.runtime.tick_state import hunt_scan_store
         opposite_dir = "long" if q.focus_direction == "short" else "short"
         dir_ru = "ЛОНГ" if opposite_dir == "long" else "ШОРТ"
-        opposite_q = q.long if opposite_dir == "long" else q.short
         scan_row = hunt_scan_store().get(q.symbol)
         scan_has_setup = False
         if isinstance(scan_row, dict):
             scan_setup = scan_row.get("dump" if opposite_dir == "short" else "long") or {}
             scan_has_setup = bool(scan_setup.get("impulse_confirmed") or scan_setup.get("intrabar_confirmed"))
-        if opposite_q.would_deliver:
-            alt_label = "можно войти"
-        elif opposite_q.confirmed:
-            alt_label = "сетап есть"
-        elif scan_has_setup:
+        # (removed dead 'можно войти'/'сетап есть' branches — opposite_q.would_deliver /
+        # .confirmed are permanently False since the fusion engine was removed, and
+        # _format_blockers_section always returned [] — G-41.)
+        if scan_has_setup:
             alt_label = "сетап в сканере (раннее обнаружение)"
         else:
             alt_label = "нет сетапа"
-        opp_lines = _format_blockers_section(opposite_q)
-        if opp_lines:
-            parts.extend(["", "—", f"🔄 <b>Альтернатива: {dir_ru}</b> — {alt_label}", *opp_lines])
-        elif alt_label != "нет сетапа":
+        if alt_label != "нет сетапа":
             parts.extend(["", "—", f"🔄 <b>Альтернатива: {dir_ru}</b> — {alt_label}"])
 
     # Scanner section (always shown; independent from analyst verdict)
