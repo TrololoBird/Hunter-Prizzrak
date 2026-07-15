@@ -109,6 +109,16 @@ def apply_quality_gates(
     if not sym:
         return False, "missing_symbol"
 
+    # Crypto-only universe: Binance USDⓈ-M now lists tokenized equities (BABA, COIN,
+    # MSTR, HOOD, GOOGL, PLTR…), commodities (NATGAS), index and pre-market perps.
+    # The manipulation method is a crypto pump/dump edge — equities gap on market
+    # hours and track an underlying, so they must never enter the scan universe.
+    # underlyingType is stamped on the ticker row by fetch_ticker_24h; absent/unknown
+    # fails open (treated as crypto) so an API shape change can't empty the universe.
+    underlying = str(row.get("underlying_type") or "").upper()
+    if underlying and underlying != "COIN":
+        return False, "non_coin_underlying"
+
     qvol = _safe_float(row.get("quote_volume") or row.get("quoteVolume"), 0.0) or 0.0
     if qvol < cfg.min_quote_volume_usd:
         return False, "low_quote_volume"

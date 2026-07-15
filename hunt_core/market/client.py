@@ -29,6 +29,7 @@ from hunt_core.market.network import mask_proxy_url
 from hunt_core.market.factory import ccxt_ohlcv_to_frame, finalize_kline_frame
 from hunt_core.market.symbols import (
     is_linear_usdt_swap_market,
+    underlying_type_of,
     resolve_linear_usdt_swap,
     to_binance_symbol,
     to_ccxt_symbol,
@@ -576,6 +577,10 @@ class HuntCcxtClient:
                 "price_change_percent": _safe_float(item.get("percentage")),
                 "quote_volume": quote_volume,
                 "trade_count": _safe_float(item.get("info", {}).get("count")),
+                # Asset class from exchangeInfo so the scanner gate can drop tokenized
+                # equities/commodities (COIN = real crypto). Kept on the row — not
+                # filtered here — so /signal and pinned metals still get their ticker.
+                "underlying_type": underlying_type_of(self._ex.markets.get(ccxt_sym)),
             }
             high = _safe_float(item.get("high"))
             low = _safe_float(item.get("low"))

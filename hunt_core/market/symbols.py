@@ -20,6 +20,32 @@ def is_linear_usdt_swap_market(market: Any) -> bool:
     return str(market.get("type") or "") in {"swap", "future"}
 
 
+def underlying_type_of(market: Any) -> str:
+    """Binance ``underlyingType`` for a CCXT market row (COIN | EQUITY | COMMODITY | …).
+
+    Binance USDⓈ-M now lists tokenized equities, commodities, index and pre-market
+    perps alongside real crypto. exchangeInfo tags each: crypto is ``COIN``; the rest
+    are ``EQUITY`` (BABA, COIN, MSTR…), ``COMMODITY`` (NATGAS, XAU/XAG), ``INDEX``,
+    ``KR_EQUITY``, ``PREMARKET``. Empty string when unknown (older market rows).
+    """
+    if not isinstance(market, dict):
+        return ""
+    info = market.get("info")
+    info = info if isinstance(info, dict) else {}
+    return str(info.get("underlyingType") or "").upper()
+
+
+def is_crypto_underlying(market: Any) -> bool:
+    """True only for real-crypto perps (``underlyingType == COIN``).
+
+    Unknown/absent type is treated as crypto (fail-open) so an exchangeInfo shape
+    change never silently empties the scanner universe — the explicit non-COIN classes
+    (EQUITY/COMMODITY/INDEX/…) are what we exclude.
+    """
+    ut = underlying_type_of(market)
+    return ut in {"", "COIN"}
+
+
 class SymbolResolutionError(LookupError):
     """Symbol cannot be resolved against loaded CCXT markets."""
 
