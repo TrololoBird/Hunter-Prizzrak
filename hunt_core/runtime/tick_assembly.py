@@ -96,9 +96,8 @@ def _apply_dump_confirm_sticky(
         store.confirm_sticky.pop(sym, None)
         if not confirmed:
             return confirmed, confirm_hard
-    if getattr(lifecycle, "invalidate_short", False):
-        store.confirm_sticky.pop(sym, None)
-        return confirmed, confirm_hard
+    # (removed: `invalidate_short` lifecycle flag has no producer anywhere — the branch
+    # was dead, G-69.)
     if confirmed:
         if setup.get("levels_viable") is False or setup.get("levels_veto"):
             return False, ["veto_levels:" + ",".join(setup.get("levels_veto") or ["not_viable"])]

@@ -276,44 +276,10 @@ def evaluate_followups(
             events.append(stale_fu)
             continue
 
-        # 2) Lifecycle invalidation (bounce for shorts / exhaustion for longs).
-        bounce_invalidate = bool(lifecycle.get("invalidate_short")) and direction == "short"
-        if bounce_invalidate:
-            tr = tracker_thresholds(symbol)
-            bounce_grace = float(tr.get("bounce_invalidate_grace_min", 15.0))
-            entry_hi = float(active.get("entry_hi") or 0)
-            age_min = trk._signal_age_min(active, ts)
-            # PLAYUSDT: +2.9% wick in 2m while still below entry_hi — not a reclaim.
-            if age_min < bounce_grace or (entry_hi > 0 and price <= entry_hi):
-                bounce_invalidate = False
-        if bounce_invalidate:
-            trk.close_signal(
-                state, symbol=symbol, direction=direction,
-                reason="bounce_invalidate", exit_price=price, now=ts,
-            )
-            msg_key = f"{k}:invalidate"
-            if trk._followup_allowed(state, msg_key, now=ts):
-                events.append(
-                    trk.HuntFollowUp(
-                        event="invalidate",
-                        symbol=symbol,
-                        direction=direction,
-                        message_key=msg_key,
-                        detail=f"lifecycle={lc_phase}",
-                        price=price,
-                        payload={
-                            **trk._latched_levels_payload(active),
-                            "announced": announced,
-                            "reason": "bounce_invalidate",
-                            "phase": lc_phase,
-                            **trk._followup_trade_metrics(
-                                active, direction=direction, price=price, ts=ts
-                            ),
-                        },
-                    )
-                )
-
-        elif (
+        # 2) Lifecycle invalidation — trend exhaustion for longs. The short
+        # bounce-invalidate arm was dead code: lifecycle["invalidate_short"] has no
+        # producer anywhere, so bounce_invalidate was always False (G-69, deleted).
+        if (
             direction == "long"
             and lc_phase
             in {

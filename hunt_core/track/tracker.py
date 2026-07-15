@@ -74,8 +74,9 @@ _LEVEL_REACTION_ATR_MULT = 1.5
 # H-A "sniper" hold-to-target exit (Gate G2, edge-validated 2026-06-12): on the live
 # short slice the soft `lifecycle_stale` close forfeits winners — backtest on
 # dump_active short (n=37) shows 19% SL / 43% reach TP2 when held to target/SL.
-# So in sniper mode short positions ride to SL/TP (evaluate_levels) and structural
-# invalidation (invalidate_short); the soft lifecycle_stale timeout is suppressed.
+# So in sniper mode short positions ride to SL/TP (evaluate_levels); the soft
+# lifecycle_stale timeout is suppressed. (The old bounce `invalidate_short` arm was
+# dead — no producer — and was removed, G-69.)
 # The unit-tested `_stale_lifecycle_invalidate` itself is unchanged — gated at call site.
 SNIPER_HOLD_TO_TARGET = os.environ.get("HUNT_SNIPER_MODE", "1") not in {"0", "false", "False"}
 HUNT_EXIT_V2 = os.environ.get("HUNT_EXIT_V2", "").strip().lower() in {"1", "true", "yes"}
