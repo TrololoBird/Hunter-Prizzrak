@@ -315,8 +315,13 @@ async def probe_symbol_signal(
                             cross_vp=(cx.get("volume_profile_1h") if isinstance(cx, dict) else None),
                             oi_bars=oi_bars if isinstance(oi_bars, list) else None,
                             oi_usd=float(market.get("oi_usd") or 0) or None,
-                            global_ls_ratio=float(market.get("top_ls_1h") or market.get("global_ls_1h") or 0)
+                            # GLOBAL account ratio must come first; top-trader L/S is a
+                            # different population (mirrors tick_assembly.py — the pinned
+                            # /signal path had them inverted, so forward-zone long_share
+                            # reflected top accounts while labelled global).
+                            global_ls_ratio=float(market.get("global_ls_1h") or market.get("top_ls_1h") or 0)
                             or None,
+                            top_ls_ratio=float(market.get("top_ls_1h") or 0) or None,
                             deep_bids=deep_bids,
                             deep_asks=deep_asks,
                             store=store,

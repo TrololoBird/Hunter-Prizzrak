@@ -23,7 +23,6 @@ from hunt_core.scanner.detect.state import load_scanner_state, save_scanner_stat
 from hunt_core.track._cooldowns import (
     global_confirm_burst_cap_reached,
     recent_stop_hit_cooldown,
-    record_confirm_burst,
     symbol_daily_tg_cap_reached,
     symbol_loss_streak_cooldown,
     symbol_repeat_loser_blocked,
@@ -624,9 +623,10 @@ async def deliver_manipulation_setups(
             except Exception:
                 _LOG.exception("manipulation_tracker_register_failed sym=%s", symbol)
 
-            # Track the burst window only AFTER a real send (failed sends must not
-            # count toward the global burst cap). MUTATES tracker_state["confirm_burst_ts"].
-            record_confirm_burst(tracker_state, now=now_dt)
+            # NB: the burst window is recorded ONCE inside register_signal_open
+            # (tracker.py) — matching the main lane. A second record_confirm_burst here
+            # double-counted every confirmed manip signal, tripping the burst cap of 2
+            # after a single ping.
 
         results.append({"symbol": symbol, "direction": setup.direction, "message_id": message_id,
                          "pattern_type": setup.pattern_type, "score": setup.score})

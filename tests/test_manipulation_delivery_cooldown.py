@@ -55,7 +55,11 @@ async def _run(
 ):
     """Drive deliver_manipulation_setups with stubbed collaborators.
 
-    Returns (results, saved_state_dict_or_None, record_burst_mock, register_mock).
+    Returns (results, saved_state_dict_or_None, register_mock).
+
+    NB: the confirm-burst is recorded INSIDE register_signal_open now (G-67), so
+    register_mock being called == the burst being recorded — there is no separate
+    record_confirm_burst call in manipulation_delivery to patch.
     """
     symbol = "COINUSDT"
     ohlcv_by_tf = {"1d": [[0, 100, 100, 100, 100, 1.0]]}
@@ -70,7 +74,6 @@ async def _run(
     sent.message_id = 123
 
     saved_holder = {}
-    burst_mock = MagicMock()
     has_active = MagicMock(return_value=False)
     register_mock = MagicMock()
 
@@ -91,8 +94,7 @@ async def _run(
          patch.object(md, "save_scanner_state", lambda st, p: saved_holder.update(st)), \
          patch.object(md, "send_lane_html", fake_send), \
          patch.object(md, "has_active_signal", has_active), \
-         patch.object(md, "register_signal_open", register_mock), \
-         patch.object(md, "record_confirm_burst", burst_mock):
+         patch.object(md, "register_signal_open", register_mock):
         gate_patches = []
         if gate_overrides:
             for name, ret in gate_overrides.items():
@@ -108,20 +110,20 @@ async def _run(
                 gp.stop()
 
     saved = saved_holder if saved_holder else None
-    return results, saved, burst_mock, register_mock
+    return results, saved, register_mock
 
 
 def test_bug1_burst_cap_skips_delivery_with_tracker():
     now = datetime.now(timezone.utc)
     tracker_state = {"confirm_burst_ts": [now.isoformat(), now.isoformat()]}  # 2 recent -> cap reached
-    results, saved, burst, _ = asyncio.run(_run(tracker_state=tracker_state))
+    results, saved, _ = asyncio.run(_run(tracker_state=tracker_state))
     assert results == []  # delivery skipped
     assert saved is None  # state NOT committed (pattern stays armed for retry)
 
 
 def test_bug1_repeat_loser_gate_skips_delivery():
     tracker_state = {"closed_history": []}  # chronic loser -> blocked
-    results, saved, _, _ = asyncio.run(
+    results, saved, _ = asyncio.run(
         _run(tracker_state=tracker_state, gate_overrides={"symbol_repeat_loser_blocked": True})
     )
     assert results == []
@@ -130,31 +132,31 @@ def test_bug1_repeat_loser_gate_skips_delivery():
 
 def test_bug1_no_gate_when_tracker_none():
     # Without a tracker, BUG-1 gates must NOT fire; delivery proceeds and state commits.
-    results, saved, _, _ = asyncio.run(_run(tracker_state=None))
+    results, saved, _ = asyncio.run(_run(tracker_state=None))
     assert len(results) == 1
     assert saved is not None and saved.get("COINUSDT") == {"reset": True}
 
 
 def test_bug2_success_commits_reset_state_after_send():
     tracker_state = {"closed_history": [], "confirm_burst_ts": []}
-    results, saved, burst, register = asyncio.run(_run(tracker_state=tracker_state))
+    results, saved, register = asyncio.run(_run(tracker_state=tracker_state))
     assert len(results) == 1
     # State reset committed only AFTER successful send:
     assert saved is not None and saved.get("COINUSDT") == {"reset": True}
-    # Burst recorded only on real send:
-    burst.assert_called_once()
+    # Tracker registered once on real send — which is where the burst is recorded now (G-67):
+    register.assert_called_once()
 
 
 def test_bug2_tg_failure_preserves_prior_state_for_retry():
     tracker_state = {"closed_history": [], "confirm_burst_ts": []}
-    results, saved, burst, register = asyncio.run(
+    results, saved, register = asyncio.run(
         _run(tracker_state=tracker_state, send_raises=True)
     )
     assert results == []  # nothing delivered
     # Critical: state was NOT committed, so scanner_states[symbol] stays == prior_state
     # and the still-armed pattern retries next cycle instead of being lost.
     assert saved is None
-    burst.assert_not_called()
+    # register (and therefore the confirm-burst inside it) never fires on a failed send:
     register.assert_not_called()
 
 

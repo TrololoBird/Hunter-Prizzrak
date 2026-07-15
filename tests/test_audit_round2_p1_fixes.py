@@ -1,0 +1,58 @@
+"""Pinning tests for the round-2 P1 correctness fixes (G-45, G-67, G-70)."""
+from __future__ import annotations
+
+from pathlib import Path
+
+from hunt_core.track._trailing import apply_tp1_breakeven_trail
+
+_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_g70_breakeven_stop_clamped_to_favorable_extreme_short() -> None:
+    # Short, TP1 only 0.5% below entry → the 1% min buffer would place entry-buf (99.0)
+    # BELOW the best price reached (extreme_lo=99.4), overstating the runner's locked
+    # profit. The clamp must pin the stop at the realized extreme, not beyond it.
+    active = {
+        "entry_lo": 100.0, "entry_hi": 100.0, "tp1": 99.5,
+        "stop_loss": 99.7, "extreme_lo": 99.4, "extreme_hi": 100.0,
+    }
+    ok = apply_tp1_breakeven_trail(active, direction="short", symbol="", row=None)
+    assert ok is True
+    assert active["stop_loss"] == 99.4  # clamped to extreme_lo, NOT 99.0
+
+
+def test_g70_no_clamp_when_extreme_is_further_than_buffer_short() -> None:
+    # Price ran well past TP1 (extreme_lo=98.0) → entry-buf (99.0) is above the extreme,
+    # so the clamp does not bite and the normal breakeven stop stands.
+    active = {
+        "entry_lo": 100.0, "entry_hi": 100.0, "tp1": 99.5,
+        "stop_loss": 99.7, "extreme_lo": 98.0, "extreme_hi": 100.0,
+    }
+    ok = apply_tp1_breakeven_trail(active, direction="short", symbol="", row=None)
+    assert ok is True
+    assert active["stop_loss"] == 99.0  # entry - 1% buffer, unclamped
+
+
+def test_g70_breakeven_stop_clamped_long() -> None:
+    active = {
+        "entry_lo": 100.0, "entry_hi": 100.0, "tp1": 100.5,
+        "stop_loss": 100.3, "extreme_lo": 100.0, "extreme_hi": 100.6,
+    }
+    ok = apply_tp1_breakeven_trail(active, direction="long", symbol="", row=None)
+    assert ok is True
+    assert active["stop_loss"] == 100.6  # clamped to extreme_hi, NOT 101.0
+
+
+def test_g67_manipulation_delivery_does_not_double_record_burst() -> None:
+    # register_signal_open records the confirm-burst once (tracker.py); the redundant
+    # second call in manipulation_delivery was removed. Guard against its return.
+    src = (_ROOT / "hunt_core/deliver/manipulation_delivery.py").read_text()
+    assert "record_confirm_burst(" not in src
+
+
+def test_g45_pinned_signal_prefers_global_ls_over_top() -> None:
+    # The pinned /signal map bundle must read global_ls_1h FIRST (top-trader L/S is a
+    # different population). Guard against re-inverting the fallback order.
+    src = (_ROOT / "hunt_core/runtime/symbol_probe.py").read_text()
+    assert 'market.get("global_ls_1h") or market.get("top_ls_1h")' in src
+    assert 'market.get("top_ls_1h") or market.get("global_ls_1h")' not in src

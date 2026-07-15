@@ -172,11 +172,17 @@ def apply_tp1_breakeven_trail(
     buf = max(buf, entry * (min_buf_pct / 100.0))
     cur = float(active.get("stop_loss") or 0)
     if direction == "short":
-        new_stop = round(entry - buf, 6)
+        # Clamp to the realized favorable extreme: when TP1 sits closer than the
+        # min-buffer floor (~1%), entry-buf could land BELOW the lowest price reached,
+        # placing the runner stop beyond the best and stopping it out at an over-stated
+        # profit. Never lock more than price actually gave.
+        ext_lo = float(active.get("extreme_lo") or entry)
+        new_stop = round(max(entry - buf, ext_lo), 6)
         if new_stop >= entry or (cur > 0 and new_stop >= cur):
             return False
     else:
-        new_stop = round(entry + buf, 6)
+        ext_hi = float(active.get("extreme_hi") or entry)
+        new_stop = round(min(entry + buf, ext_hi), 6)
         if new_stop <= entry or (cur > 0 and new_stop <= cur):
             return False
     active["stop_loss"] = new_stop
