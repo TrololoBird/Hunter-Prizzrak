@@ -56,3 +56,23 @@ def test_g45_pinned_signal_prefers_global_ls_over_top() -> None:
     src = (_ROOT / "hunt_core/runtime/symbol_probe.py").read_text()
     assert 'market.get("global_ls_1h") or market.get("top_ls_1h")' in src
     assert 'market.get("top_ls_1h") or market.get("global_ls_1h")' not in src
+
+
+def test_g43_g44_stats_filters_match_real_funnel_events() -> None:
+    # The funnel producer (track/events.py) emits event="funnel_<stage>". The stats
+    # filters must use those names — the old {prep,start,imminent}/"confirmed" matched
+    # no producer, so the sections were always empty/zero.
+    src = (_ROOT / "hunt_core/runtime/stats_report.py").read_text()
+    assert '== "funnel_deliver"' in src  # G-43 confirmed-count
+    assert '"funnel_prescan"' in src and '"funnel_dump_initiation"' in src  # G-44 early
+    assert '{"prep", "start", "imminent"}' not in src
+    assert 'ev.get("event") == "confirmed"' not in src
+
+
+def test_g71_dead_pre_gate_fields_removed() -> None:
+    # pre_gate is never written; pre_gate_open/energy were constant + read by nobody.
+    from hunt_core.track.outcome_ledger import build_authority_snapshot
+
+    row = build_authority_snapshot(setup={}, row={}, blockers=None, delivered=False)
+    assert "pre_gate_open" not in row
+    assert "pre_gate_energy" not in row

@@ -105,13 +105,19 @@ def _format_tg_funnel(*, signals: dict[str, Any]) -> str:
         ][-400:]
         for ln in reversed(lines):
             ev = json.loads(ln)
-            if ev.get("event") not in {"prep", "start", "imminent"}:
+            # Real early funnel stages (record_funnel_stage writes event="funnel_<stage>");
+            # the old {prep,start,imminent} set matched no producer, so this section
+            # never rendered. See track/events.py::FUNNEL_STAGES.
+            if ev.get("event") not in {
+                "funnel_prescan", "funnel_lifecycle", "funnel_armed", "funnel_dump_initiation",
+            }:
                 continue
             sym = html.escape(str(ev.get("symbol", "?")).replace("USDT", "-USDT"))
             detail = html.escape(str(ev.get("detail") or "")[:72])
+            stage = html.escape(str(ev.get("event", "")).replace("funnel_", ""))
             recent_early.append(
                 f"· {sym} <code>{ev.get('direction', '?')}</code> "
-                f"<code>{ev.get('event')}</code> — {detail}"
+                f"<code>{stage}</code> — {detail}"
             )
             if len(recent_early) >= 6:
                 break
@@ -268,7 +274,9 @@ def _confirmed_events_count() -> int:
             ev = json.loads(ln)
         except json.JSONDecodeError:
             continue
-        if ev.get("event") == "confirmed":
+        # "funnel_deliver" is the delivered stage the funnel producer actually emits;
+        # the old "confirmed" matched no producer, so this counter was always 0.
+        if ev.get("event") == "funnel_deliver":
             n += 1
     return n
 

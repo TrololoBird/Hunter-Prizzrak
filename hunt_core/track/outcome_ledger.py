@@ -58,16 +58,15 @@ def build_authority_snapshot(
     mission_pass = not _any_prefix(codes, _MISSION_BLOCK_PREFIXES)
     rr_pass = not _any_prefix(codes, _RR_BLOCK_PREFIXES)
     contract_pass = not _any_prefix(codes, _CONTRACT_BLOCK_PREFIXES)
-    _pre_gate = s.get("pre_gate")
-    pre_gate = _pre_gate if isinstance(_pre_gate, dict) else {}
+    # G-71: `pre_gate` is never written to the setup and pre_gate_open/pre_gate_energy
+    # are read by nobody — they were constant False/0 (flat calibration signal). Dropped
+    # rather than wired to a phantom; reviving pre-gate telemetry is a separate change.
 
     return {
         "fusion_gate_open": fusion_gate_open,
         "fusion_score": s.get("fusion_score") or mf.get("primary_score"),
         "phase_fusion": lc.get("phase_fusion") or lc.get("phase") or s.get("phase"),
         "signal_type": s.get("signal_type", "none"),
-        "pre_gate_open": pre_gate.get("open", False),
-        "pre_gate_energy": pre_gate.get("energy_hits", 0),
         "playbook_pass_ok": playbook_pass if req_n is not None else True,
         "mission_pass": mission_pass,
         "rr_pass": rr_pass,
