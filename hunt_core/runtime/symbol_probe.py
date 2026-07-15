@@ -530,6 +530,10 @@ async def deliver_signal_probe(
         if friendly is not None:
             # Lead with the plain explanation; keep the raw code small for power users/logs.
             body = f"{friendly}\n<i>({html.escape(raw_err)})</i>"
+        elif row.get("detail"):
+            # e.g. probe_throttled carries its explicit retry-in message in `detail`;
+            # without this the user saw only the bare code (G-40).
+            body = f"{html.escape(str(row['detail']))}\n<i>({html.escape(raw_err)})</i>"
         else:
             body = f"<code>{html.escape(raw_err)}</code>"
         await broadcaster.send_html(
