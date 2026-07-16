@@ -6,7 +6,7 @@ from __future__ import annotations
 import html
 import json
 from collections import defaultdict
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 
 import polars as pl
@@ -15,7 +15,7 @@ from hunt_core.deliver.telegram import TelegramBroadcaster
 
 from hunt_core.regime.market_regime import active_params
 from hunt_core.params.store import effective_hunt_params
-from hunt_core.paths import DATA, MARKET_REGIME, SIGNAL_EVENTS, TELEGRAM_COOLDOWN
+from hunt_core.paths import MARKET_REGIME, SIGNAL_EVENTS, TELEGRAM_COOLDOWN
 from hunt_core.track.tracker import load_tracker_state
 from hunt_core.track.outcomes import (
     LEGACY_UNKNOWN,
@@ -23,8 +23,6 @@ from hunt_core.track.outcomes import (
     is_polluted,
     outcome_kind,
 )
-
-TG_BACKTEST_PATH = DATA / "session" / "tg_backtest_report.json"
 
 _WIN_REASONS = frozenset({"tp1", "tp2", "fix_profit_tp1", "fix_profit_tp2"})
 _STOP_REASONS = frozenset({"stop_hit"})
@@ -84,11 +82,9 @@ def _format_tg_funnel(*, signals: dict[str, Any]) -> str:
     if TELEGRAM_COOLDOWN.is_file():
         tg = json.loads(TELEGRAM_COOLDOWN.read_text(encoding="utf-8"))
 
-    early_n = sum(1 for k in tg if k.startswith("early:"))
-    squeeze_n = sum(1 for k in tg if k.endswith(":squeeze"))
-    confirm_cd = sum(
-        1 for k in tg if ":" in k and not k.startswith("early") and not k.endswith(":squeeze")
-    )
+    # xchan Telegram cooldowns only — ":lake_bar" keys are feature-lake bar
+    # bookkeeping stored in the same file, not delivery cooldowns (G-57).
+    confirm_cd = sum(1 for k in tg if ":" in k and not k.endswith(":lake_bar"))
     tracked_tg = sum(
         1 for v in signals.values() if isinstance(v, dict) and v.get("telegram_sent")
     )
@@ -125,7 +121,6 @@ def _format_tg_funnel(*, signals: dict[str, Any]) -> str:
     lines = [
         "<b>TG воронка</b> (watch loop, не /signals):",
         (
-            f"early prep/start <code>{early_n}</code> · squeeze <code>{squeeze_n}</code> · "
             f"confirm cooldown <code>{confirm_cd}</code> · "
             f"tracker TG <code>{tracked_tg}</code> · closed <code>{closed_n}</code>"
         ),
@@ -225,37 +220,6 @@ def _regime_block() -> str:
     )
 
 
-def _backtest_snippet() -> str | None:
-    if not TG_BACKTEST_PATH.is_file():
-        return None
-    try:
-        rep = json.loads(TG_BACKTEST_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    gen = rep.get("generated_at") or rep.get("ts")
-    if gen:
-        try:
-            dt = datetime.fromisoformat(str(gen).replace("Z", "+00:00"))
-            if datetime.now(UTC) - dt > timedelta(hours=24):
-                return None
-        except ValueError:
-            pass
-    co = rep.get("confirmed_outcomes") or {}
-    if isinstance(co, dict) and co:
-        w = int(co.get("win", 0))
-        l = int(co.get("loss", 0))
-        f = int(co.get("flat", 0))
-        return f"<b>TG backtest (&lt;24h):</b> confirm {w}W/{l}L/{f}F"
-    summary = rep.get("summary") or rep
-    confirmed = summary.get("confirmed") or summary.get("by_kind", {}).get("confirmed") or {}
-    if isinstance(confirmed, dict) and confirmed:
-        w = int(confirmed.get("win", confirmed.get("wins", 0)) or 0)
-        losses_n = confirmed.get("loss", confirmed.get("losses", 0))
-        flats = confirmed.get("flat", 0)
-        return f"<b>TG backtest (&lt;24h):</b> win {w} · loss {losses_n} · flat {flats}"
-    return None
-
-
 def _confirmed_events_count() -> int:
     # A trailing-N-lines slice systematically undercounts a minority event type
     # when the stream is dominated by a much more common one — here "blocked"
@@ -331,7 +295,6 @@ def build_stats_report_text() -> str:
     med_dur = durs[len(durs) // 2] if durs else 0.0
 
     cw, cl, cs = _closed_stats(signals)
-    reset_at = state.get("baseline_reset_at")
     blocks: list[str] = [
         f"📊 <b>/stats</b> · {datetime.now(UTC).strftime('%H:%M')} UTC",
         (
@@ -351,10 +314,6 @@ def build_stats_report_text() -> str:
         _regime_block(),
         f"<b>signal_events confirmed:</b> <code>{_confirmed_events_count()}</code>",
     ]
-    if reset_at:
-        blocks.append(
-            f"<i>Baseline с <code>{str(reset_at)[:16]}</code> UTC — старые outcomes в archive/</i>"
-        )
     sf = _score_floor_block(labeled)
     if sf:
         blocks.append(sf)
@@ -371,9 +330,6 @@ def build_stats_report_text() -> str:
             )
         blocks.append("\n".join(lines))
     blocks.append(_format_tg_funnel(signals=signals))
-    bt = _backtest_snippet()
-    if bt:
-        blocks.append(bt)
     blocks.append("<i>Hunt stats · read-only · не auto-trade</i>")
     return "\n\n".join(blocks)
 

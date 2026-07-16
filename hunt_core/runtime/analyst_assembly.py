@@ -18,9 +18,6 @@ from hunt_core.runtime.emitter import SignalEmitter
 
 LOG = structlog.get_logger("hunt.analyst_assembly")
 
-_STALE_HOURS_DEFAULT = 4.0
-
-
 def analyst_pinned_interval_s() -> float:
     return float(os.getenv("HUNT_DEEP_PINNED_INTERVAL", "300") or 300)
 
@@ -31,10 +28,6 @@ def deep_tg_on_change() -> bool:
         "false",
         "no",
     }
-
-
-def deep_tg_stale_hours() -> float:
-    return float(os.getenv("HUNT_DEEP_TG_STALE_HOURS", str(_STALE_HOURS_DEFAULT)) or _STALE_HOURS_DEFAULT)
 
 
 def append_deep_tick_jsonl(row: dict[str, Any]) -> None:
@@ -51,9 +44,8 @@ def material_deep_change(
     row: dict[str, Any],
     *,
     prev: dict[str, Any] | None,
-    now: datetime | None = None,
 ) -> bool:
-    """True when verdict action changed — telemetry only (TG uses lifecycle spine)."""
+    """True when verdict action/path changed — telemetry only (TG uses lifecycle spine)."""
     _ = symbol
     if prev is None:
         return True
@@ -63,19 +55,7 @@ def material_deep_change(
     summary = _s if isinstance(_s, dict) else {}
     if str(prev_summary.get("action") or "wait") != str(summary.get("action") or "wait"):
         return True
-    if str(prev_summary.get("path") or "") != str(summary.get("path") or ""):
-        return True
-    now = now or datetime.now(UTC)
-    ts = row.get("ts") or prev.get("ts")
-    try:
-        dt = datetime.fromisoformat(str(ts))
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=UTC)
-        age_h = (now - dt).total_seconds() / 3600.0
-        return age_h >= deep_tg_stale_hours()
-    except (TypeError, ValueError):
-        LOG.warning("material_deep_change_ts_parse_failed", symbol=symbol, ts=ts)
-        return False
+    return str(prev_summary.get("path") or "") != str(summary.get("path") or "")
 
 
 async def assemble_analyst_tick(
@@ -244,7 +224,6 @@ async def assemble_analyst_tick(
     row["_analyst"] = True
     row["tick_path"] = "analyst_assembly"
 
-    from datetime import UTC, datetime
 
     now = datetime.now(UTC)
     row["as_of"] = now.isoformat()
@@ -378,7 +357,7 @@ async def send_analyst_change_telegram(
         _summ2 = row.get("prizrak_summary")
         summary = _summ2 if isinstance(_summ2, dict) else {}
         rr = summary.get("rr_primary")
-        rr_label = summary.get("rr_base_label") or "R:R (от входа)"
+        rr_label = "R:R (от входа)"
         blocks.append(
             f"✅ <b>Активация</b> · {html.escape(sym_label)} · "
             f"{html.escape(rr_label)} <code>{rr}</code>"

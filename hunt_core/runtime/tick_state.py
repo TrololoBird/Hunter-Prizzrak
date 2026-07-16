@@ -31,10 +31,6 @@ class _TickStoreBase:
         row = self._rows.get(sym)
         return dict(row) if isinstance(row, dict) else None
 
-    def all_rows(self) -> list[dict[str, Any]]:
-        """Snapshot of every cached row (used by universe scans)."""
-        return [dict(r) for r in self._rows.values() if isinstance(r, dict)]
-
     def tail_jsonl(self, symbol: str, *, path: Path | None = None) -> dict[str, Any] | None:
         sym = str(symbol or "").upper()
         candidates = [path] if path is not None else [self._jsonl_path]
@@ -98,37 +94,6 @@ class LastTickStore:
     def __init__(self) -> None:
         self.hunt = HuntScanStore()
         self.deep = DeepQueryStore()
-
-    def put_hunt(self, symbol: str, row: dict[str, Any]) -> None:
-        work = dict(row)
-        work.setdefault("plane", "hunt")
-        self.hunt.put(symbol, work)
-
-    def put_deep(self, symbol: str, row: dict[str, Any]) -> None:
-        work = dict(row)
-        work["plane"] = "deep"
-        self.deep.put(symbol, work)
-
-    def put(self, symbol: str, row: dict[str, Any]) -> None:
-        plane = str(row.get("plane") or "hunt")
-        if plane == "deep":
-            self.put_deep(symbol, row)
-        else:
-            self.put_hunt(symbol, row)
-
-    def put_many(self, rows: list[dict[str, Any]]) -> None:
-        for row in rows:
-            sym = str(row.get("symbol") or "").upper()
-            if sym:
-                self.put(sym, row)
-
-    def get(self, symbol: str) -> dict[str, Any] | None:
-        from hunt_core.data.universe import PINNED_SYMBOLS
-
-        sym = symbol.upper()
-        if sym in PINNED_SYMBOLS:
-            return self.deep.get(sym)
-        return self.hunt.get(sym) or self.deep.get(sym)
 
     def resolve(self, symbol: str, *, jsonl_fallback: bool = True) -> dict[str, Any] | None:
         from hunt_core.data.universe import PINNED_SYMBOLS

@@ -15,7 +15,6 @@ from hunt_core.market.client import HuntCcxtClient
 
 STORE_FRESH_S = 180.0
 STORE_STALE_S = 600.0
-_HOT_TICK_PATHS = frozenset({"hot_ws", "hot_bootstrap", "hot_delta", "hot_carry"})
 _MAX_BLOCKERS_SHOWN = 5
 # Strong references to fire-and-forget background refresh tasks. asyncio keeps
 # only a WEAK reference to a bare create_task result, so without this the task
@@ -71,12 +70,6 @@ def _pick_focus(row: dict[str, Any]) -> Literal["short", "long"]:
             return "short"
         if action == "long":
             return "long"
-    dump = row.get("dump") or {}
-    long_setup = row.get("long") or {}
-    if dump.get("impulse_confirmed") and not long_setup.get("impulse_confirmed"):
-        return "short"
-    if long_setup.get("impulse_confirmed") and not dump.get("impulse_confirmed"):
-        return "long"
     return "short"
 
 
@@ -272,7 +265,7 @@ def format_query_telegram(q: QueryResult, *, added_watch: bool = False) -> str:
         scan_has_setup = False
         if isinstance(scan_row, dict):
             scan_setup = scan_row.get("dump" if opposite_dir == "short" else "long") or {}
-            scan_has_setup = bool(scan_setup.get("impulse_confirmed") or scan_setup.get("intrabar_confirmed"))
+            scan_has_setup = bool(scan_setup.get("impulse_confirmed"))
         # (removed dead 'можно войти'/'сетап есть' branches — opposite_q.would_deliver /
         # .confirmed are permanently False since the fusion engine was removed, and
         # _format_blockers_section always returned [] — G-41.)

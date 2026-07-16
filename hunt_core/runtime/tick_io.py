@@ -40,16 +40,20 @@ def rotate_hunt_ticks(*, retention_days: int = RETENTION_DAYS, dry_run: bool = F
         return stats
 
     if daily.exists():
-        with source.open(encoding="utf-8") as src, daily.open("a", encoding="utf-8") as dst:
-            for line in src:
-                dst.write(line)
-                stats["appended_lines"] += 1
+        if dry_run:
+            with source.open(encoding="utf-8") as src:
+                stats["appended_lines"] = sum(1 for _ in src)
+        else:
+            with source.open(encoding="utf-8") as src, daily.open("a", encoding="utf-8") as dst:
+                for line in src:
+                    dst.write(line)
+                    stats["appended_lines"] += 1
     else:
         if not dry_run:
             shutil.move(str(source), str(daily))
         stats["archived"] = 1
 
-    if not dry_run and source == HUNT_SCAN_JSONL:
+    if not dry_run:
         HUNT_SCAN_JSONL.write_text("", encoding="utf-8")
 
     cutoff = datetime.now(UTC) - timedelta(days=retention_days)

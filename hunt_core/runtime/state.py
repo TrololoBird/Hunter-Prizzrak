@@ -58,7 +58,6 @@ class SymbolSession:
     last_phase: str | None = None
     phase_history: list[dict[str, str]] = field(default_factory=list)
     ws_liq_min_5m: float | None = None
-    ws_agg_min_30s: float | None = None
     updated_at: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -90,7 +89,6 @@ def load_session(symbol: str, *, root: Path = SESSION_DIR) -> SymbolSession | No
         last_phase=raw.get("last_phase"),
         phase_history=list(raw.get("phase_history") or []),
         ws_liq_min_5m=raw.get("ws_liq_min_5m"),
-        ws_agg_min_30s=raw.get("ws_agg_min_30s"),
         updated_at=str(raw.get("updated_at") or ""),
     )
 
@@ -126,7 +124,7 @@ def merge_hunt_extremes(
     lifecycle_phase: str,
     market: dict[str, Any] | None = None,
     now: datetime | None = None,
-) -> tuple[float, float, dict[str, Any]]:
+) -> tuple[float, float]:
     """Blend REST impulse window with rolling session peaks (48h TTL)."""
     ts = now or clock.now_utc()
     sym = symbol.upper()
@@ -177,21 +175,9 @@ def merge_hunt_extremes(
     if liq is not None:
         v = float(liq)
         sess.ws_liq_min_5m = v if sess.ws_liq_min_5m is None else min(sess.ws_liq_min_5m, v)
-    agg = mkt.get("agg_trade_delta_30s")
-    if agg is not None:
-        v = float(agg)
-        sess.ws_agg_min_30s = v if sess.ws_agg_min_30s is None else min(sess.ws_agg_min_30s, v)
 
     save_session(sess)
-    meta = {
-        "session_hunt_high": round(sess.hunt_high, 6),
-        "session_hunt_low": round(sess.hunt_low, 6),
-        "phase_changes_2h": len(sess.phase_history),
-        "ws_liq_min_5m": sess.ws_liq_min_5m,
-        "rest_hunt_high": round(rest_hunt_high, 6),
-        "merged": True,
-    }
-    return round(rh, 6), round(rl, 6) if rl > 0 else round(rest_hunt_low, 6), meta
+    return round(rh, 6), round(rl, 6) if rl > 0 else round(rest_hunt_low, 6)
 
 
 # --- Per-session / per-symbol mutable detect+gate state ---

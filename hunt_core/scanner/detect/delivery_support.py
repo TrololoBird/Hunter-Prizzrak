@@ -124,15 +124,6 @@ def collect_report_blockers(setup: dict[str, Any] | None = None, **_k: Any) -> l
     return []
 
 
-def primary_block_for_report(setup: dict[str, Any] | None = None, **_k: Any) -> GateResult | None:
-    blockers = collect_report_blockers(setup)
-    return blockers[0] if blockers else None
-
-
-def evaluate_stale_advice(*_a: Any, **_k: Any) -> str | None:
-    return None
-
-
 __all__ = [
     "BOUNCE_MIN_RISK_REWARD",
     "GateResult",
@@ -145,10 +136,8 @@ __all__ = [
     "effective_min_rr_for_delivery",
     "evaluate_alert_gate",
     "evaluate_formation",
-    "evaluate_stale_advice",
     "liquidity_skip_reason",
     "mission_delivery_block",
     "price_in_entry_zone",
-    "primary_block_for_report",
     "run_gate_pipeline",
 ]

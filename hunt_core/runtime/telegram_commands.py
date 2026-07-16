@@ -35,14 +35,12 @@ class HuntTelegramCommands:
         self,
         token: str,
         *,
-        allowed_chat_ids: frozenset[int],
         allowed_user_ids: frozenset[int],
         poll_timeout: int = 25,
         proxy_url: str | None = None,
         client: Any = None,
     ) -> None:
         self._token = token
-        self._allowed_chat_ids = allowed_chat_ids
         self._allowed_user_ids = allowed_user_ids
         self._poll_timeout = poll_timeout
         self._proxy_url = proxy_url
@@ -202,16 +200,12 @@ class HuntTelegramCommands:
             )
             return
         await self._run_signal_probe(chat_id, sym, live)
-        pending = self._pending_signal
-        self._pending_signal = None
-        if pending is not None:
+        # Drain until empty: a request queued WHILE the previous queued probe was
+        # running used to be silently dropped (the one-shot drain never re-checked).
+        while (pending := self._pending_signal) is not None:
+            self._pending_signal = None
             p_chat_id, p_sym, p_live = pending
-            task = asyncio.create_task(
-                self._run_signal_probe(p_chat_id, p_sym, p_live),
-                name=f"hunt_tg_signal_queued:{p_sym}",
-            )
-            self._dispatch_tasks.add(task)
-            task.add_done_callback(self._dispatch_tasks.discard)
+            await self._run_signal_probe(p_chat_id, p_sym, p_live)
 
     async def _run_signal_probe(self, chat_id: int, sym: str, live: bool) -> None:
         async with self._probe_lock:
@@ -409,18 +403,9 @@ def build_hunt_telegram_commands(
     if not token:
         return None
     secrets = load_secrets()
-    chat_ids: set[int] = set()
-    for raw_chat in (settings.target_chat_id, secrets.target_chat_id):
-        if not raw_chat:
-            continue
-        try:
-            chat_ids.add(int(raw_chat))
-        except (TypeError, ValueError):
-            continue
     user_ids = {int(x) for x in (secrets.operator_user_ids or ())}
     return HuntTelegramCommands(
         token,
-        allowed_chat_ids=frozenset(chat_ids),
         allowed_user_ids=frozenset(user_ids),
         proxy_url=proxy_url,
         client=client,

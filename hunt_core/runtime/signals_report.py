@@ -21,8 +21,6 @@ from hunt_core.data.universe import load_watchlist_symbols
 from hunt_core.scanner.detect.delivery_support import (
     collect_report_blockers,
     evaluate_alert_gate,
-    evaluate_stale_advice,
-    primary_block_for_report,
 )
 from hunt_core.paths import WATCHLIST
 from hunt_core.runtime.symbol_probe import normalize_symbol, probe_symbol_signal
@@ -38,6 +36,14 @@ _STRONG_PHASES = frozenset(
 _LONG_STRONG_PHASES = frozenset(
     {"recovery", "impulse_active", "impulse_initiating", "breakout_arming"}
 )
+
+# Gate codes (scanner/detect/delivery_support.py REPORT_BLOCK_PRIORITY) → readable
+# Russian — raw snake_case tokens must not leak into the re-alert line (G-54).
+_REALERT_BLOCK_LABELS: dict[str, str] = {
+    "not_confirmed": "сетап ещё не подтверждён",
+    "below_calibrated_gate": "score ниже калиброванного порога",
+    "cold_start": "мало статистики (cold start)",
+}
 
 
 # Canonical magnitude-adaptive formatter (one price → one rendering, everywhere). The
@@ -242,15 +248,8 @@ def _format_active_block(
     price = float(row.get("price") or 0)
     pnl = _pnl_pct(sig, direction, price)
 
-    primary = primary_block_for_report(
-        setup, direction=direction, symbol=sym, lifecycle=lc, row=row
-    )
     extra = collect_report_blockers(
         setup, direction=direction, symbol=sym, lifecycle=lc, row=row
-    )
-    secondary = [b for b in extra if b.code != primary.code][:2] if primary else extra[:2]
-    advice = evaluate_stale_advice(
-        symbol=sym, direction=direction, lifecycle=lc, setup=setup, sig=sig
     )
 
     sym_label = html.escape(sym.replace("USDT", "-USDT"))
@@ -306,17 +305,11 @@ def _format_active_block(
         b for b in extra if b.code not in {"not_confirmed"} or not sig.get("tp1_hit")
     ]
     # (removed: the "✅ Re-alert прошёл бы" positive line gated on primary.ok, which is
-    # structurally always False on this report path — it never rendered. G-42. The blocker
-    # explanation below is the live branch; `primary` is still used for `secondary` above.)
+    # structurally always False on this report path — it never rendered. G-42.)
     if realert_blockers:
-        lines.append(
-            f"<i>Новый вход (re-alert): {html.escape(realert_blockers[0].message)}</i>"
-        )
-    if advice:
-        lines.append(html.escape(advice))
-    if secondary:
-        more = "; ".join(b.message for b in secondary)
-        lines.append(f"<i>Ещё: {html.escape(more)}</i>")
+        block = realert_blockers[0]
+        label = _REALERT_BLOCK_LABELS.get(block.code) or block.message
+        lines.append(f"<i>Новый вход (re-alert): {html.escape(label)}</i>")
     return "\n".join(lines)
 
 

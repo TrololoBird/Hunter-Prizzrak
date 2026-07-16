@@ -133,39 +133,6 @@ from hunt_core.market import (
 from hunt_core.runtime.state import SymbolStateStore, merge_hunt_extremes
 
 LOG = structlog.get_logger("hunt_core.runtime.tick_assembly")
-def _update_rolling_quote_vol_baseline(
-    market: dict[str, Any],
-    *,
-    tf: dict[str, Any],
-    session: dict[str, Any],
-) -> None:
-    """#28: rolling quote-volume baseline for wash gate (no fabrication)."""
-    if not isinstance(market, dict):
-        return
-    tf15 = (tf or {}).get("15m") if isinstance(tf, dict) else {}
-    # `quote_volume_24h` is a PHANTOM key — nothing in the codebase produces it. Kept out
-    # of the chain so a future producer cannot silently change this baseline's units.
-    quote_vol = session.get("quote_volume") or (tf15 or {}).get("quote_volume")
-    try:
-        qv = float(quote_vol if quote_vol is not None else 0)
-    except (TypeError, ValueError):
-        return
-    if qv <= 0:
-        return
-    hist_raw = market.get("quote_vol_history")
-    hist: list[float] = []
-    if isinstance(hist_raw, list):
-        for item in hist_raw:
-            try:
-                hist.append(float(item))
-            except (TypeError, ValueError):
-                continue
-    hist = (hist + [qv])[-24:]
-    market["quote_vol_history"] = hist
-    if len(hist) >= 5:
-        baseline = sum(hist[:-1]) / max(len(hist) - 1, 1)
-        if baseline > 0:
-            market["quote_vol_baseline"] = round(baseline, 4)
 
 
 def _patch_market_live(
@@ -783,8 +750,6 @@ async def snapshot_symbol(
     pc = getattr(prepared, "pump_cycle", None)
     if isinstance(pc, dict):
         market["pump_cycle"] = pc
-    _update_rolling_quote_vol_baseline(market, tf=tf, session=session)
-
     stamp_derivative_zscores(
         market,
         pack=pack,
@@ -803,7 +768,7 @@ async def snapshot_symbol(
     if hot_carry and isinstance(carry_cross, dict):
         structure_ctx["cross_microstructure"] = carry_cross
     structure = assess_market_structure(tf, price=price, market=structure_ctx)
-    hunt_h, hunt_l, session_mem = merge_hunt_extremes(
+    hunt_h, hunt_l = merge_hunt_extremes(
         symbol,
         price=price,
         rest_hunt_high=rest_h,
@@ -861,7 +826,6 @@ async def snapshot_symbol(
         "impulse": impulse,
         "impulse_high": hunt_h,
         "impulse_low": hunt_l,
-        "session_memory": session_mem,
         "fib": fib,
         "kline_limits": limits,
         "data_quality": dq,

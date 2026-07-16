@@ -51,6 +51,23 @@ class SignalEmitter:
         return ok
 
 
+def _ledger_setup_from_plan(plan: dict[str, Any]) -> dict[str, Any]:
+    """Bridge deep-plan keys (entry_lo/entry_hi/rr_primary) to the ledger's
+    geometry reader (entry/entry_zone/risk_reward) so delivered-signal rows
+    stop recording null trade geometry."""
+    from hunt_core.track.tracker import _entry_zone_from_plan
+
+    setup = dict(plan)
+    zone = _entry_zone_from_plan(setup)
+    if zone is not None and setup.get("entry_zone") is None:
+        setup["entry_zone"] = zone
+        if setup.get("entry") is None:
+            setup["entry"] = (zone[0] + zone[1]) / 2.0
+    if setup.get("risk_reward") is None:
+        setup["risk_reward"] = setup.get("rr_primary")
+    return setup
+
+
 def _record_deep_outcome(signal: Signal, row: dict[str, Any], *, event: str) -> None:
     try:
         from hunt_core.runtime.cycle._cycle_ledger import record_outcome_ledger
@@ -59,7 +76,7 @@ def _record_deep_outcome(signal: Signal, row: dict[str, Any], *, event: str) -> 
             symbol=signal.symbol,
             direction=signal.direction,
             row=row,
-            setup=signal.plan,
+            setup=_ledger_setup_from_plan(signal.plan),
             delivered=True,
             blockers=[],
             event="delivered" if event == "signal" else event,

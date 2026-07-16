@@ -207,9 +207,11 @@ def set_attributes(mapping: Mapping[str, Any]) -> None:
 def traced(name: str | None = None) -> Callable[[_F], _F]:
     """Decorate a sync or async callable so each call opens a span.
 
-    The wrapper detects coroutine functions and preserves async semantics. When
-    tracing is inactive the original function is returned unwrapped, so there is
-    no per-call overhead in the default deployment.
+    The wrapper detects coroutine functions and preserves async semantics. A
+    wrapper is always installed (decoration happens at import, before
+    ``init_telemetry`` runs); when tracing is inactive each call pays only the
+    wrapper frame plus one ``_ACTIVE`` check before delegating to the wrapped
+    function.
 
     Args:
         name: Span name; defaults to the function's qualified name.
