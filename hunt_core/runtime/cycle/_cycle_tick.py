@@ -178,17 +178,38 @@ async def run_tick(
                 timeout=120.0,
             ) or []
             ticker_by_sym = {str(t.get("symbol")): t for t in ticker_raw if t.get("symbol")}
-        if batch_tier == "full" and spot_companion is not None and symbols:
-            full_syms = [s for s in symbols if _tier_for(s) == "full"]
+        if spot_companion is not None and symbols:
+            # Refresh spot for every symbol this tick enriches, not for the
+            # "full"-tier subset.
+            #
+            # The old gate was `batch_tier == "full"` + `_tier_for(s) == "full"`.
+            # `batch_tier` falls back to the DEFAULT `tier` ("full") when no
+            # symbol is individually full — so under any real weight budget, where
+            # the capacity planner demotes the whole universe to "fast"
+            # (live: budget=700, kept=18, full_count=0), the gate passed while the
+            # filtered list was empty. Live proof: `spot_companion_refresh
+            # symbols=0 updated=0` on EVERY tick for 4h straight → the companion
+            # cache stayed empty → `enrichments_for()` always returned {} →
+            # spot_lead_return_1m / spot_futures_spread_bps / spot_quote_volume_24h
+            # were phantom keys in the scanner tick path (consumer:
+            # tick_assembly.py). The deep/analyst lane was unaffected: it refreshes
+            # its own pinned symbol.
+            #
+            # The consumer calls `enrichments_for(symbol)` for every symbol in the
+            # tick, so the refresh set is the tick's own symbol list. Cost is
+            # bounded: 2 spot REST calls/symbol (ticker w=1 + ohlcv w=1) against
+            # spot's OWN 6000/min budget (never the fapi 2400 one), gathered under
+            # the companion's semaphore. Symbols with no spot market fail closed
+            # (fetch_symbol_metrics returns None) rather than fabricating.
             futures_mids = {
                 s: float((ticker_by_sym.get(s) or {}).get("last_price") or 0) or None
-                for s in full_syms
+                for s in symbols
             }
             try:
                 spot_n = await spot_companion.refresh_symbols(
-                    full_syms, futures_mid_by_symbol=futures_mids
+                    list(symbols), futures_mid_by_symbol=futures_mids
                 )
-                LOG.debug("spot_companion_refresh", symbols=len(full_syms), updated=spot_n)
+                LOG.debug("spot_companion_refresh", symbols=len(symbols), updated=spot_n)
             except defensive_exc_types(asyncio.IncompleteReadError, OSError, ConnectionError) as exc:
                 LOG.warning("spot_companion_refresh_failed", error=repr(exc))
 

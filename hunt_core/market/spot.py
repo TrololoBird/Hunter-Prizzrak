@@ -91,6 +91,16 @@ class HuntCcxtSpotCompanion:
 
     @staticmethod
     def _lead_return_1m(ohlcv: list[list]) -> float | None:
+        """Spot 1m lead/lag return, in percent.
+
+        Deliberately reads the FORMING 1m bar (``ohlcv[-1]``): this is a live
+        lead/lag probe — "is spot moving ahead of the perp right now" — and a
+        closed-bar read would be up to a minute stale, which is the whole signal.
+        It is therefore CONTEXT, not a signal input: it repaints within the
+        minute and must never gate an emission or be recorded as a bar fact.
+        (The weekly ladder in ``fetch_weekly_ohlcv`` is the opposite case and
+        does drop its unclosed tail.)
+        """
         if len(ohlcv) < 2:
             return None
         try:
@@ -101,6 +111,26 @@ class HuntCcxtSpotCompanion:
         if prev_close <= 0.0:
             return None
         return (last_close - prev_close) / prev_close * 100.0
+
+    @staticmethod
+    def _spot_reference_price(ticker: dict[str, Any], last: float) -> float:
+        """Spot MID when the book is quoted, else last trade.
+
+        The basis is a spot-vs-perp comparison, so both legs must be the same
+        price type: comparing a spot LAST TRADE against a futures MID prices in
+        half the spot spread. On an illiquid spot market that noise is larger
+        than the basis itself, so «перп дороже/дешевле спота» flips sign on which
+        side the last print landed. fetch_ticker already carries bid/ask — no
+        extra weight.
+        """
+        try:
+            bid = float(ticker.get("bid") or 0.0)
+            ask = float(ticker.get("ask") or 0.0)
+        except (TypeError, ValueError):
+            return last
+        if bid > 0.0 and ask > 0.0 and ask >= bid:
+            return (bid + ask) / 2.0
+        return last
 
     @staticmethod
     def _spread_bps(spot_price: float, futures_mid: float | None) -> float | None:
@@ -129,6 +159,9 @@ class HuntCcxtSpotCompanion:
             spot_price = float(ticker.get("last") or 0.0)
             if spot_price <= 0.0:
                 return None
+            # Basis leg: mid-vs-mid (see _spot_reference_price). spot_price stays
+            # the last trade — it is the reported spot print, not a basis input.
+            spot_ref = self._spot_reference_price(ticker, spot_price)
             # 24h spot quote volume (USDT) — spot-vs-perp volume divergence context:
             # a perp pump with no spot participation is a derivatives-only move.
             # 0.0 is valid data (dead spot market), so only absence maps to None.
@@ -144,7 +177,7 @@ class HuntCcxtSpotCompanion:
                 method="fetchOHLCV",
             )
             lead = self._lead_return_1m(ohlcv)
-            spread = self._spread_bps(spot_price, futures_mid)
+            spread = self._spread_bps(spot_ref, futures_mid)
             return SpotMetrics(
                 symbol=sym,
                 spot_price=spot_price,
