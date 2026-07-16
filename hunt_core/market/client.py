@@ -72,6 +72,10 @@ _CACHE_TTL: dict[str, int] = {
     "secondary_oi": 600,
     "agg_trades": 10,
 }
+# A blank secondary result (venue timeout / NotSupported) is cached only briefly —
+# see HuntCcxtClient._secondary_ttl. Caching "no data" for the full 600s turned one
+# transient error into a 10-minute venue blackout on the cross card.
+_SECONDARY_NEGATIVE_CACHE_TTL_S = 20.0
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -1651,13 +1655,30 @@ class HuntCcxtClient:
             self._secondary_clients[name] = ex
             return ex
 
-    async def _secondary_ccxt_symbol(self, exchange_name: str, binance_sym: str) -> str | None:
-        """Resolve Binance id on a secondary venue; None if not listed there."""
+    async def _secondary_listing(
+        self, exchange_name: str, binance_sym: str
+    ) -> tuple[str | None, str]:
+        """Resolve a Binance id on a secondary venue, distinguishing WHY it failed.
+
+        ``_secondary_ccxt_symbol`` collapses two very different facts into ``None``:
+        the venue does not list the coin, and the venue's client is unavailable
+        (``_get_secondary`` failure is permanent via ``_secondary_failed``). The
+        card rendered both as «OKX✗», telling the trader OKX had delisted a coin
+        it lists fine whenever OKX's client failed at startup.
+
+        Args:
+            exchange_name: Configured secondary venue key (e.g. ``"okx"``).
+            binance_sym: Binance-style symbol id (e.g. ``"BTCUSDT"``).
+
+        Returns:
+            ``(ccxt_symbol_or_None, status)`` where status is ``"listed"``,
+            ``"not_listed"``, or ``"unknown"`` (venue unavailable — no claim made).
+        """
         ex = await self._get_secondary(exchange_name)
         if ex is None:
-            return None
+            return None, "unknown"
         try:
-            return resolve_linear_usdt_swap(binance_sym, exchange=ex)
+            return resolve_linear_usdt_swap(binance_sym, exchange=ex), "listed"
         except Exception as exc:
             LOG.debug(
                 "secondary_symbol_not_listed | exchange=%s symbol=%s error=%s",
@@ -1665,7 +1686,32 @@ class HuntCcxtClient:
                 binance_sym,
                 exc,
             )
-            return None
+            return None, "not_listed"
+
+    async def _secondary_ccxt_symbol(self, exchange_name: str, binance_sym: str) -> str | None:
+        """Resolve Binance id on a secondary venue; None if not listed/unavailable."""
+        ccxt_sym, _status = await self._secondary_listing(exchange_name, binance_sym)
+        return ccxt_sym
+
+    @staticmethod
+    def _secondary_ttl(payload: dict[str, float | None], kind: str) -> float:
+        """TTL for a secondary result — full for data, short for a blank.
+
+        A transient venue error used to be cached as ``{None}`` for the full 600s
+        TTL, so one timeout blanked that venue's funding/OI on the card for ten
+        minutes. Negative results get a short TTL: they still absorb a retry
+        stampede, but the venue reappears within seconds of recovering.
+
+        Args:
+            payload: The cached per-venue result dict.
+            kind: ``_CACHE_TTL`` key for the positive case.
+
+        Returns:
+            TTL in seconds.
+        """
+        if any(v is not None for v in payload.values()):
+            return float(_CACHE_TTL[kind])
+        return _SECONDARY_NEGATIVE_CACHE_TTL_S
 
     async def _secondary_call(
         self,
@@ -1688,15 +1734,31 @@ class HuntCcxtClient:
     async def _fetch_secondary_funding(
         self, name: str, ccxt_sym: str
     ) -> dict[str, float | None]:
+        """Funding rate AND its funding interval from one secondary venue.
+
+        The rate alone is not comparable across venues: bybit/bitget list symbols
+        on 1h/2h/4h funding while Binance is mostly 8h, so CCXT's unified
+        ``interval`` field is fetched alongside and carried to the aggregation.
+
+        Args:
+            name: Configured secondary venue key.
+            ccxt_sym: Venue-resolved unified symbol.
+
+        Returns:
+            ``{"fundingRate": rate|None, "interval_hours": hours|None}`` — ``None``
+            means unknown, never 0.0 (``0.0`` is a valid, meaningfully flat rate).
+        """
+        from hunt_core.market.cross import parse_funding_interval_hours
+
         cache_key = (name, ccxt_sym)
         now = time.monotonic()
         cached = self._secondary_funding_cache.get(cache_key)
-        if self._cache_fresh(cached, _CACHE_TTL["secondary_funding"]):
-            return cached[1]  # type: ignore[index]
+        if cached is not None and self._cache_fresh(cached, self._secondary_ttl(cached[1], "secondary_funding")):
+            return cached[1]
         try:
             ex = await self._get_secondary(name)
             if ex is None:
-                result: dict[str, float | None] = {"fundingRate": None}
+                result: dict[str, float | None] = {"fundingRate": None, "interval_hours": None}
             else:
                 r = await self._secondary_call(
                     name,
@@ -1705,9 +1767,12 @@ class HuntCcxtClient:
                     context=f"funding:{ccxt_sym}",
                     method="fetchFundingRate",
                 )
-                result = {"fundingRate": float(r.get("fundingRate") or 0)}
+                result = {
+                    "fundingRate": finite_float_or_none(r.get("fundingRate")),
+                    "interval_hours": parse_funding_interval_hours(r.get("interval")),
+                }
         except ccxt.NotSupported:
-            result = {"fundingRate": None}
+            result = {"fundingRate": None, "interval_hours": None}
         except ccxt.BaseError as exc:
             LOG.debug(
                 "secondary_funding_failed | exchange=%s sym=%s error=%s",
@@ -1715,7 +1780,7 @@ class HuntCcxtClient:
                 ccxt_sym,
                 exc,
             )
-            result = {"fundingRate": None}
+            result = {"fundingRate": None, "interval_hours": None}
         self._secondary_funding_cache[cache_key] = (now, result)
         return result
 
@@ -1732,15 +1797,33 @@ class HuntCcxtClient:
     async def _fetch_secondary_oi(
         self, name: str, ccxt_sym: str
     ) -> dict[str, float | None]:
+        """Open interest from one secondary venue, in BOTH the units it reports.
+
+        CCXT's ``openInterestValue`` (USD notional) is venue-specific: OKX sets it
+        from ``oiUsd``; bybit leaves it ``None`` for LINEAR markets (value is only
+        set for inverse) and reports ``openInterestAmount`` in base coins; bitget
+        hardcodes ``'openInterestValue': None``. So reading only
+        ``openInterestValue`` yields an OKX-only number. ``safe_open_interest``
+        rebuilds the dict from a fixed key mapping that has no ``openInterest``
+        key at all, so the old ``r.get("openInterest")`` fallback was dead code.
+
+        Args:
+            name: Configured secondary venue key.
+            ccxt_sym: Venue-resolved unified symbol.
+
+        Returns:
+            ``{"oi_usd": usd|None, "oi_base": coins|None}`` — the caller converts
+            base-coin OI with that venue's own price rather than dropping it.
+        """
         cache_key = (name, ccxt_sym)
         now = time.monotonic()
         cached = self._secondary_oi_cache.get(cache_key)
-        if self._cache_fresh(cached, _CACHE_TTL["secondary_oi"]):
-            return cached[1]  # type: ignore[index]
+        if cached is not None and self._cache_fresh(cached, self._secondary_ttl(cached[1], "secondary_oi")):
+            return cached[1]
         try:
             ex = await self._get_secondary(name)
             if ex is None:
-                result: dict[str, float | None] = {"oi_usd": None}
+                result: dict[str, float | None] = {"oi_usd": None, "oi_base": None}
             else:
                 r = await self._secondary_call(
                     name,
@@ -1749,12 +1832,12 @@ class HuntCcxtClient:
                     context=f"oi:{ccxt_sym}",
                     method="fetchOpenInterest",
                 )
-                oi_val = (
-                    float(r.get("openInterestValue") or r.get("openInterest") or 0) or None
-                )
-                result = {"oi_usd": oi_val}
+                result = {
+                    "oi_usd": finite_float_or_none(r.get("openInterestValue")),
+                    "oi_base": finite_float_or_none(r.get("openInterestAmount")),
+                }
         except ccxt.NotSupported:
-            result = {"oi_usd": None}
+            result = {"oi_usd": None, "oi_base": None}
         except ccxt.BaseError as exc:
             LOG.debug(
                 "secondary_oi_failed | exchange=%s sym=%s error=%s",
@@ -1762,17 +1845,35 @@ class HuntCcxtClient:
                 ccxt_sym,
                 exc,
             )
-            result = {"oi_usd": None}
+            result = {"oi_usd": None, "oi_base": None}
         self._secondary_oi_cache[cache_key] = (now, result)
         return result
 
     async def _fetch_secondary_ticker(
         self, name: str, ccxt_sym: str
     ) -> dict[str, float | None]:
+        """Mark and last price from one secondary venue, kept separate.
+
+        ``mark`` is NOT a CCXT ticker key — the unified key is ``markPrice`` (see
+        ``Exchange.safe_ticker``/``Ticker``), so ``t.get("mark")`` was always
+        ``None`` and every secondary silently contributed its LAST trade while
+        Binance contributed its MARK. The resulting "price divergence" largely
+        measured mark-vs-last basis. Both are returned so the caller can compare
+        one homogeneous price type.
+
+        Args:
+            name: Configured secondary venue key.
+            ccxt_sym: Venue-resolved unified symbol.
+
+        Returns:
+            ``{"mark_price": price|None, "last_price": price|None}``. ``markPrice``
+            is genuinely absent on some venues' ``fetchTicker`` (e.g. OKX) — that
+            is reported as ``None``, not backfilled from ``last``.
+        """
         try:
             ex = await self._get_secondary(name)
             if ex is None:
-                return {"mark_price": None}
+                return {"mark_price": None, "last_price": None}
             t = await self._secondary_call(
                 name,
                 ex,
@@ -1780,10 +1881,14 @@ class HuntCcxtClient:
                 context=f"ticker:{ccxt_sym}",
                 method="fetchTicker",
             )
-            mark = float(t.get("mark") or t.get("last") or 0) or None
-            return {"mark_price": mark}
+            mark = finite_float_or_none(t.get("markPrice"))
+            last = finite_float_or_none(t.get("last"))
+            return {
+                "mark_price": mark if mark and mark > 0 else None,
+                "last_price": last if last and last > 0 else None,
+            }
         except ccxt.NotSupported:
-            return {"mark_price": None}
+            return {"mark_price": None, "last_price": None}
         except ccxt.BaseError as exc:
             LOG.debug(
                 "secondary_ticker_failed | exchange=%s sym=%s error=%s",
@@ -1791,7 +1896,7 @@ class HuntCcxtClient:
                 ccxt_sym,
                 exc,
             )
-            return {"mark_price": None}
+            return {"mark_price": None, "last_price": None}
 
     async def fetch_secondary_tickers(self, name: str) -> list[dict[str, float | str]]:
         """All linear-USDT-swap 24h tickers from one configured secondary venue.
@@ -1845,44 +1950,134 @@ class HuntCcxtClient:
             rows.append(row)
         return rows
 
-    async def fetch_cross_exchange_snapshot(self, symbol: str) -> dict[str, Any]:
-        """
-        Fetch funding / OI / mark-price for symbol from Bybit + OKX + Bitget in parallel.
+    async def _binance_funding_interval_hours(self, bin_sym: str) -> float | None:
+        """Binance's funding interval for one symbol, or None if unavailable.
 
-        Returns a dict with:
-          funding:   {exchange: rate|None}
-          oi_usd:    {exchange: value|None}
-          mark_price:{exchange: price|None}
-          funding_spread: abs(max−min) across exchanges with data
-          funding_consensus: "bull"|"bear"|"neutral"|"divergent"
-          oi_total:  sum of OI across exchanges with data
-          price_divergence_pct: max price spread / mean (%)
+        CCXT's ``fetchFundingRate`` on binance leaves ``interval`` unset (the
+        premium-index payload has no ``fundingIntervalHours``); the interval comes
+        from the separate ``fetchFundingIntervals`` endpoint, which this client
+        already caches for the primary plane.
+
+        Args:
+            bin_sym: Binance-style symbol id.
+
+        Returns:
+            Interval in hours, or ``None`` when the endpoint is unavailable.
         """
+        try:
+            info_all = await self.fetch_funding_info_all()
+        except (ccxt.NotSupported, ccxt.BaseError) as exc:
+            LOG.debug("binance_funding_interval_unavailable | symbol=%s error=%s", bin_sym, exc)
+            return None
+        row = info_all.get(bin_sym)
+        if not row:
+            return None
+        return finite_float_or_none(row.get("funding_interval_hours"))
+
+    async def _binance_oi_usd(self, bin_sym: str, ref_mark: float | None) -> tuple[float | None, float | None]:
+        """Binance open interest as (base coins, USD notional).
+
+        Binance's ``fetchOpenInterest`` reports ``openInterestAmount`` in base
+        coins and leaves ``openInterestValue`` ``None`` (only the *History*
+        endpoint carries ``sumOpenInterestValue``), so USD notional is derived
+        with the mark price.
+
+        Args:
+            bin_sym: Binance-style symbol id.
+            ref_mark: Binance mark price used to convert coins → USD.
+
+        Returns:
+            ``(oi_base, oi_usd)``; either element is ``None`` when unknown.
+        """
+        try:
+            oi_base = await self.fetch_open_interest(bin_sym)
+        except ccxt.BaseError as exc:
+            LOG.debug("binance_cross_oi_failed | symbol=%s error=%s", bin_sym, exc)
+            return None, None
+        if oi_base is None or oi_base <= 0:
+            return None, None
+        if ref_mark is None or ref_mark <= 0:
+            return oi_base, None
+        return oi_base, oi_base * ref_mark
+
+    async def fetch_cross_exchange_snapshot(self, symbol: str) -> dict[str, Any]:
+        """Cross-venue funding / OI / price intel for one Binance symbol.
+
+        Every venue is aggregated in comparable units: funding is normalized to a
+        per-8h rate before any spread/consensus comparison, OI is converted to USD
+        notional per venue (INCLUDING Binance) rather than reading OKX's
+        ``openInterestValue`` alone, and price divergence compares a single
+        homogeneous price type.
+
+        Args:
+            symbol: Binance-style or unified symbol.
+
+        Returns:
+            Snapshot dict. Unknowns are ``None``/absent — never 0.0. Keys:
+              ``fetched_at_ms``: wall-clock stamp so consumers can age-check it.
+              ``funding``: ``{venue: raw_rate}`` per that venue's own interval.
+              ``funding_interval_hours``: ``{venue: hours|None}``.
+              ``funding_8h``: ``{venue: rate}`` normalized — the comparable map.
+              ``funding_unknown_interval``: venues excluded from consensus.
+              ``funding_spread`` / ``funding_consensus``: over ``funding_8h``.
+              ``oi_base`` / ``oi_usd``: ``{venue: value}``; ``oi_venues`` lists the
+              venues actually summed into ``oi_total``; ``oi_total_partial`` is
+              True when a listed venue could not be converted (total understates).
+              ``mark_price`` / ``last_price``: ``{venue: price}``, unmixed.
+              ``price_divergence_pct`` / ``price_divergence_basis``.
+              ``listed``: ``{venue: "listed"|"not_listed"|"unknown"}``.
+        """
+        from hunt_core.market.cross import (
+            funding_consensus_from_normalized,
+            normalized_funding_map,
+            price_divergence_from_map,
+        )
+
         bin_sym = self._bin_sym(symbol)
         await self.load_markets()
         premium_all = await self.fetch_premium_index_all()
-        pr = premium_all.get(bin_sym) or {}
-        ref_funding = float(pr.get("last_funding_rate") or 0)
-        ref_mark = float(pr.get("mark_price") or 0)
+        pr = premium_all.get(bin_sym)
+        # Absent from the premium index = unknown, NOT a 0.0 funding rate. The old
+        # `float(pr.get(...) or 0)` injected a phantom binance=0.0 into the rates
+        # list, which forced consensus to "neutral" and inflated the spread.
+        ref_funding = finite_float_or_none(pr.get("last_funding_rate")) if pr else None
+        ref_mark = finite_float_or_none(pr.get("mark_price")) if pr else None
+        if ref_mark is not None and ref_mark <= 0:
+            ref_mark = None
 
-        listed: dict[str, bool] = {"binance": True}
-        funding: dict[str, float] = {"binance": ref_funding}
+        listed: dict[str, str] = {"binance": "listed" if bin_sym in premium_all else "not_listed"}
+        funding: dict[str, float] = {}
+        intervals: dict[str, float | None] = {}
         oi_usd: dict[str, float] = {}
+        oi_base: dict[str, float] = {}
         mark_price: dict[str, float] = {}
-        if ref_mark > 0:
+        last_price: dict[str, float] = {}
+        oi_unconvertible: list[str] = []
+
+        if ref_funding is not None:
+            funding["binance"] = ref_funding
+            intervals["binance"] = await self._binance_funding_interval_hours(bin_sym)
+        if ref_mark is not None:
             mark_price["binance"] = ref_mark
 
-        async def _fetch_one_secondary(name: str) -> tuple[str, str | None, Any]:
-            ccxt_sym = await self._secondary_ccxt_symbol(name, bin_sym)
-            listed[name] = ccxt_sym is not None
+        bin_oi_base, bin_oi_usd = await self._binance_oi_usd(bin_sym, ref_mark)
+        if bin_oi_base is not None:
+            oi_base["binance"] = bin_oi_base
+        if bin_oi_usd is not None:
+            oi_usd["binance"] = bin_oi_usd
+        elif bin_oi_base is not None:
+            oi_unconvertible.append("binance")
+
+        async def _fetch_one_secondary(name: str) -> tuple[str, str, Any]:
+            ccxt_sym, status = await self._secondary_listing(name, bin_sym)
             if ccxt_sym is None:
-                return name, None, None
+                return name, status, None
             res = await asyncio.gather(
                 self._fetch_secondary_funding(name, ccxt_sym),
                 self._fetch_secondary_oi(name, ccxt_sym),
                 self._fetch_secondary_ticker(name, ccxt_sym),
             )
-            return name, ccxt_sym, res
+            return name, status, res
 
         secondary_results = await asyncio.gather(
             *(_fetch_one_secondary(name) for name in self._secondary_exchange_ids),
@@ -1893,55 +2088,75 @@ class HuntCcxtClient:
             if isinstance(item, BaseException):
                 LOG.warning("cross_exchange_secondary_batch_failed | error=%s", item)
                 continue
-            name, _ccxt_sym, res = item
+            name, status, res = item
+            listed[name] = status
             if res is None:
                 continue
             f_r, oi_r, t_r = res
-            fr = f_r.get("fundingRate")
+            fr = finite_float_or_none(f_r.get("fundingRate"))
             if fr is not None:
-                funding[name] = float(fr)
-            oi_val = oi_r.get("oi_usd")
-            if oi_val is not None:
-                oi_usd[name] = float(oi_val)
-            mp = t_r.get("mark_price")
-            if mp is not None and float(mp) > 0:
-                mark_price[name] = float(mp)
+                funding[name] = fr
+                intervals[name] = finite_float_or_none(f_r.get("interval_hours"))
+            mp = finite_float_or_none(t_r.get("mark_price"))
+            if mp is not None and mp > 0:
+                mark_price[name] = mp
+            lp = finite_float_or_none(t_r.get("last_price"))
+            if lp is not None and lp > 0:
+                last_price[name] = lp
 
-        # Aggregate
-        rates = [v for v in funding.values() if v is not None]
-        funding_spread = round(max(rates) - min(rates), 6) if len(rates) >= 2 else 0.0
+            # OI → USD notional. Prefer the venue's own USD figure; otherwise
+            # convert base-coin OI with that venue's own price. A venue we cannot
+            # convert contributes NOTHING and marks the total partial — it is
+            # never silently dropped, and never fabricated.
+            venue_usd = finite_float_or_none(oi_r.get("oi_usd"))
+            venue_base = finite_float_or_none(oi_r.get("oi_base"))
+            if venue_base is not None and venue_base > 0:
+                oi_base[name] = venue_base
+            if venue_usd is not None and venue_usd > 0:
+                oi_usd[name] = venue_usd
+            elif venue_base is not None and venue_base > 0:
+                px = mark_price.get(name) or last_price.get(name)
+                if px:
+                    oi_usd[name] = venue_base * px
+                else:
+                    oi_unconvertible.append(name)
 
-        consensus: str
-        if len(rates) < 2:
-            consensus = "neutral"
-        elif all(r > 0.0001 for r in rates):
-            consensus = "bull"
-        elif all(r < -0.0001 for r in rates):
-            consensus = "bear"
-        elif funding_spread > 0.0005:
-            consensus = "divergent"
-        else:
-            consensus = "neutral"
+        normalized, unknown_interval = normalized_funding_map(funding, intervals)
+        funding_spread, consensus = funding_consensus_from_normalized(normalized)
 
-        oi_values = [v for v in oi_usd.values() if v is not None]
-        oi_total = round(sum(oi_values), 0) if oi_values else 0.0
+        oi_total = round(sum(oi_usd.values()), 0) if oi_usd else None
+        # Partial = some venue that lists this symbol has OI we could not express
+        # in USD, or a venue's availability is unknown. The card must not call a
+        # single-venue proxy a "total".
+        oi_total_partial = bool(oi_unconvertible) or any(
+            status == "unknown" for status in listed.values()
+        )
 
-        prices = [v for v in mark_price.values() if v and v > 0]
-        price_div = 0.0
-        if len(prices) >= 2:
-            mean_p = sum(prices) / len(prices)
-            price_div = round((max(prices) - min(prices)) / mean_p * 100, 4) if mean_p > 0 else 0.0
+        price_div = price_divergence_from_map(mark_price)
+        basis: str | None = "mark"
+        if price_div is None:
+            price_div = price_divergence_from_map(last_price)
+            basis = "last" if price_div is not None else None
 
         return {
             "symbol": bin_sym,
+            "fetched_at_ms": clock.now_ms(),
             "funding": funding,
+            "funding_interval_hours": intervals,
+            "funding_8h": normalized,
+            "funding_unknown_interval": unknown_interval,
             "oi_usd": oi_usd,
+            "oi_base": oi_base,
+            "oi_venues": sorted(oi_usd),
+            "oi_total_partial": oi_total_partial,
             "mark_price": mark_price,
+            "last_price": last_price,
             "listed": listed,
             "funding_spread": funding_spread,
             "funding_consensus": consensus,
             "oi_total": oi_total,
             "price_divergence_pct": price_div,
+            "price_divergence_basis": basis,
         }
 
 

@@ -943,53 +943,94 @@ def format_pinned_deep_analysis(row: dict[str, Any]) -> str:
         return ""
 
 
+_LISTED_MARK: dict[str, str] = {"listed": "✓", "not_listed": "✗", "unknown": "?"}
+
+
+def _fmt_interval_h(hours: Any) -> str:
+    """Compact native funding interval tag ("(1ч)"), empty for the 8h default."""
+    try:
+        h = float(hours)
+    except (TypeError, ValueError):
+        return ""
+    if not h > 0 or abs(h - 8.0) < 1e-9:
+        return ""
+    return f"({h:g}ч)" if h % 1 else f"({int(h)}ч)"
+
+
 def format_cross_exchange_section(cx: dict[str, Any]) -> str:
-    """Format cross-exchange intel block for /signal reply."""
+    """Format cross-exchange intel block for /signal reply.
+
+    Funding is rendered NORMALIZED to per-8h — the same comparable unit the
+    consensus verdict is computed in — with each venue's native interval tagged
+    when it differs. OI names the venues it actually summed and says so when the
+    figure is partial, rather than printing a single-venue proxy as a "total".
+
+    Args:
+        cx: Cross snapshot from ``fetch_cross_exchange_snapshot``.
+
+    Returns:
+        HTML block, or ``""`` when there is nothing to say.
+    """
     if not cx:
         return ""
-    funding: dict[str, Any] = cx.get("funding") or {}
-    cx.get("oi_usd") or {}
+    funding_8h: dict[str, Any] = cx.get("funding_8h") or {}
+    intervals: dict[str, Any] = cx.get("funding_interval_hours") or {}
     mark_price: dict[str, Any] = cx.get("mark_price") or {}
-    float(cx.get("funding_spread") or 0)
-    consensus = str(cx.get("funding_consensus") or "neutral")
-    oi_total = float(cx.get("oi_total") or 0)
-    price_div = float(cx.get("price_divergence_pct") or 0)
+    last_price: dict[str, Any] = cx.get("last_price") or {}
+    consensus = str(cx.get("funding_consensus") or "unknown")
+    oi_total = cx.get("oi_total")
+    price_div = cx.get("price_divergence_pct")
+    basis = cx.get("price_divergence_basis")
 
     funding_parts: list[str] = []
-    for ex, rate in funding.items():
+    for ex, rate in funding_8h.items():
         if rate is None:
             continue
         sign = "+" if rate >= 0 else ""
-        funding_parts.append(f"{_venue_code(ex)} {sign}{rate*100:.4f}%")
+        funding_parts.append(
+            f"{_venue_code(ex)} {sign}{rate*100:.4f}%{_fmt_interval_h(intervals.get(ex))}"
+        )
 
-    price_parts: list[str] = []
-    for ex, mp in mark_price.items():
-        if not mp:
-            continue
-        price_parts.append(f"{_venue_code(ex)} {_fmt_price(mp)}")
+    # Divergence and the price row must describe the SAME homogeneous price type.
+    price_map = last_price if basis == "last" else mark_price
+    price_parts = [
+        f"{_venue_code(ex)} {_fmt_price(px)}" for ex, px in price_map.items() if px
+    ]
 
     listed = cx.get("listed") or {}
     listed_parts = [
-        f"{_venue_code(ex)}{'✓' if ok else '✗'}"
-        for ex, ok in listed.items()
+        f"{_venue_code(ex)}{_LISTED_MARK.get(str(state), '?')}" for ex, state in listed.items()
     ]
     lines: list[str] = ["🌐 <b>КРОСС-БИРЖА</b> <i>(universe: Binance)</i>"]
     if listed_parts:
         lines.append("Листинг: " + " ".join(listed_parts))
+        if any(str(state) == "unknown" for state in listed.values()):
+            lines.append("          <i>? — биржа недоступна, листинг не проверен</i>")
     if funding_parts:
-        lines.append("Funding:  " + "  |  ".join(funding_parts))
+        lines.append("Funding (за 8ч):  " + "  |  ".join(funding_parts))
         if consensus == "divergent":
             lines.append("          ⚠️ Дивергенция — биржи не согласованы")
         elif consensus == "bull":
             lines.append("          🟢 Фандинг бычий на всех биржах")
         elif consensus == "bear":
             lines.append("          🔴 Фандинг медвежий на всех биржах")
-    if oi_total > 0:
-        oi_b = oi_total / 1e9
-        lines.append(f"OI Total: <code>${oi_b:.2f}B</code>")
+    unknown_iv = [str(v) for v in (cx.get("funding_unknown_interval") or [])]
+    if unknown_iv:
+        venues = ", ".join(_venue_code(v) for v in unknown_iv)
+        lines.append(f"          <i>{venues}: интервал фандинга неизвестен — вне консенсуса</i>")
+    if oi_total is not None and float(oi_total) > 0:
+        venues = "+".join(_venue_code(v) for v in (cx.get("oi_venues") or []))
+        label = "OI part." if cx.get("oi_total_partial") else "OI Total"
+        suffix = " <i>(частичный)</i>" if cx.get("oi_total_partial") else ""
+        venue_tag = f" <i>({venues})</i>" if venues else ""
+        lines.append(
+            f"{label}: <code>{_fmt_usd_compact(float(oi_total))}</code>{venue_tag}{suffix}"
+        )
     if price_parts:
-        spread_str = f"  (spread {price_div:.3f}%)" if price_div > 0 else ""
-        lines.append("Цены:     " + "  |  ".join(price_parts) + html.escape(spread_str))
+        div = float(price_div) if price_div is not None else 0.0
+        spread_str = f"  (spread {div:.3f}%)" if div > 0 else ""
+        label = "Цены (last):" if basis == "last" else "Цены (mark):"
+        lines.append(f"{label} " + "  |  ".join(price_parts) + html.escape(spread_str))
     return "\n".join(lines) if len(lines) > 1 else ""
 
 

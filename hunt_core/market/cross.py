@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import structlog
 import os
 import time
@@ -11,6 +12,7 @@ from typing import Any
 
 import polars as pl
 
+from hunt_core.errors import finite_float_or_none
 from hunt_core.market.ccxt_guard import ccxt_method_available
 from hunt_core.features.volume_profile import volume_profile_levels
 from hunt_core.market.client import aggregate_cross_exchange_walls, depth_snapshot_from_book
@@ -123,6 +125,136 @@ def sanitize_funding_map(raw: dict[str, Any] | None) -> dict[str, float]:
     return out
 
 
+def parse_funding_interval_hours(raw: Any) -> float | None:
+    """Hours from CCXT's unified funding ``interval`` field.
+
+    CCXT emits ``interval`` as an hour-suffixed string ("8h", "4h", "1h") — bybit
+    from ``info.fundingInterval`` (minutes), okx computed from the funding-time
+    delta, bitget from ``fundingRateInterval``, binance from
+    ``fundingIntervalHours``. Anything unparseable is unknown, never 8.
+
+    Args:
+        raw: Value of the unified ``interval`` key (or a bare number of hours).
+
+    Returns:
+        Positive interval in hours, or ``None`` when the venue did not report one.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, (int, float)):
+        hours = float(raw)
+        return hours if math.isfinite(hours) and hours > 0 else None
+    text = str(raw).strip().lower().removesuffix("h")
+    try:
+        hours = float(text)
+    except (TypeError, ValueError):
+        return None
+    return hours if math.isfinite(hours) and hours > 0 else None
+
+
+def normalize_funding_to_8h(rate: float | None, interval_hours: float | None) -> float | None:
+    """Rescale a per-interval funding rate to the common per-8h unit.
+
+    A ``+0.0001`` rate on a 1h-funding venue is ``+0.0008`` per 8h — eight times
+    the same number on an 8h venue. Comparing the raw values across venues (the
+    old behaviour) compares incompatible units.
+
+    Args:
+        rate: Funding rate as reported by the venue, for one funding interval.
+        interval_hours: That venue's funding interval, in hours.
+
+    Returns:
+        The rate expressed per 8 hours, or ``None`` if either input is unknown.
+    """
+    if rate is None or interval_hours is None or interval_hours <= 0:
+        return None
+    if not math.isfinite(rate):
+        return None
+    return rate * (8.0 / interval_hours)
+
+
+def normalized_funding_map(
+    funding: dict[str, Any] | None,
+    intervals: dict[str, Any] | None,
+) -> tuple[dict[str, float], list[str]]:
+    """Per-8h funding for every venue whose interval is known.
+
+    Args:
+        funding: ``{venue: raw_rate}`` as reported per venue interval.
+        intervals: ``{venue: interval_hours}``; missing/None means unknown.
+
+    Returns:
+        ``(normalized, unknown_interval_venues)`` — venues with a rate but no
+        known interval are excluded from ``normalized`` and named in the second
+        element so callers can disclose the gap instead of assuming 8h.
+    """
+    normalized: dict[str, float] = {}
+    unknown: list[str] = []
+    for venue, raw_rate in (funding or {}).items():
+        rate = finite_float_or_none(raw_rate)
+        if rate is None:
+            continue
+        hours = parse_funding_interval_hours((intervals or {}).get(venue))
+        per_8h = normalize_funding_to_8h(rate, hours)
+        if per_8h is None:
+            unknown.append(str(venue))
+            continue
+        normalized[str(venue)] = per_8h
+    return normalized, sorted(unknown)
+
+
+def funding_consensus_from_normalized(
+    normalized: dict[str, float],
+) -> tuple[float | None, str]:
+    """Spread and consensus over per-8h-normalized funding rates.
+
+    The ±0.0001 / >0.0005 thresholds have always assumed per-8h units; they are
+    only meaningful once :func:`normalized_funding_map` has rescaled every venue.
+
+    Args:
+        normalized: ``{venue: per_8h_rate}`` — comparable units only.
+
+    Returns:
+        ``(spread, consensus)`` where spread is ``max-min`` (``None`` with fewer
+        than two venues) and consensus is one of ``bull``/``bear``/``divergent``/
+        ``neutral``/``unknown``. ``unknown`` means too few comparable venues to
+        judge — it is not a claim that funding is balanced.
+    """
+    rates = [r for r in normalized.values() if r is not None]
+    if len(rates) < 2:
+        return None, "unknown"
+    spread = round(max(rates) - min(rates), 8)
+    if all(r > 0.0001 for r in rates):
+        return spread, "bull"
+    if all(r < -0.0001 for r in rates):
+        return spread, "bear"
+    if spread > 0.0005:
+        return spread, "divergent"
+    return spread, "neutral"
+
+
+def price_divergence_from_map(prices: dict[str, Any] | None) -> float | None:
+    """Max-min spread across venues as a percentage of the mean.
+
+    Args:
+        prices: ``{venue: price}`` — MUST be a single homogeneous price type
+            (all mark, or all last); mixing mark and last measures basis, not
+            cross-venue divergence.
+
+    Returns:
+        Divergence in percent, or ``None`` when fewer than two venues priced.
+    """
+    values = [p for p in ((finite_float_or_none(v) or 0.0) for v in (prices or {}).values()) if p > 0]
+    if len(values) < 2:
+        return None
+    mean_p = sum(values) / len(values)
+    if mean_p <= 0:
+        return None
+    return round((max(values) - min(values)) / mean_p * 100, 4)
+
+
 def apply_cross_snapshot_to_market(
     market: dict[str, Any],
     snap: dict[str, Any],
@@ -159,6 +291,10 @@ def apply_cross_snapshot_to_market(
         market["cross_oi_total"] = merged.get("oi_total")
     if merged.get("funding_consensus") is not None:
         market["cross_funding_consensus"] = merged.get("funding_consensus")
+    if merged.get("oi_total_partial") is not None:
+        market["cross_oi_total_partial"] = merged.get("oi_total_partial")
+    if merged.get("fetched_at_ms") is not None:
+        market["cross_fetched_at_ms"] = merged.get("fetched_at_ms")
     listed = merged.get("listed")
     if isinstance(listed, dict):
         market["cross_listed"] = listed
@@ -207,34 +343,55 @@ def merge_ws_cross_into_snapshot(
     snapshot: dict[str, Any],
     ws_live: dict[str, dict[str, float]] | None,
 ) -> dict[str, Any]:
-    """Overlay Pro WS funding/mark/index on REST cross snapshot (WS wins when present)."""
+    """Overlay Pro WS funding/mark on a REST cross snapshot (WS wins when present).
+
+    Every aggregate derived from the overlaid rates is recomputed together —
+    ``funding_8h``, ``funding_spread`` AND ``funding_consensus``. Recomputing the
+    spread while leaving the consensus at its REST value let the card print a
+    freshly-overlaid negative rate next to «Фандинг бычий на всех биржах».
+
+    Args:
+        snapshot: REST cross snapshot from ``fetch_cross_exchange_snapshot``.
+        ws_live: ``{venue: {"fundingRate": float, "markPrice": float}}`` from the
+            Pro WS plane; ``None``/empty returns the snapshot untouched.
+
+    Returns:
+        A new snapshot dict with WS values overlaid and aggregates recomputed.
+    """
     if not ws_live:
         return snapshot
     out = dict(snapshot)
     funding = sanitize_funding_map(out.get("funding") if isinstance(out.get("funding"), dict) else {})
-    mark_price: dict[str, float | None] = dict(out.get("mark_price") or {})
+    mark_price: dict[str, float] = {
+        str(k): float(v) for k, v in (out.get("mark_price") or {}).items() if v
+    }
     for ex_name, fields in ws_live.items():
         if not isinstance(fields, dict):
             continue
-        fr = fields.get("fundingRate")
+        fr = finite_float_or_none(fields.get("fundingRate"))
         if fr is not None:
-            funding[str(ex_name)] = float(fr)
-        mp = fields.get("markPrice")
-        if mp is not None and float(mp) > 0:
-            mark_price[ex_name] = float(mp)
+            funding[str(ex_name)] = fr
+        mp = finite_float_or_none(fields.get("markPrice"))
+        if mp is not None and mp > 0:
+            mark_price[str(ex_name)] = mp
     out["funding"] = funding
     out["mark_price"] = mark_price
     out["ws_overlay"] = True
-    rates = [v for v in funding.values() if v is not None]
-    if len(rates) >= 2:
-        out["funding_spread"] = round(max(rates) - min(rates), 6)
-    prices = [v for v in mark_price.values() if v and v > 0]
-    if len(prices) >= 2:
-        mean_p = sum(prices) / len(prices)
-        out["price_divergence_pct"] = round(
-            (max(prices) - min(prices)) / mean_p * 100,
-            4,
-        ) if mean_p > 0 else 0.0
+
+    # WS carries a rate but no funding interval — reuse the REST-side interval map.
+    intervals = out.get("funding_interval_hours")
+    normalized, unknown = normalized_funding_map(
+        funding, intervals if isinstance(intervals, dict) else {}
+    )
+    spread, consensus = funding_consensus_from_normalized(normalized)
+    out["funding_8h"] = normalized
+    out["funding_unknown_interval"] = unknown
+    out["funding_spread"] = spread
+    out["funding_consensus"] = consensus
+
+    # WS markPrice is a mark, and the REST mark map is mark-only — basis stays homogeneous.
+    out["price_divergence_pct"] = price_divergence_from_map(mark_price)
+    out["price_divergence_basis"] = "mark" if out["price_divergence_pct"] is not None else None
     return out
 
 
@@ -298,8 +455,11 @@ def attach_cross_fields(row: dict[str, Any], cx: dict[str, Any]) -> None:
     row["cross_funding_spread"] = cx.get("funding_spread")
     row["cross_funding_consensus"] = cx.get("funding_consensus")
     row["cross_oi_total"] = cx.get("oi_total")
+    row["cross_oi_total_partial"] = cx.get("oi_total_partial")
     row["cross_price_divergence_pct"] = cx.get("price_divergence_pct")
+    row["cross_price_divergence_basis"] = cx.get("price_divergence_basis")
     row["cross_listed"] = cx.get("listed")
+    row["cross_fetched_at_ms"] = cx.get("fetched_at_ms")
 
 
 async def refresh_cross_exchange_cache(
@@ -696,7 +856,6 @@ async def fetch_cross_exchange_volume_profile(
     venues = [_PRIMARY, *cfg.exchanges] if cfg.enabled else [_PRIMARY]
     parts = await asyncio.gather(*(_klines(v) for v in venues))
     weighted_frames: list[pl.DataFrame] = []
-    weights: list[float] = []
     per_ex: dict[str, dict[str, float | None]] = {}
     for ex, df, qv in parts:
         if df is None or df.is_empty() or qv <= 0:
@@ -704,22 +863,23 @@ async def fetch_cross_exchange_volume_profile(
             continue
         poc, vah, val = volume_profile_levels(df, lookback=lookback, buckets=buckets)
         per_ex[ex] = {"poc": poc, "vah": vah, "val": val, "weight": qv}
+        # LINEAR weighting: ``qv`` IS this venue's summed tail volume, so simply
+        # concatenating the raw bars already weights each venue by its own volume.
+        # Scaling by ``qv`` on top made influence ∝ qv² — the biggest venue's
+        # profile squared out the rest and the "cross" POC collapsed onto Binance.
         tail = df.tail(lookback).select(
             [
                 pl.col("high"),
                 pl.col("low"),
-                (pl.col("volume") * pl.lit(qv)).alias("volume"),
+                pl.col("volume"),
             ]
         )
         weighted_frames.append(tail)
-        weights.append(qv)
 
     if not weighted_frames:
         return {"interval": interval, "poc": None, "vah": None, "val": None, "per_exchange": per_ex}
 
     merged = pl.concat(weighted_frames, how="vertical")
-    total_w = sum(weights) or 1.0
-    merged = merged.with_columns((pl.col("volume") / pl.lit(total_w)).alias("volume"))
     poc, vah, val = volume_profile_levels(merged, buckets=buckets)
     return {
         "interval": interval,
