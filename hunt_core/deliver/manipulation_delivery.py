@@ -43,6 +43,11 @@ _LOG = structlog.get_logger(__name__)
 # method. Relocation was CONSIDERED and rejected here — same disposition the OB absolute-USD
 # floors carry ("making them relative is a calibration decision, not a config move").
 _MIN_RR = 1.2
+# Advisory («ОЖИДАНИЕ подтверждения — НЕ вход») resend throttle: same card re-sends
+# only after this many seconds unless the setup progressed (steps_covered grew).
+# In-process only — a restart re-sends once, which is acceptable.
+_ADVISORY_RESEND_S = float(os.getenv("HUNT_MANIP_ADVISORY_RESEND_S", "21600") or 21600)
+_ADVISORY_SENT: dict[tuple[str, str, str], tuple[float, int]] = {}
 # Minimum structural sweep depth (|swept_level − sweep_extreme| / swept_level) for a
 # dip to count as a liquidity-grab «свип». Grounded on real bars: the corpus winners
 # swept ≥1%, while the junk O/USDT A-long «swept» only 0.07–0.34% (chart noise). 0.5%
@@ -556,6 +561,27 @@ async def deliver_manipulation_setups(
         if geo is None:
             continue
 
+        # Advisory (unconfirmed) cards never register a tracker signal (WO#1), so
+        # has_active_signal cannot throttle them — without this dedup the SAME
+        # «ОЖИДАНИЕ подтверждения» card re-sends every scan cycle (~5 min) while
+        # the pattern stays armed (live case: EPICUSDT ×14/hour, 2026-07-15).
+        # Re-send only when the setup PROGRESSES (steps_covered grows — e.g. the
+        # LTF confirm lands) or the cooldown lapses. Confirmed setups are exempt:
+        # they register with the tracker and are throttled by has_active_signal.
+        if not bool(getattr(setup, "micro_confirmed", False)):
+            adv_key = (symbol, setup.direction, setup.pattern_type)
+            prev = _ADVISORY_SENT.get(adv_key)
+            now_mono = asyncio.get_event_loop().time()
+            if (
+                prev is not None
+                and setup.steps_covered <= prev[1]
+                and (now_mono - prev[0]) < _ADVISORY_RESEND_S
+            ):
+                if new_state != prior_state:
+                    scanner_states[symbol] = new_state
+                    states_changed = True
+                continue
+
         text = _format_manipulation_signal(symbol, setup, price=price, geo=geo)
         try:
             result = await send_lane_html(broadcaster, text)
@@ -566,6 +592,11 @@ async def deliver_manipulation_setups(
         # Bug 2: only commit the completed (reset) state AFTER a successful send,
         # so a transient Telegram failure leaves scanner_states[symbol] == prior_state
         # and the still-armed pattern retries on the next cycle instead of being lost.
+        if not bool(getattr(setup, "micro_confirmed", False)):
+            _ADVISORY_SENT[(symbol, setup.direction, setup.pattern_type)] = (
+                asyncio.get_event_loop().time(),
+                setup.steps_covered,
+            )
         message_id = getattr(result, "message_id", None)
         if new_state != prior_state:
             scanner_states[symbol] = new_state
