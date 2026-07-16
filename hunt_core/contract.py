@@ -56,6 +56,7 @@ MARKET_FIELD_CCXT_SOURCE: dict[str, str] = {
     "liquidation_cascade_5m": "WS watchLiquidationsForSymbols",
     "spot_lead_return_1m": "REST spot fetchOHLCV (HuntCcxtSpotCompanion)",
     "spot_futures_spread_bps": "REST spot + futures ticker",
+    "spot_quote_volume_24h": "REST spot fetchTicker (HuntCcxtSpotCompanion)",
     "basis": "implicit fapiDataGetBasis | REST mark/index OHLCV",
 }
 

@@ -312,6 +312,11 @@ async def run_loop(
     client = plane.client
     ws_feed = plane.streams
     spot_companion = plane.spot
+    # Expose the live spot companion so the deep/analyst plane (assemble_analyst_tick)
+    # can reuse the same spot exchange + weight budget for its per-symbol enrichment.
+    from hunt_core.runtime.tick_state import set_live_spot_companion
+
+    set_live_spot_companion(spot_companion)
 
     # ── exchange health check ──────────────────────────────────
     try:

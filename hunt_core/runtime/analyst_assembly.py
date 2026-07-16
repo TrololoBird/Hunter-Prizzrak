@@ -107,6 +107,20 @@ async def assemble_analyst_tick(
     ticker_raw = await safe_fetch(client.fetch_ticker_24h(), context="ticker_24h") or []
     ticker_by_sym = {str(t.get("symbol")): t for t in ticker_raw if t.get("symbol")}
 
+    # Spot companion — reuse the live plane's instance (registered by the watch
+    # loop) or the plane we own; separate 6000/min spot budget, never fapi's.
+    from hunt_core.runtime.tick_state import live_spot_companion
+
+    spot_companion = live_spot_companion()
+    if spot_companion is None and owned_plane is not None:
+        spot_companion = owned_plane.spot
+    if spot_companion is not None:
+        _fut_mid = float((ticker_by_sym.get(sym) or {}).get("last_price") or 0) or None
+        try:
+            await spot_companion.refresh_symbols([sym], futures_mid_by_symbol={sym: _fut_mid})
+        except Exception as exc:
+            LOG.debug("deep_spot_refresh_failed", symbol=sym, error=repr(exc))
+
     btc_work_1h = None
     btc_work_4h = None
     btc_work_1m = None
@@ -137,7 +151,7 @@ async def assemble_analyst_tick(
             exchange_by_sym=exchange_by_sym,
             ticker_by_sym=ticker_by_sym,
             ws_feed=ws_feed,
-            spot_companion=None,
+            spot_companion=spot_companion,
             stagger_klines_ms=stagger_ms,
             tier=snap_tier,  # type: ignore[arg-type]  # "probe_lite" = QoS-trimmed cold probe
             hunt_fusion=False,
@@ -213,6 +227,22 @@ async def assemble_analyst_tick(
                 await asyncio.sleep(stagger_ms / 1000.0)
     except Exception:
         LOG.exception("prizrak_ohlcv_prep_failed", symbol=sym)
+
+    # Spot weekly ladder — the full-history macro levels Prizrak reads off the
+    # weekly SPOT chart (POL/MATIC разбор: futures window is too short for them).
+    # Context/render only: never feeds prizrak gating. Lazy + 6h-cached in the
+    # companion, so pinned deep ticks re-charge the spot budget ~4x/day/symbol.
+    if spot_companion is not None:
+        try:
+            weekly = await spot_companion.fetch_weekly_ohlcv(sym)
+            if weekly:
+                from hunt_core.prizrak.structure import spot_weekly_ladder
+
+                ladder = spot_weekly_ladder(weekly, price=float(row.get("price") or 0))
+                if ladder.get("below") or ladder.get("above"):
+                    row["spot_weekly_ladder"] = ladder
+        except Exception as exc:
+            LOG.debug("deep_spot_ladder_failed", symbol=sym, error=repr(exc))
 
     row = _enrich_analyst_row(row, ohlcv_by_tf=prizrak_ohlcv_by_tf or None)
     LOG.info(

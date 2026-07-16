@@ -143,8 +143,9 @@ class PreparedSymbol:
     orderflow_source: str | None = None
     liquidation_score_source: str | None = None
     liquidation_score_age_seconds: float | None = None
-    spot_lead_return_1m: float | None = None
-    spot_futures_spread_bps: float | None = None
+    # NB: spot_lead_return_1m / spot_futures_spread_bps live only in the market
+    # dict (spot_extra in features.snapshot.market_snapshot) — the PreparedSymbol
+    # mirrors were phantom declarations (never assigned, never read; I-6).
     altcoin_season_index: float | None = None
     btc_phase: str | None = None
     global_market_regime: str | None = None

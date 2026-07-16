@@ -110,6 +110,20 @@ class LastTickStore:
 _STORE: LastTickStore | None = None
 _HUNT_STORE: HuntScanStore | None = None
 _DEEP_STORE: DeepQueryStore | None = None
+# Live spot companion handle (HuntCcxtSpotCompanion), registered once by the
+# watch loop when the market plane is created. Lets the deep/analyst plane reuse
+# the SAME spot exchange + weight budget instead of owning a second connection
+# (callers of assemble_analyst_tick only carry the futures client).
+_SPOT_COMPANION: Any | None = None
+
+
+def set_live_spot_companion(spot: Any | None) -> None:
+    global _SPOT_COMPANION
+    _SPOT_COMPANION = spot
+
+
+def live_spot_companion() -> Any | None:
+    return _SPOT_COMPANION
 
 
 def last_tick_store() -> LastTickStore:
@@ -140,4 +154,6 @@ __all__ = [
     "deep_query_store",
     "hunt_scan_store",
     "last_tick_store",
+    "live_spot_companion",
+    "set_live_spot_companion",
 ]

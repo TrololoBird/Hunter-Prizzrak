@@ -466,6 +466,7 @@ def feature_vector_from_row(row: dict[str, Any]) -> dict[str, Any]:
         "premium_zscore_5m": m.get("premium_zscore_5m"),
         "spot_lead_return_1m": m.get("spot_lead_return_1m"),
         "spot_futures_spread_bps": m.get("spot_futures_spread_bps"),
+        "spot_quote_volume_24h": m.get("spot_quote_volume_24h"),
         "liquidation_score_5m": m.get("liquidation_score_5m"),
         "liquidation_long_notional_5m": liq_long,
         "liquidation_short_notional_5m": liq_short,

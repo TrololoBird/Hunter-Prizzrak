@@ -26,7 +26,14 @@ class SpotMetrics:
     spot_price: float
     spot_lead_return_1m: float | None
     spot_futures_spread_bps: float | None
+    spot_quote_volume_24h: float | None
     fetched_at: float
+
+
+# Weekly spot OHLCV cache TTL. A closed 1w candle changes once per week; 6h keeps
+# the ladder fresh across a long-running process without re-charging the spot
+# weight budget on every deep tick.
+_WEEKLY_OHLCV_TTL_S = 6 * 3600.0
 
 
 class HuntCcxtSpotCompanion:
@@ -48,6 +55,8 @@ class HuntCcxtSpotCompanion:
         # fapi's 2400/min; never charge or floor the futures budget (F2).
         self._rest_gate = create_spot_rest_gate()
         self._cache: dict[str, SpotMetrics] = {}
+        # Weekly spot OHLCV (full-history HTF ladder): sym -> (bars, fetched_at).
+        self._weekly_cache: dict[str, tuple[list[list[float]], float]] = {}
         self._lock = asyncio.Lock()
         self._markets_loaded = False
 
@@ -120,6 +129,14 @@ class HuntCcxtSpotCompanion:
             spot_price = float(ticker.get("last") or 0.0)
             if spot_price <= 0.0:
                 return None
+            # 24h spot quote volume (USDT) — spot-vs-perp volume divergence context:
+            # a perp pump with no spot participation is a derivatives-only move.
+            # 0.0 is valid data (dead spot market), so only absence maps to None.
+            _qv = ticker.get("quoteVolume")
+            try:
+                spot_qv = float(_qv) if _qv is not None else None
+            except (TypeError, ValueError):
+                spot_qv = None
             ohlcv = await self._spot_fetch(
                 lambda: self._ex.fetch_ohlcv(ccxt_sym, "1m", limit=2),
                 context=f"spot_ohlcv:{sym}",
@@ -133,6 +150,7 @@ class HuntCcxtSpotCompanion:
                 spot_price=spot_price,
                 spot_lead_return_1m=lead,
                 spot_futures_spread_bps=spread,
+                spot_quote_volume_24h=spot_qv,
                 fetched_at=time.monotonic(),
             )
         except ccxt.BaseError as exc:
@@ -189,7 +207,62 @@ class HuntCcxtSpotCompanion:
             payload["spot_lead_return_1m"] = metrics.spot_lead_return_1m
         if metrics.spot_futures_spread_bps is not None:
             payload["spot_futures_spread_bps"] = metrics.spot_futures_spread_bps
+        if metrics.spot_quote_volume_24h is not None:
+            payload["spot_quote_volume_24h"] = metrics.spot_quote_volume_24h
         return payload
+
+    async def fetch_weekly_ohlcv(
+        self,
+        symbol: str,
+        *,
+        limit: int = 520,
+        max_age_seconds: float = _WEEKLY_OHLCV_TTL_S,
+    ) -> list[list[float]] | None:
+        """Full-history weekly spot OHLCV for the HTF ladder (cached, lazy).
+
+        Prizrak draws macro zones on the *spot weekly chart with full history*
+        (prizrak_pol_matic разбор: недельный MATICUSD спот → macro-зоны); the
+        futures window is too short for those levels. ``limit=520`` covers ~10
+        years — the whole listed life of any Binance spot market in one call
+        (Binance spot klines weight 2). Returns None on any failure; cached per
+        symbol for ``max_age_seconds``.
+        """
+        sym = to_binance_symbol(symbol)
+        if not sym:
+            return None
+        cached = self._weekly_cache.get(sym)
+        if cached is not None and time.monotonic() - cached[1] <= max_age_seconds:
+            return cached[0]
+        try:
+            await self._ensure_markets()
+            ccxt_sym = to_ccxt_symbol(sym, exchange=self._ex)
+            ohlcv = await self._spot_fetch(
+                lambda: self._ex.fetch_ohlcv(ccxt_sym, "1w", limit=limit),
+                context=f"spot_ohlcv_1w:{sym}",
+                weight=2,
+                method="fetchOHLCV",
+            )
+        except ccxt.BaseError as exc:
+            if is_ccxt_rate_limited(exc):
+                raise
+            LOG.debug("spot_weekly_fetch_failed", symbol=sym, error=str(exc))
+            return None
+        except DEFENSIVE_EXC as exc:
+            LOG.debug("spot_weekly_fetch_failed", symbol=sym, error=str(exc))
+            return None
+        if not ohlcv:
+            return None
+        # No-lookahead: drop the in-progress week so ladder pivots never form on
+        # (or get confirmed by) an unclosed candle and repaint intra-week.
+        from hunt_core.market.factory import drop_unclosed_ohlcv_tail
+
+        ohlcv = drop_unclosed_ohlcv_tail(list(ohlcv), "1w", exchange=self._ex)
+        bars = [list(map(float, r[:6])) for r in ohlcv if r and len(r) >= 5]
+        if not bars:
+            return None
+        async with self._lock:
+            self._weekly_cache[sym] = (bars, time.monotonic())
+        return bars
 
     def cache_size(self) -> int:
         return len(self._cache)
