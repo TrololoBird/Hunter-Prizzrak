@@ -10,6 +10,10 @@ Known bias (documented, not hidden): when a single 1m bar's range crosses both
 a favorable and adverse threshold, true intra-bar order is unrecoverable from
 OHLC alone. This module resolves ties conservatively as loss-first (adverse
 before favorable) — first_passage_grid/mfe/mae inherit this bias.
+
+Note (audit G-86): the loop is intentionally inert today — its only data
+source (record_kind=="decision" rows) has no producer yet, pending B4
+backfill wiring of ``record_candidate_decision`` into the detector.
 """
 from __future__ import annotations
 

@@ -381,13 +381,6 @@ def observe_prices(
             )
 
 
-def stats_for(store: PumpHistoryStore, symbol: str) -> dict[str, Any] | None:
-    st = store.symbols.get(symbol.upper())
-    if st is None or (st.pump_count == 0 and st.dump_count == 0 and st.signal_short == 0):
-        return None
-    return st.to_public()
-
-
 def score_bonus(stats: dict[str, Any] | None, *, watch_bias: str = "both") -> tuple[float, tuple[str, ...]]:
     """Scanner score adjustment from pump history."""
     if not stats:
@@ -411,32 +404,6 @@ def score_bonus(stats: dict[str, Any] | None, *, watch_bias: str = "both") -> tu
         flags.append("fast_retrace")
         bonus += 3.0
     return round(bonus, 1), tuple(flags)
-
-
-def format_history_telegram(stats: dict[str, Any] | None) -> str | None:
-    """One-line pump memory for Telegram (worldspawn-style)."""
-    if not stats:
-        return None
-    pumps = int(stats.get("pump_count") or 0)
-    if pumps <= 0 and int(stats.get("signal_short") or 0) <= 0:
-        return None
-    parts: list[str] = []
-    if pumps > 0:
-        parts.append(f"{pumps} pump{'s' if pumps != 1 else ''}")
-    rate = stats.get("retrace_rate_pct")
-    avg_h = stats.get("avg_retrace_hours")
-    if rate is not None and int(stats.get("retrace_resolved") or 0) > 0:
-        parts.append(f"≥50% retrace {rate:.0f}%")
-    if avg_h is not None:
-        parts.append(f"avg {avg_h:.1f}h")
-    sig_s = int(stats.get("signal_short") or 0)
-    tp1 = int(stats.get("outcome_tp1") or 0)
-    inv = int(stats.get("outcome_invalidate") or 0)
-    if sig_s > 0:
-        parts.append(f"hunt short {sig_s} (TP1 {tp1}/inv {inv})")
-    if not parts:
-        return None
-    return "History: " + " · ".join(parts)
 
 
 def backfill_from_jsonl(

@@ -91,12 +91,7 @@ def sync_status_from_phase(signal: dict[str, Any]) -> None:
 
 def is_signal_active(signal: dict[str, Any]) -> bool:
     """Backward compat: ``status=='active'`` ⇔ phase ∈ {REGISTERED..TP1_MANAGED}."""
-    phase = coerce_signal_phase(signal)
-    if phase in _ACTIVE_PHASES:
-        return True
-    if phase in {SignalPhase.INVALIDATED, SignalPhase.CLOSED}:
-        return False
-    return signal.get("status") == "active"
+    return coerce_signal_phase(signal) in _ACTIVE_PHASES
 
 
 def transition(

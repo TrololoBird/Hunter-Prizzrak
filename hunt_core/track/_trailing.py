@@ -87,18 +87,14 @@ def _update_trailing_stop(
     # matched entry_type=="manipulation_reversal" and so NEVER fired — the runner got
     # trailed out of big moves on temporary pullbacks. Manipulation reversals hold to
     # structural targets + averaging, no trail.
-    if str(active.get("setup_phase") or "") == "manipulation" or str(
-        active.get("entry_type") or ""
-    ).startswith("manipulation"):
+    if str(active.get("setup_phase") or "") == "manipulation":
         return False, float(active.get("stop_loss") or 0)
     cur_stop = float(active.get("stop_loss") or 0)
     mfe = _mfe_pct(active, direction=direction)
     if mfe <= 0:
         return False, cur_stop
     tr = tracker_thresholds(symbol)
-    entry_phase = str(active.get("entry_lifecycle_phase") or "")
     min_trail_mfe = float(tr.get("min_trail_mfe_pct", 2.5))
-    _ = entry_phase
     if mfe <= min_trail_mfe:
         return False, cur_stop
     initial_r = _initial_risk_distance(active, direction=direction)
@@ -188,7 +184,6 @@ def apply_tp1_breakeven_trail(
     active["stop_loss"] = new_stop
     active["sl_at_breakeven"] = True
     active["tp1_breakeven_active"] = True
-    active["trailing_armed"] = True
     return True
 
 

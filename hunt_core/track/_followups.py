@@ -74,16 +74,12 @@ def _tracked_level(
         return latched
     if direction == "short":
         return float(
-            active.get("support_break_level")
-            or setup.get("support_break_level")
-            or active.get("entry_lo")
+            active.get("entry_lo")
             or setup.get("invalidation_above")
             or 0
         )
     return float(
-        active.get("resistance_break_level")
-        or setup.get("resistance_break_level")
-        or active.get("entry_hi")
+        active.get("entry_hi")
         or setup.get("invalidation_below")
         or 0
     )

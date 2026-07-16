@@ -10,7 +10,7 @@ from typing import Any
 
 from hunt_core.data.jsonl_io import append_jsonl_lines, rotate_jsonl_if_needed
 from hunt_core.params.store import effective_hunt_params
-from hunt_core.paths import DATA, SENT_MESSAGES, SIGNAL_EVENTS, TICK_JSONL
+from hunt_core.paths import DATA, SIGNAL_EVENTS, TICK_JSONL
 
 AUDIT_LOG = DATA / "signal_audit.jsonl"
 
@@ -25,12 +25,6 @@ FUNNEL_STAGES: tuple[str, ...] = (
     "tier",
     "deliver",
 )
-
-# Lifecycle phases that map to dedicated funnel telemetry stages (0a baseline).
-_LIFECYCLE_FUNNEL_MAP: dict[str, str] = {
-    "dump_initiating": "dump_initiation",
-    "dump_active": "dump_active",
-}
 
 
 def _append_jsonl_line(path: Path, line: str) -> None:
@@ -60,56 +54,6 @@ def append_signal_event(
     _append_jsonl_line(path, json.dumps(row, default=str) + "\n")
 
 
-def record_sent_delivery(
-    *,
-    symbol: str,
-    direction: str,
-    message_id: int | None,
-    html: str,
-    setup: dict[str, Any],
-    delivery_tier: str = "",
-    price: float | None = None,
-    path: Path = SENT_MESSAGES,
-) -> None:
-    """Archive delivered Telegram HTML + levels snapshot for audit (M0)."""
-    levels = {
-        "entry_zone": setup.get("entry_zone"),
-        "stop_loss": setup.get("stop_loss"),
-        "original_stop_loss": setup.get("stop_loss"),
-        "tp1": setup.get("tp1"),
-        "tp2": setup.get("tp2"),
-        "risk_reward": setup.get("risk_reward"),
-        "delivery_tier": delivery_tier or setup.get("delivery_tier"),
-    }
-    row = {
-        "ts": datetime.now(UTC).isoformat(),
-        "symbol": symbol.upper(),
-        "direction": direction.lower(),
-        "message_id": message_id,
-        "price": price,
-        "levels": levels,
-        "html": html,
-        "ev_shadow": setup.get("ev_shadow"),
-        "model_shadow": setup.get("model_shadow"),
-        "setup_type": setup.get("setup_type"),
-    }
-    _append_jsonl_line(path, json.dumps(row, default=str) + "\n")
-    ev = setup.get("ev_shadow")
-    if isinstance(ev, dict) and ev.get("ev") is not None:
-        append_signal_event(
-            "ev_delivery_shadow",
-            symbol=symbol,
-            direction=direction,
-            detail=delivery_tier or str(setup.get("delivery_tier") or ""),
-            payload={
-                "ev": ev.get("ev"),
-                "confidence_score": ev.get("confidence_score"),
-                "reason": ev.get("reason"),
-                "delivery_tier": delivery_tier,
-            },
-        )
-
-
 def record_funnel_stage(
     stage: str,
     *,
@@ -130,74 +74,6 @@ def record_funnel_stage(
         payload=body,
         path=path,
     )
-
-
-def record_flow_cusum_funnel(
-    setup: dict[str, Any],
-    *,
-    symbol: str,
-    direction: str,
-    path: Path = SIGNAL_EVENTS,
-) -> None:
-    """Tag flow_cusum_* triggers in funnel telemetry when present."""
-    triggers = setup.get("triggers") or []
-    tagged = [str(t) for t in triggers if str(t).startswith("flow_cusum")]
-    if not tagged:
-        return
-    record_funnel_stage(
-        "fuel",
-        symbol=symbol,
-        direction=direction,
-        detail=",".join(tagged[:4]),
-        payload={"flow_cusum_triggers": tagged},
-        path=path,
-    )
-
-
-def persist_ev_primary_shadow(
-    row: dict[str, Any],
-    *,
-    path: Path = SIGNAL_EVENTS,
-) -> None:
-    """Persist EV primary shadow tick payload to lake/jsonl (no telegram)."""
-    shadow = row.get("ev_primary_shadow")
-    if not isinstance(shadow, dict) or not shadow:
-        return
-    append_signal_event(
-        "ev_primary_shadow",
-        symbol=str(row.get("symbol") or ""),
-        payload={"ev_primary_shadow": shadow, "tick_ts": row.get("ts")},
-        path=path,
-    )
-
-
-def record_lifecycle_funnel(
-    *,
-    symbol: str,
-    phase: str,
-    prev_phase: str | None = None,
-    bias: str = "",
-    payload: dict[str, Any] | None = None,
-    path: Path = SIGNAL_EVENTS,
-) -> None:
-    """Record lifecycle transition + mapped anticipation funnel stages (0a baseline)."""
-    body = {"phase": phase, "prev": prev_phase, "bias": bias, **(payload or {})}
-    record_funnel_stage(
-        "lifecycle",
-        symbol=symbol,
-        detail=phase,
-        payload=body,
-        path=path,
-    )
-    mapped = _LIFECYCLE_FUNNEL_MAP.get(phase)
-    if mapped:
-        record_funnel_stage(
-            mapped,
-            symbol=symbol,
-            detail=phase,
-            payload=body,
-            path=path,
-        )
 
 
 def record_phase_transition(
@@ -297,6 +173,7 @@ def audit_probe_row(row: dict[str, Any], *, source: str = "signal_cmd") -> dict[
     # Fusion engine produces the setups; the probe reads its decision directly.
     dump_s = row.get("dump") or {}
     long_s = row.get("long") or {}
+    direction: str | None
     if bias in {"short", "long"}:
         direction = bias
     elif dump_s.get("impulse_confirmed"):
@@ -304,18 +181,8 @@ def audit_probe_row(row: dict[str, Any], *, source: str = "signal_cmd") -> dict[
     elif long_s.get("impulse_confirmed"):
         direction = "long"
     else:
-        direction = (
-            "short"
-            if float(dump_s.get("fusion_score") or dump_s.get("confidence_score") or 0)
-            >= float(long_s.get("fusion_score") or long_s.get("confidence_score") or 0)
-            else "long"
-        )
-    setup = dump_s if direction == "short" else long_s
-    fuel = float(
-        setup.get("fusion_score")
-        or (float(setup.get("confidence_score") or 0) * 100.0)
-        or 0
-    )
+        direction = None
+    setup = long_s if direction == "long" else dump_s
     dir_notes: list[str] = []
     indie_conf = bool(setup.get("impulse_confirmed"))
     hard = list(setup.get("confirm_hard") or [])
@@ -329,20 +196,7 @@ def audit_probe_row(row: dict[str, Any], *, source: str = "signal_cmd") -> dict[
         checks.append("data_complete")
 
     if bias in {"short", "long"}:
-        counter = "long" if bias == "short" else "short"
-        alt_raw = (
-            (row.get("long") or {}).get("long_fuel")
-            if counter == "long"
-            else (row.get("dump") or {}).get("dump_fuel")
-        )
-        alt_fuel = float(alt_raw or 0)
-        if direction == counter and alt_fuel > fuel + 15:
-            issues.append(
-                f"direction_vs_lifecycle bias={bias} picked={direction} "
-                f"fuel={fuel} alt={alt_fuel}"
-            )
-        else:
-            checks.append(f"direction_aligns_bias={bias}")
+        checks.append(f"direction_aligns_bias={bias}")
 
     if not setup.get("levels_viable"):
         veto = setup.get("levels_veto") or []
@@ -371,7 +225,7 @@ def audit_probe_row(row: dict[str, Any], *, source: str = "signal_cmd") -> dict[
         "issues": issues,
         "checks": checks,
         "direction": direction,
-        "fuel": fuel,
+        "fuel": None,
         "dir_notes": dir_notes,
         "phase": setup.get("phase"),
         "levels_viable": setup.get("levels_viable"),
@@ -391,20 +245,6 @@ def append_audit_log(report: dict[str, Any], path: Path = AUDIT_LOG) -> None:
         fh.write(json.dumps(report, default=str) + "\n")
 
 
-def load_pending_symbols(path: Path | None = None) -> list[str]:
-    from hunt_core.data.universe import SIGNAL_NOTIFY
-
-    p = path or SIGNAL_NOTIFY
-    if not p.exists():
-        return []
-    try:
-        payload = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
-    pending = payload.get("pending") or []
-    return [str(x.get("symbol")).upper() for x in pending if isinstance(x, dict) and x.get("symbol")]
-
-
 __all__ = [
     "AUDIT_LOG",
     "FUNNEL_STAGES",
@@ -414,11 +254,7 @@ __all__ = [
     "append_signal_event",
     "audit_probe_row",
     "backtest_levels_on_bars",
-    "load_pending_symbols",
-    "persist_ev_primary_shadow",
-    "record_flow_cusum_funnel",
     "record_funnel_stage",
-    "record_lifecycle_funnel",
     "record_phase_transition",
     "rotate_jsonl_if_needed",
 ]

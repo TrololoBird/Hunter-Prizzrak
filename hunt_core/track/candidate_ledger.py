@@ -17,6 +17,11 @@ Storage: JSONL, one row per candidate_id, two writes (A/B/C then a D patch
 identified by the same candidate_id). Denormalized per-candidate for v1 per the
 accepted tradeoff (tens of GB/month at scale; can split into a separate
 (symbol, t0_bucket) path table later without touching A/B/C).
+
+Note (audit G-78): the decision-write API (``new_candidate_id`` /
+``record_candidate_decision``) is intentionally inert — no caller writes
+decision rows yet — pending B4 backfill wiring into the detector's
+per-candidate decision path.
 """
 from __future__ import annotations
 

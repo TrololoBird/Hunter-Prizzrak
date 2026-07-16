@@ -260,7 +260,6 @@ async def snapshot_symbol(
     ws_feed: HuntCcxtStreams | None = None,
     spot_companion: HuntCcxtSpotCompanion | None = None,
     stagger_klines_ms: int = 0,
-    pump_stats: dict[str, Any] | None = None,
     tier: SnapshotTier = "full",
     symbol_state: SymbolStateStore | None = None,
     kline_limits_override: dict[str, int] | None = None,

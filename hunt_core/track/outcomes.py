@@ -30,8 +30,8 @@ def is_polluted(row: dict[str, Any]) -> bool:
     A row is polluted (excluded from live win-rate) when it lacks the fields a
     real tracker open always records: an open timestamp, a detector score, and a
     fuel reading. Legacy/partial archive rows miss these and must never inflate
-    or deflate live WR. Keep this the single definition — analyze_signals,
-    outcomes_report and stats_report all import it so their n/WR reconcile.
+    or deflate live WR. Keep this the single definition — tracker and
+    stats_report both import it so their n/WR reconcile.
     """
     return (
         not row.get("opened_at")
@@ -142,11 +142,10 @@ def append_outcome_record(path: Any, record: dict[str, Any]) -> None:
 
 
 def kpi_bucket(record: dict[str, Any]) -> str:
-    """scenario×direction×phase key for stats rollup."""
-    scenario = str(record.get("scenario") or record.get("setup_id") or "unknown")
+    """direction×phase key for stats rollup."""
     direction = str(record.get("direction") or "?")
     phase = entry_lifecycle_phase(record)
-    return f"{scenario}:{direction}:{phase}"
+    return f"{direction}:{phase}"
 
 
 __all__ = [

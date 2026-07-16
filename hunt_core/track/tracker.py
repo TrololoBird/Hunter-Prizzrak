@@ -202,14 +202,6 @@ def _has_structural_trigger(setup: dict[str, Any]) -> bool:
     return False
 
 
-def _latch_original_stop_loss(active: dict[str, Any], stop: Any) -> None:
-    """Latch original SL once at open — never overwrite on trail/TP1 management."""
-    if active.get("original_stop_loss") is not None:
-        return
-    if stop is not None:
-        active["original_stop_loss"] = stop
-
-
 def _entry_zone_from_plan(setup: dict[str, Any]) -> list[float] | None:
     """Deep (prizrak) plans carry entry_lo/entry_hi but no ``entry_zone`` key.
     Without this, the caller's ``[price, price]`` fallback would silently anchor the
@@ -591,29 +583,7 @@ def on_tp1_reached(
 
 
 def _latched_levels_payload(active: dict[str, Any]) -> dict[str, Any]:
-    """Levels frozen at entry — follow-ups must not show live recalculated setup."""
-    snap = active.get("delivered_levels_snapshot")
-    if isinstance(snap, dict) and snap.get("stop_loss") is not None:
-        ez = snap.get("entry_zone")
-        entry_lo = entry_hi = None
-        if isinstance(ez, (list, tuple)) and len(ez) >= 2:
-            try:
-                entry_lo = float(ez[0])
-                entry_hi = float(ez[1])
-            except (TypeError, ValueError):
-                entry_lo = entry_hi = None
-        return {
-            "stop_loss": snap.get("stop_loss"),
-            "original_stop_loss": snap.get("original_stop_loss") or snap.get("stop_loss"),
-            "tp1": snap.get("tp1"),
-            "tp2": snap.get("tp2"),
-            "entry_lo": entry_lo if entry_lo is not None else active.get("entry_lo"),
-            "entry_hi": entry_hi if entry_hi is not None else active.get("entry_hi"),
-            "opened_at": active.get("opened_at"),
-            "entry_message_id": active.get("entry_message_id"),
-            "score": active.get("score"),
-            "risk_reward": snap.get("risk_reward"),
-        }
+    """Current tracker levels for follow-up messages."""
     return {
         "stop_loss": active.get("stop_loss"),
         "tp1": active.get("tp1"),

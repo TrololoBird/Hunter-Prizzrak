@@ -630,9 +630,6 @@ async def run_loop(
                     if float(row.get("last_price") or 0) > 0
                 }
                 observe_prices(pump_store, price_map, now=now)
-                pump_stats_by_sym = {
-                    sym: st.to_public() for sym, st in pump_store.symbols.items()
-                }
                 if once:
                     merged = list(dict.fromkeys(s.upper() for s in cli_symbols))
                     mode_map = {
@@ -829,7 +826,6 @@ async def run_loop(
                     "broadcaster": broadcaster,
                     "send_telegram": send_telegram,
                     "ticker_by_sym": ticker_by_sym,
-                    "pump_stats_by_sym": pump_stats_by_sym,
                     "pump_store": pump_store,
                     "ws_feed": ws_feed,
                     "spot_companion": spot_companion,

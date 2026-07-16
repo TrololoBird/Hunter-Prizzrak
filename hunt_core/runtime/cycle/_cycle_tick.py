@@ -114,7 +114,6 @@ async def run_tick(
     broadcaster: TelegramBroadcaster | None,
     send_telegram: bool,
     ticker_by_sym: dict[str, dict[str, Any]] | None = None,
-    pump_stats_by_sym: dict[str, dict[str, Any]] | None = None,
     pump_store: Any | None = None,
     ws_feed: HuntCcxtStreams | None = None,
     spot_companion: HuntCcxtSpotCompanion | None = None,
@@ -227,9 +226,6 @@ async def run_tick(
                         ticker_by_sym=ticker_by_sym,
                         ws_feed=ws_feed,
                         spot_companion=spot_companion,
-                        pump_stats=(
-                            pump_stats_by_sym.get(sym) if pump_stats_by_sym else None
-                        ),
                         tier=sym_tier,
                         symbol_state=symbol_state,
                         intra_bar=intra_bar,
@@ -365,8 +361,6 @@ async def run_tick(
                 rows.append(row)
                 if prescan_outlier_by_sym and symbol in prescan_outlier_by_sym:
                     row["prescan_outlier"] = prescan_outlier_by_sym[symbol]
-                if pump_stats_by_sym and symbol in pump_stats_by_sym:
-                    row["pump_history"] = pump_stats_by_sym[symbol]
                 kline_events = await _reconcile_inwatch_active(
                     client, tracker_state, symbol=symbol, now=now
                 )

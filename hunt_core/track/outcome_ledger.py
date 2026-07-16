@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -138,9 +137,9 @@ def build_ledger_record(
         delivered=delivered,
     )
     geometry = _setup_geometry(setup)
-    # bias↔liq reconciliation (WS-2M.2): record the risk flag + factor evidence against the
-    # forward-outcome horizons so the ±0.15 envelope / whether to gate can be CALIBRATED from
-    # the flag's real hit-rate later, rather than guessed. Canonical source is the summary.
+    # bias↔liq reconciliation (WS-2M.2): record the risk flag + factor evidence so the
+    # ±0.15 envelope / whether to gate can be calibrated from closed-outcome rows later,
+    # rather than guessed. Canonical source is the summary.
     _summary = (row or {}).get("prizrak_summary")
     if not isinstance(_summary, dict):
         _summary = setup if isinstance(setup, dict) else {}
@@ -179,87 +178,9 @@ def build_ledger_record(
     }
 
 
-_CANDIDATE_LEDGER_DEDUPE: dict[str, str] = {}
-
-# Task 6: per-symbol cooldown (300s between candidates)
-_CANDIDATE_COOLDOWN_S = 300.0
-_last_candidate_by_sym: dict[str, float] = {}
-
-
-def maybe_append_candidate_ledger(
-    *,
-    symbol: str,
-    direction: str,
-    row: dict[str, Any],
-    setup: dict[str, Any] | None,
-) -> None:
-    """P0-E candidate lane — geometry to ledger without delivery (one row per bar)."""
-    s = setup if isinstance(setup, dict) else {}
-    if s.get("impulse_confirmed"):
-        return
-    if s.get("stop_loss") is None or s.get("tp1") is None:
-        return
-    sym = str(symbol or "").upper()
-    direc = str(direction or "").lower()
-    if not sym or direc not in {"long", "short"}:
-        return
-    # Per-symbol cooldown to prevent spam
-    last_ts = _last_candidate_by_sym.get(sym, 0.0)
-    now = time.monotonic()
-    if now - last_ts < _CANDIDATE_COOLDOWN_S:
-        return
-    bar_key = str(
-        row.get("bar_close_ts")
-        or row.get("snapshot_ts")
-        or row.get("ts")
-        or ""
-    )
-    dedupe = f"{sym}:{direc}:{bar_key}"
-    if _CANDIDATE_LEDGER_DEDUPE.get(f"{sym}:{direc}") == dedupe:
-        return
-    blockers = [str(s.get("gate_reason") or "candidate_forming")]
-    record = build_ledger_record(
-        symbol=sym,
-        direction=direc,
-        event="candidate",
-        row=row,
-        setup=s,
-        blockers=blockers,
-        delivered=False,
-    )
-    record["lane"] = "candidate"
-    append_ledger_event(record)
-    _CANDIDATE_LEDGER_DEDUPE[f"{sym}:{direc}"] = dedupe
-    _last_candidate_by_sym[sym] = now
-
-
-def append_outcome_horizon(
-    *,
-    symbol: str,
-    direction: str,
-    horizon: str,
-    hit: bool,
-    price: float,
-    path: Path | None = None,
-) -> None:
-    """Record 4h/24h forecast zone outcome against a prior deliver event."""
-    append_ledger_event(
-        {
-            "symbol": str(symbol).upper(),
-            "direction": str(direction).lower(),
-            "event": f"outcome_{horizon}",
-            "hit": hit,
-            "price": price,
-        },
-        path=path,
-    )
-
-
 __all__ = [
     "LEDGER_PATH",
     "append_ledger_event",
-    "append_outcome_horizon",
     "build_authority_snapshot",
     "build_ledger_record",
-    "maybe_append_candidate_ledger",
 ]

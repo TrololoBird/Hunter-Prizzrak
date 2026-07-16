@@ -213,7 +213,7 @@ def symbol_daily_tg_cap_reached(
             continue
         if str(rec.get("direction") or "").lower() != direc:
             continue
-        raw = rec.get("opened_at") or rec.get("closed_at")
+        raw = rec.get("closed_at") or rec.get("opened_at")
         if not raw:
             continue
         try:
