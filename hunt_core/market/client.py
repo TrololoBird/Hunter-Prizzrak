@@ -27,7 +27,11 @@ from hunt_core.market.factory import (
 )
 from hunt_core.market.network import mask_proxy_url
 from hunt_core.market.tick_registry import register_ticks_from_markets
-from hunt_core.market.factory import ccxt_ohlcv_to_frame, finalize_kline_frame
+from hunt_core.market.factory import (
+    ccxt_ohlcv_to_frame,
+    drop_unclosed_ohlcv_tail,
+    finalize_kline_frame,
+)
 from hunt_core.market.symbols import (
     is_linear_usdt_swap_market,
     underlying_type_of,
@@ -681,7 +685,18 @@ class HuntCcxtClient:
         cycle re-fetched 5 TFs × N symbols via weight-10 klines, the dominant REST
         sink that earned the 418 IP ban. TTLs are per-interval (see ``_CACHE_TTL``
         ``klines_*``): a 1d bar is stable for an hour, only 5m needs frequent refresh.
-        A single-flight lock coalesces concurrent scanners onto one fetch."""
+        A single-flight lock coalesces concurrent scanners onto one fetch.
+
+        No-lookahead: the still-forming last kline is dropped HERE, at cache-WRITE
+        time, against the fetch instant. Dropping it at read time instead (what the
+        consumers used to do) is unsound because every TTL is >= one full interval:
+        a 1h bar opening 10:00 cached at 10:05 holds 5 minutes of data, yet a read
+        at 11:04 — still inside the 3900s TTL — sees ``10:00 + 1h <= 11:04`` and
+        passes the partial snapshot off as a CLOSED bar. Detectors keying off
+        ``close[-1]`` (bos_*/choch_*) then "confirm" on a close that never existed,
+        and the persistent state machine freezes stages advanced on that phantom.
+        Dropping at the producer means no cached entry ever holds an unclosed bar,
+        so no present or future consumer can inherit the bug."""
         key = (self._bin_sym(symbol), interval, int(limit))
         ttl = float(_CACHE_TTL.get(f"klines_{interval}", 60))
         now = time.monotonic()
@@ -694,6 +709,7 @@ class HuntCcxtClient:
             if cached is not None and time.monotonic() - cached[0] < ttl:
                 return cached[1]
             rows = await self.fetch_ohlcv_list(symbol, interval, limit=limit)
+            rows = drop_unclosed_ohlcv_tail(rows, interval, exchange=self._ex)
             self._ohlcv_list_cache[key] = (time.monotonic(), rows)
             return rows
 
