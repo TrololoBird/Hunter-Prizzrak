@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import html
+import math
 from typing import Any
 
 # Shown on every delivered signal card (dispatch.py, intra_bar_delivery.py) --
@@ -130,6 +131,36 @@ def fmt_price(value: float | None) -> str:
     return f"{v:.8f}"
 
 
+def fmt_dist(value: float | None, ref: float | None) -> str:
+    """Signed distance from ``ref`` to ``value``, as ` (−1.8%)`; "" when unknowable.
+
+    Every price on the card used to be printed bare, which made the reader do the one
+    piece of arithmetic that decides whether a level matters at all. A support 0.1% away
+    and one 9.6% away rendered identically, so the eye had no way to rank them and the
+    card leaned on the reader to divide ~40 numbers by the spot price in their head.
+
+    The leading space is included so call sites can append unconditionally.
+    """
+    if value is None or ref is None:
+        return ""
+    try:
+        v, r = float(value), float(ref)
+    except (TypeError, ValueError):
+        return ""
+    if r <= 0 or not math.isfinite(v) or not math.isfinite(r):
+        return ""
+    pct = (v / r - 1.0) * 100.0
+    # −0.0% reads as a rounding artefact; below a basis point say "at price".
+    if abs(pct) < 0.01:
+        return " (у цены)"
+    return f" ({pct:+.1f}%)"
+
+
+def fmt_price_dist(value: float | None, ref: float | None) -> str:
+    """``fmt_price`` plus its distance from ``ref`` — the card's default price render."""
+    return f"{fmt_price(value)}{fmt_dist(value, ref)}"
+
+
 def format_symbol_telegram(symbol: str) -> str:
     sym = str(symbol or "").upper().strip()
     if sym.endswith("USDT"):
@@ -238,7 +269,9 @@ def signal_strength_rating(conviction_pct: float, lc_phase: str) -> str:
 __all__ = [
     "EXPERIMENTAL_DISCLAIMER_RU",
     "PHASE_HUMAN",
+    "fmt_dist",
     "fmt_price",
+    "fmt_price_dist",
     "format_symbol_telegram",
     "phase_badge",
     "phase_human",

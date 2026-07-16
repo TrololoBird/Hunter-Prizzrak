@@ -20,6 +20,10 @@ def format_analyst_telegram(analysis: AnalystReport) -> str:
     # source, so a header timestamp only duplicated it.
     parts: list[str] = [header]
 
+    brief = _briefing_text(analysis, price)
+    if brief:
+        parts.extend(["", brief])
+
     v2_txt = analysis.prizrak_text()
     if v2_txt:
         parts.extend(["", v2_txt])
@@ -53,6 +57,86 @@ def format_analyst_telegram(analysis: AnalystReport) -> str:
     parts.append("")
     parts.append("<i>Структура / МТФ / карты · вход вручную · не инвестрекомендация</i>")
     return "\n".join(parts)
+
+
+_ACTION_RU = {"long": "🟢 ЛОНГ", "short": "🔴 ШОРТ"}
+
+
+def _nearest_zone(row: dict[str, Any], price: float) -> tuple[str, float, float] | None:
+    """(side, near_edge, distance_pct) for whichever interest zone price is closest to."""
+    iz = row.get("prizrak_interest_zones")
+    if not isinstance(iz, dict) or price <= 0:
+        return None
+    best: tuple[str, float, float] | None = None
+    for side in ("long", "short"):
+        z = iz.get(side)
+        if not isinstance(z, dict):
+            continue
+        lo, hi = z.get("lo"), z.get("hi")
+        try:
+            lo_f, hi_f = float(lo), float(hi)  # type: ignore[arg-type]  # None → caught
+        except (TypeError, ValueError):
+            continue
+        if lo_f <= 0 or hi_f <= 0:
+            continue
+        # Distance to the zone as a whole: 0 when price is inside it, else to the
+        # nearer edge — that is the number that decides whether it is live right now.
+        if lo_f <= price <= hi_f:
+            edge, dist = (hi_f if side == "long" else lo_f), 0.0
+        else:
+            edge = hi_f if price > hi_f else lo_f
+            dist = abs(price / edge - 1.0) * 100.0
+        if best is None or dist < best[2]:
+            best = (side, edge, dist)
+    return best
+
+
+def _briefing_text(analysis: AnalystReport, price: float) -> str | None:
+    """Three lines answering what a reader opens this card to learn.
+
+    The card led with МТФ mechanics and made the reader assemble the conclusion out of
+    ~40 numbers spread over seven sections — the verdict, the regime and the distance to
+    the nearest actionable level were all derivable but none were stated. This states
+    them, and states nothing the sections below do not already back up.
+    """
+    row = analysis.row
+    _ps = row.get("prizrak_summary")
+    ps = _ps if isinstance(_ps, dict) else {}
+    action = str(ps.get("action") or "wait").strip().lower()
+
+    _struct = row.get("prizrak_structure")
+    struct = _struct if isinstance(_struct, dict) else {}
+    _htf = struct.get("htf_bias")
+    htf = _htf if isinstance(_htf, dict) else {}
+    regime = str(htf.get("regime") or "")
+    bias = str(htf.get("bias") or "").lower()
+
+    lines: list[str] = []
+    if action in ("long", "short"):
+        lines.append(f"<b>{_ACTION_RU[action]}</b> — сетап активен, детали ниже")
+    else:
+        # WAIT is the common case and it is NOT nothing: it means limits are placed and
+        # the card exists to say where. Say that, rather than leaving "WAIT" implied.
+        lines.append("<b>⏸ ЖДЁМ</b> — активного сигнала нет, работают лимит-зоны")
+
+    if regime == "accumulation":
+        lines.append("режим: <b>накопление</b> (4h вверх против 1w/1d вниз) — шорт против набора")
+    elif regime == "distribution":
+        lines.append("режим: <b>распределение</b> (4h вниз против 1w/1d вверх) — лонг против раздачи")
+    elif bias in ("long", "bull"):
+        lines.append("режим: старшие ТФ <b>вверх</b>")
+    elif bias in ("short", "bear"):
+        lines.append("режим: старшие ТФ <b>вниз</b>")
+
+    near = _nearest_zone(row, price)
+    if near is not None:
+        side, edge, dist = near
+        side_ru = "лонг-зона" if side == "long" else "шорт-зона"
+        if dist == 0.0:
+            lines.append(f"<b>цена В {side_ru.upper()}</b> — вход по факту касания")
+        else:
+            lines.append(f"ближайшая {side_ru}: <code>{fmt_price(edge)}</code> — {dist:.1f}% от цены")
+    return "\n".join(lines) if lines else None
 
 
 def _spot_context_text(row: dict[str, Any]) -> str | None:

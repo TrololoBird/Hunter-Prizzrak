@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from hunt_core.deliver._labels import fmt_dist as _fmt_dist
 from hunt_core.deliver._labels import fmt_price as _fmt_price_adaptive
 
 
@@ -295,7 +296,10 @@ def format_grid_telegram(grid: list[dict[str, Any]], *, price: float = 0) -> str
             elif k == "resistance":
                 nums = sorted(nums)  # nearest (lowest) first
             for val in nums:
-                parts.append(f"{_K_RU.get(k, k)}={_fmt_price(val)}")
+                # Distance is what makes a level readable at a glance: a support 0.1%
+                # away and one 9.6% away used to render identically, leaving the reader
+                # to divide every number on the card by spot in their head.
+                parts.append(f"{_K_RU.get(k, k)}={_fmt_price(val)}{_fmt_dist(val, price)}")
             for tok in tok_by[tf].get(k, []):
                 parts.append(f"{_K_RU.get(k, k)}={tok}")
         if parts:
