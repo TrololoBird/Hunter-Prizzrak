@@ -59,12 +59,12 @@ from hunt_core.features.prepare import _prepare_frame, min_required_bars
 from hunt_core.market import HuntCcxtClient
 from hunt_core.deliver.telegram import TelegramBroadcaster
 
-from hunt_core.data.tick_jsonl import btc_market_context, resolve_trade_direction
+from hunt_core.data.tick_jsonl import btc_market_context
 from hunt_core.track.events import append_audit_log, audit_probe_row, backtest_levels_on_bars
 from hunt_core.track.tracker import load_tracker_state
 from hunt_core.data.universe import PINNED_SYMBOLS
 from hunt_core.params.store import effective_hunt_params
-from hunt_core.data.universe import add_to_watchlist, register_signal_notify
+from hunt_core.data.universe import add_to_watchlist
 
 _STAGGER_MS = 150
 _PROBE_TIMEOUT_S = 240.0
@@ -366,16 +366,6 @@ async def probe_symbol_signal(
                 watch_bias=watch_bias,
                 note=f"signal_probe phase={dump.get('phase')}",
             )
-            direction, _, _, _ = resolve_trade_direction(row)
-            notify_phase = (
-                "dump_imminent" if direction == "short" else "long_imminent"
-            )
-            register_signal_notify(
-                sym,
-                direction=direction,
-                phase=notify_phase,
-                notify_on_forming=True,
-            )
             row["_watchlist_added"] = added
         return row
     finally:
@@ -405,7 +395,6 @@ async def probe_pinned_deep(
     client: HuntCcxtClient | None = None,
 ) -> dict[str, Any]:
     """Extended REST + full prepare + microstructure for pinned anchors."""
-    from hunt_core.data.universe import cache_is_fresh, load_pinned_cache
     from hunt_core.runtime.analyst_assembly import assemble_analyst_tick
     from hunt_core.runtime.query_service import STORE_STALE_S, row_age_seconds
     from hunt_core.runtime.tick_state import deep_query_store
@@ -417,16 +406,11 @@ async def probe_pinned_deep(
         if age is not None and age <= STORE_STALE_S:
             out = dict(cached)
             out["_query_source"] = "deep_store"
-            if cache_is_fresh(sym):
-                out["_pinned_cache"] = load_pinned_cache(sym)
             return out
     if client is None:
         msg = f"probe_deep: no client for {sym}"
         raise RuntimeError(msg)
-    row = await assemble_analyst_tick(sym, client, stagger_ms=max(stagger_ms, 200))
-    if cache_is_fresh(sym):
-        row["_pinned_cache"] = load_pinned_cache(sym)
-    return row
+    return await assemble_analyst_tick(sym, client, stagger_ms=max(stagger_ms, 200))
 
 
 async def probe_deep_only(

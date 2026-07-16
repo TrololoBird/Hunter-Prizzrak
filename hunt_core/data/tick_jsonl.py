@@ -1,4 +1,4 @@
-"""JSONL tick row prepare / hydrate — fusion lifecycle + MTF must survive replay."""
+"""JSONL tick row prepare — fusion lifecycle + MTF must survive replay."""
 from __future__ import annotations
 
 import json
@@ -6,62 +6,7 @@ from typing import Any
 
 _JSONL_DROP_KEYS = frozenset({"_prepared"})
 
-# Lifecycle phase labels + entry/confirm flag derivation. Relocated here (the
-# sole live consumer) when the legacy scanner/gate stack was deleted — these
-# are pure helpers, not part of any gate pipeline.
 _LC_NEUTRAL = "neutral"
-_LC_MID = "mid"
-_LC_PRE_DUMP = "pre_dump"
-_LC_PRE_PUMP = "pre_pump"
-
-
-def _fusion_lifecycle_flags(
-    *, side: str, phase: str, gate_open: bool, watch_ok: bool,
-) -> dict[str, bool]:
-    """Entry/confirm flags for lifecycle gates derived from fusion detection."""
-    p = str(phase or "")
-    s = str(side or "")
-    pre_short = s == "short" and p == _LC_PRE_DUMP and watch_ok
-    pre_long = s == "long" and p == _LC_PRE_PUMP and watch_ok
-    return {
-        "short_entry_ok": s == "short" and (gate_open or pre_short),
-        "long_entry_ok": s == "long" and (gate_open or pre_long),
-        "short_confirm_ok": s == "short" and watch_ok and p not in {_LC_MID, _LC_NEUTRAL},
-        "long_confirm_ok": s == "long" and watch_ok and p not in {_LC_MID, _LC_NEUTRAL},
-    }
-
-
-def _setup_strength(setup: dict[str, Any]) -> float:
-    try:
-        return float(setup.get("p_win") or 0) * 100.0
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def resolve_trade_direction(row: dict[str, Any]) -> tuple[str, dict[str, Any], float, list[str]]:
-    """(direction, setup, strength, notes) picked from the row's dump/long setups.
-
-    Kept for callers still deriving a display direction from the row shape after
-    the fusion engine removal; ``dump``/``long`` are neutral stubs now, so this
-    degrades to lifecycle bias, then an arbitrary tie-break — no fabricated signal.
-    """
-    _lc = row.get("lifecycle")
-    lc = _lc if isinstance(_lc, dict) else {}
-    _dump = row.get("dump")
-    dump = _dump if isinstance(_dump, dict) else {}
-    _long_b = row.get("long")
-    long_b = _long_b if isinstance(_long_b, dict) else {}
-    bias = str(lc.get("recommended_bias") or "")
-    if bias in {"long", "short"}:
-        direction = bias
-    elif dump.get("confirmed"):
-        direction = "short"
-    elif long_b.get("confirmed"):
-        direction = "long"
-    else:
-        direction = "short" if _setup_strength(dump) >= _setup_strength(long_b) else "long"
-    setup = dump if direction == "short" else long_b
-    return direction, setup, _setup_strength(setup), []
 
 
 def btc_market_context(
@@ -100,7 +45,7 @@ def ensure_fusion_lifecycle_fields(
     *,
     setup: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Backfill ``phase_fusion`` / entry flags — JSONL rows must never carry null gates."""
+    """Backfill ``phase_fusion`` / ``watch_ok`` / cusum — JSONL rows must never carry nulls."""
     base = dict(lc) if isinstance(lc, dict) else {}
     setup_d = setup if isinstance(setup, dict) else {}
     phase = str(
@@ -112,23 +57,7 @@ def ensure_fusion_lifecycle_fields(
     )
     base["phase"] = phase
     base["phase_fusion"] = phase
-    side = str(
-        base.get("bias")
-        or base.get("recommended_bias")
-        or setup_d.get("direction")
-        or ""
-    )
-    gate_open = bool(setup_d.get("impulse_confirmed")) if setup_d else bool(base.get("gate_open"))
     watch_ok = bool(base.get("watch_ok")) or phase in {"pre_pump", "pre_dump"}
-    flags = _fusion_lifecycle_flags(
-        side=side,
-        phase=phase,
-        gate_open=gate_open,
-        watch_ok=watch_ok,
-    )
-    for key, val in flags.items():
-        if base.get(key) is None:
-            base[key] = val
     if base.get("watch_ok") is None:
         base["watch_ok"] = watch_ok
     if base.get("cusum") is None:
@@ -221,32 +150,6 @@ def prepare_tick_row_for_jsonl(row: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def hydrate_tick_row_from_jsonl(row: dict[str, Any]) -> dict[str, Any]:
-    """Restore delivery-ready row from stored JSONL (lifecycle + MTF dict)."""
-    out = dict(row)
-    _long_setup = out.get("long")
-    long_setup = _long_setup if isinstance(_long_setup, dict) else {}
-    _short_setup = out.get("dump")
-    short_setup = _short_setup if isinstance(_short_setup, dict) else {}
-    active_setup = long_setup if long_setup.get("impulse_confirmed") else short_setup
-    out["lifecycle"] = ensure_fusion_lifecycle_fields(
-        out.get("lifecycle") if isinstance(out.get("lifecycle"), dict) else None,
-        setup=active_setup if active_setup else None,
-    )
-    for setup_key in ("dump", "long"):
-        setup = out.get(setup_key)
-        if isinstance(setup, dict):
-            setup["lifecycle"] = ensure_fusion_lifecycle_fields(
-                setup.get("lifecycle") if isinstance(setup.get("lifecycle"), dict) else out["lifecycle"],
-                setup=setup,
-            )
-    mtf = resolve_row_mtf(out, symbol=str(out.get("symbol") or ""))
-    if mtf is not None:
-        mtf_json = mtf_to_json_dict(mtf)
-        out["mtf"] = mtf_json if mtf_json is not None else mtf
-    return out
-
-
 def serialize_tick_row(row: dict[str, Any]) -> str:
     """JSONL line — normalized lifecycle/MTF, no ``default=str`` on dataclasses."""
     return json.dumps(prepare_tick_row_for_jsonl(row), default=str)
@@ -255,10 +158,8 @@ def serialize_tick_row(row: dict[str, Any]) -> str:
 __all__ = [
     "btc_market_context",
     "ensure_fusion_lifecycle_fields",
-    "hydrate_tick_row_from_jsonl",
     "mtf_to_json_dict",
     "prepare_tick_row_for_jsonl",
     "resolve_row_mtf",
-    "resolve_trade_direction",
     "serialize_tick_row",
 ]

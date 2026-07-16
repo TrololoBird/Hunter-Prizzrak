@@ -126,12 +126,13 @@ async def backfill_cold_lake_symbol(
         )
         ts_val = ""
         if ts_col:
+            # _prepare_frame coerces time columns to tz-aware datetimes, so
+            # emit ISO-8601 to match the live writer's row["ts"] format
+            # (datetime.now(UTC).isoformat()); str(datetime) uses a space
+            # separator and breaks lexicographic ts range filters.
             raw = work_15m.item(idx, ts_col)
-            if isinstance(raw, (int, float)):
-                from datetime import UTC, datetime
-                ts_val = datetime.fromtimestamp(int(raw) / 1000.0, tz=UTC).isoformat()
-            else:
-                ts_val = str(raw)
+            iso = getattr(raw, "isoformat", None)
+            ts_val = iso() if callable(iso) else str(raw)
 
         price = float(snap.get("close") or work_15m.item(idx, "close"))
         result: dict[str, Any] = {

@@ -333,7 +333,7 @@ async def snapshot_symbol(
         for name in tf_order:
             res = await safe_fetch(
                 lambda name=name: client.fetch_klines_cached(symbol, name, limit=limits[name]),
-                context=f"klines.{name}",
+                context=f"klines.{symbol}.{name}",
                 client=client,
             )
             kline_map[name] = res

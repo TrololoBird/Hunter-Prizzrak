@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import re
 import structlog
 import time
 from datetime import datetime
@@ -119,15 +120,24 @@ async def safe_fetch(
         return None
 
 
+_QUOTE_SUFFIXES = ("USDT", "USD", "BTC", "ETH")
+
+
 def _extract_symbol_from_context(context: str) -> str | None:
-    """Try to extract symbol from a safe_fetch context string like 'klines.BTCUSDT.1m'."""
+    """Extract a raw exchange symbol from a safe_fetch context like 'klines.BTCUSDT.1m'.
+
+    Only clean alphanumeric tokens qualify — a composite token like
+    'FUNDING_RATE:BTCUSDT' or 'inwatch_klines' must never become a blacklist
+    key that no universe symbol can ever match.
+    """
     if not context:
         return None
-    parts = str(context).replace("klines.", "").replace(".", " ").split()
-    for part in parts:
-        p = part.strip().upper()
-        if p.endswith("USDT") or p.endswith("USD") or p.endswith("BTC") or p.endswith("ETH"):
-            return p
+
+    for token in re.split(r"[.:/\s]+", str(context).upper()):
+        if not token or token in _QUOTE_SUFFIXES:
+            continue
+        if token.isalnum() and token.endswith(_QUOTE_SUFFIXES):
+            return token
     return None
 
 
@@ -328,7 +338,7 @@ async def resolve_kline_map(
     if res_1m is None:
         res_1m = await safe_fetch(
             lambda: client.fetch_klines_cached(symbol, "1m", limit=need_1m),
-            context="klines.1m",
+            context=f"klines.{symbol}.1m",
             client=client,
         )
     if res_1m is None:
@@ -352,7 +362,7 @@ async def resolve_kline_map(
         if name in _FAST_FRESH_KLINES:
             res = await safe_fetch(
                 lambda n=name: client.fetch_klines(symbol, n, limit=limits[n]),
-                context=f"klines.{name}",
+                context=f"klines.{symbol}.{name}",
                 client=client,
             )
         else:
@@ -362,7 +372,7 @@ async def resolve_kline_map(
                 return
             res = await safe_fetch(
                 lambda n=name: client.fetch_klines_cached(symbol, n, limit=limits[n]),
-                context=f"klines.{name}",
+                context=f"klines.{symbol}.{name}",
                 client=client,
             )
         kline_map[name] = res

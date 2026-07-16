@@ -1,4 +1,4 @@
-"""Resolve hunt watch universe: pinned anchors + scanner watchlist + ignition."""
+"""Resolve hunt watch universe: pinned anchors + scanner watchlist."""
 from __future__ import annotations
 
 
@@ -88,23 +88,13 @@ def load_watchlist_symbols(path: Path = WATCHLIST_PATH) -> list[str]:
     ]
 
 
-def _ignition_bias(meta: dict[str, Any]) -> WatchMode:
-    direction = str(meta.get("direction") or "pump").strip().lower()
-    if direction == "pump":
-        return "short"
-    if direction == "dump":
-        return "long"
-    return "both"
-
-
 def resolve_watch_universe(
     settings: BotSettings,
     *,
     static_modes: dict[str, WatchMode] | None = None,
     watchlist_path: Path = WATCHLIST_PATH,
-    ignited: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[tuple[str, ...], dict[str, WatchMode]]:
-    """Merge pinned anchors, ignition lane, and scanner watchlist into active hunt set."""
+    """Merge pinned anchors and scanner watchlist into active hunt set."""
     _ = settings
     modes: dict[str, WatchMode] = dict(static_modes or {})
     ordered: list[str] = []
@@ -118,14 +108,6 @@ def resolve_watch_universe(
     for sym in PINNED_SYMBOLS:
         _add(sym)
         modes.setdefault(sym, DEFAULT_MODES.get(sym, "both"))
-
-    for sym, meta in (ignited or {}).items():
-        s = str(sym).strip().upper()
-        if not s:
-            continue
-        _add(s)
-        if s not in pinned_set:
-            modes[s] = _ignition_bias(meta if isinstance(meta, dict) else {})
 
     for row in load_watchlist_rows(watchlist_path):
         sym = str(row.get("symbol") or "").strip().upper()
@@ -148,8 +130,7 @@ def resolve_watch_universe(
             if sym not in modes or row.get("suggest_minute_watch"):
                 modes[sym] = _bias_to_mode(bias)
 
-    ignition_extra = min(len(ignited or {}), 6)
-    cap = MAX_DYNAMIC_SYMBOLS + len(PINNED_SYMBOLS) + ignition_extra
+    cap = MAX_DYNAMIC_SYMBOLS + len(PINNED_SYMBOLS)
     symbols = tuple(ordered[: max(cap, len(PINNED_SYMBOLS))])
     return symbols, modes
 
@@ -179,26 +160,6 @@ def effective_watch_mode(
     return base
 
 
-
-
-def resolve_hunt_scan_universe(
-    settings: BotSettings,
-    *,
-    static_modes: dict[str, WatchMode] | None = None,
-    watchlist_path: Path = WATCHLIST_PATH,
-    ignited: dict[str, dict[str, Any]] | None = None,
-) -> tuple[tuple[str, ...], dict[str, WatchMode]]:
-    """Module 1 hunt fusion batch — pinned anchors excluded (Module 2 deep plane)."""
-    symbols, modes = resolve_watch_universe(
-        settings,
-        static_modes=static_modes,
-        watchlist_path=watchlist_path,
-        ignited=ignited,
-    )
-    pinned_set = set(PINNED_SYMBOLS)
-    hunt_symbols = tuple(s for s in symbols if s not in pinned_set)
-    return hunt_symbols, modes
-
 __all__ = [
     "load_pinned_symbols",
     "DEFAULT_MODES",
@@ -211,132 +172,16 @@ __all__ = [
     "is_pinned_symbol",
     "load_watchlist_rows",
     "load_watchlist_symbols",
-    "resolve_hunt_scan_universe",
     "resolve_watch_universe",
 ]
 
 
-# --- merged from data/pinned_cache.py ---
-
-from datetime import UTC, datetime
-
-from hunt_core.paths import DATA
-
-CACHE_DIR = DATA / "pinned_cache"
-_STALE_SECONDS = 300.0
-
-
-def _cache_path(symbol: str) -> Path:
-    return CACHE_DIR / f"{symbol.upper()}.json"
-
-
-def save_pinned_cache(symbol: str, row: dict[str, Any]) -> None:
-    sym = symbol.upper()
-    tf = row.get("timeframes") or {}
-    mtf = row.get("mtf")
-    mtf_payload: dict[str, Any] | None = None
-    if mtf is not None:
-        try:
-            mtf_payload = {
-                "dominant": getattr(mtf, "dominant", None),
-                "long_score": float(getattr(getattr(mtf, "long_scenario", None), "score", 0)),
-                "short_score": float(getattr(getattr(mtf, "short_scenario", None), "score", 0)),
-            }
-        except (TypeError, ValueError, AttributeError):
-            mtf_payload = None
-    # Verdict V2 summary is the single verdict source (legacy pinned_verdict /
-    # indicator_panel removed). Map action→kind, strength→confidence.
-    summary = row.get("prizrak_summary") if isinstance(row.get("prizrak_summary"), dict) else None
-    verdict_payload: dict[str, Any] | None = None
-    if summary:
-        action = str(summary.get("action") or "wait").lower()
-        kind = action if action in {"long", "short"} else "sideways"
-        try:
-            verdict_payload = {
-                "kind": kind,
-                "confidence": float(summary.get("strength") or 0),
-                "reason": str(summary.get("reason") or "")[:240],
-            }
-        except (TypeError, ValueError):
-            verdict_payload = None
-    poc_pack = row.get("poc_level_scenarios")
-    poc_payload: dict[str, Any] | None = None
-    if poc_pack is not None:
-        primary = getattr(poc_pack, "primary", None)
-        if primary is not None:
-            poc_payload = {
-                "label": getattr(primary, "label_ru", ""),
-                "confidence": float(getattr(primary, "confidence", 0)),
-                "action": str(getattr(primary, "action_ru", ""))[:180],
-            }
-        elif isinstance(poc_pack, dict):
-            prim = poc_pack.get("primary")
-            if isinstance(prim, dict):
-                poc_payload = {
-                    "label": prim.get("label"),
-                    "confidence": prim.get("confidence"),
-                    "action": prim.get("action"),
-                }
-    liq = row.get("liquidity_scenarios")
-    liq_payload: dict[str, Any] | None = None
-    if isinstance(liq, dict):
-        liq_payload = {
-            "dominant": liq.get("dominant"),
-            "dominant_probability": liq.get("dominant_probability"),
-        }
-    elif liq is not None:
-        try:
-            liq_payload = {
-                "dominant": getattr(liq, "dominant", None),
-                "dominant_probability": float(getattr(liq, "dominant_probability", 0)),
-            }
-        except (TypeError, ValueError, AttributeError):
-            liq_payload = None
-    payload = {
-        "symbol": sym,
-        "updated_at": datetime.now(UTC).isoformat(),
-        "price": row.get("price"),
-        "chg_24h_pct": row.get("chg_24h_pct"),
-        "lifecycle": row.get("lifecycle"),
-        "market": row.get("market"),
-        "timeframes": {k: tf.get(k) for k in ("1w", "1d", "4h", "1h", "15m") if tf.get(k)},
-        "mtf_summary": mtf_payload,
-        "prizrak_verdict": verdict_payload,
-        "poc_level_scenario": poc_payload,
-        "liquidity_scenarios": liq_payload,
-        "cross_exchange": row.get("cross_exchange"),
-    }
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    _cache_path(sym).write_text(json.dumps(payload, default=str), encoding="utf-8")
-
-
-def load_pinned_cache(symbol: str) -> dict[str, Any] | None:
-    path = _cache_path(symbol)
-    if not path.exists():
-        return None
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        return raw if isinstance(raw, dict) else None
-    except (OSError, json.JSONDecodeError):
-        return None
-
-
-def cache_is_fresh(symbol: str, *, max_age_s: float = _STALE_SECONDS) -> bool:
-    cached = load_pinned_cache(symbol)
-    if not cached:
-        return False
-    try:
-        ts = datetime.fromisoformat(str(cached.get("updated_at")))
-        return (datetime.now(UTC) - ts).total_seconds() <= max_age_s
-    except (TypeError, ValueError):
-        return False
-
 # --- merged from data/watchlist.py ---
 
 
-from hunt_core.paths import WATCHLIST
+from datetime import UTC, datetime
 
-SIGNAL_NOTIFY = WATCHLIST.parent / "signal_notify.json"
+from hunt_core.paths import WATCHLIST
 
 
 def load_watchlist_payload(path: Path = WATCHLIST) -> dict[str, Any]:
@@ -436,63 +281,6 @@ def add_to_watchlist(
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return True
 
-
-def load_pending_notify(path: Path = SIGNAL_NOTIFY) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
-    pending = payload.get("pending") or []
-    return [p for p in pending if isinstance(p, dict) and p.get("symbol")]
-
-
-def clear_signal_notify(symbol: str, *, path: Path = SIGNAL_NOTIFY) -> None:
-    sym = symbol.strip().upper()
-    if not sym.endswith("USDT"):
-        sym = f"{sym}USDT"
-    if not path.exists():
-        return
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return
-    pending = [p for p in (payload.get("pending") or []) if p.get("symbol") != sym]
-    payload["pending"] = pending
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def register_signal_notify(
-    symbol: str,
-    *,
-    direction: str,
-    phase: str,
-    notify_on_forming: bool = False,
-    min_fuel: float = 70.0,
-    path: Path = SIGNAL_NOTIFY,
-) -> None:
-    sym = symbol.strip().upper()
-    payload: dict[str, Any] = {"pending": []}
-    if path.exists():
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            payload = {"pending": []}
-    pending = [p for p in payload.get("pending") or [] if p.get("symbol") != sym]
-    pending.append(
-        {
-            "symbol": sym,
-            "direction": direction,
-            "await_phase": phase,
-            "notify_on_forming": notify_on_forming,
-            "min_fuel": min_fuel,
-            "registered_at": datetime.now(UTC).isoformat(),
-        }
-    )
-    payload["pending"] = pending[-50:]
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 # Market I/O: HuntCcxtClient / HuntCcxtSpotCompanion (see hunt/docs/CCXT.md).
 

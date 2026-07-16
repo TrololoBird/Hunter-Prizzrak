@@ -7,7 +7,7 @@ from typing import Any
 
 import structlog
 
-from hunt_core.data.universe import PINNED_SYMBOLS, save_pinned_cache
+from hunt_core.data.universe import PINNED_SYMBOLS
 from hunt_core.market import HuntCcxtClient
 from hunt_core.paths import ANALYST_TICKS_JSONL
 from hunt_core.data.tick_jsonl import serialize_tick_row
@@ -277,11 +277,6 @@ async def assemble_analyst_tick(
     from hunt_core.toolkit.forecast import stamp_forecasts_on_row
 
     stamp_forecasts_on_row(row)
-
-    try:
-        save_pinned_cache(sym, row)
-    except Exception as exc:
-        LOG.warning("analyst_pinned_cache_failed", symbol=sym, error=repr(exc))
 
     from hunt_core.runtime.tick_state import deep_query_store
 

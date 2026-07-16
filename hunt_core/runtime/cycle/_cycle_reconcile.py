@@ -52,7 +52,7 @@ async def _reconcile_inwatch_active(
                 start_time_ms=int(anchor.timestamp() * 1000),
                 end_time_ms=int(now.timestamp() * 1000),
             ),
-            context="inwatch_klines",
+            context=f"inwatch_klines.{o_sym}",
             client=client,
         )
         if df is None or df.is_empty():
@@ -104,7 +104,7 @@ async def _reconcile_orphan_signals(
                 start_time_ms=int(anchor.timestamp() * 1000),
                 end_time_ms=int(now.timestamp() * 1000),
             ),
-            context="orphan_klines",
+            context=f"orphan_klines.{o_sym}",
             client=client,
         )
         if df is None or df.is_empty():

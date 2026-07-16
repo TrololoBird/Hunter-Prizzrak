@@ -76,10 +76,21 @@ def _merge_tracker_state(on_disk: dict[str, Any], buffered: dict[str, Any]) -> d
     disk_hist = on_disk.get("closed_history") or []
     buf_hist = buffered.get("closed_history") or []
     if buf_hist or disk_hist:
-        seen: set[str] = set()
+        # Dedup by the producer's leg key (symbol, direction, opened_at) —
+        # tracker.py archives at most one record per leg. Full-JSON identity
+        # let two divergent copies of the same closed leg both survive a merge
+        # and double-count in cooldown/history stats.
+        from hunt_core.track.outcomes import outcome_archive_key
+
+        seen: set[Any] = set()
         combined: list[Any] = []
         for rec in list(disk_hist) + list(buf_hist):
-            ident = json.dumps(rec, sort_keys=True, default=str) if isinstance(rec, dict) else str(rec)
+            if isinstance(rec, dict):
+                ident: Any = outcome_archive_key(rec) or json.dumps(
+                    rec, sort_keys=True, default=str
+                )
+            else:
+                ident = str(rec)
             if ident in seen:
                 continue
             seen.add(ident)
