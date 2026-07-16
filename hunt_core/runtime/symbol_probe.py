@@ -21,8 +21,15 @@ def humanize_probe_error(err: str, *, symbol: str) -> str | None:
 
     Returns None for unrecognized codes so the caller can fall back to the raw
     string. Presentation only — does not change what the signal gate rejects.
-    The 4h/1h HTF frames are REST-only, so right after a restart (or a rate-limit
-    pause) they lag until backfill catches up; the user hit exactly that window.
+
+    The advice here used to promise the staleness "usually self-heals a few minutes
+    after a restart, while 1h/4h backfill over REST". That was wrong twice over, and
+    it cost real debugging time: the observed condition was not a warmup window but a
+    permanent deadlock (see tests/test_stale_htf_cache_trap.py — fixed in 9ff1785),
+    and the message told the user to wait for a recovery that could never arrive.
+    Advice that invents a cause is worse than no advice: it sends the reader away.
+    So this now reports what is measured — the timeframe, the age, the threshold —
+    and offers the one action that actually bypasses the cached frame (`--live`).
     """
     short = symbol.replace("USDT", "")
     m = _STALE_RE.match(err.strip())
@@ -32,10 +39,10 @@ def humanize_probe_error(err: str, *, symbol: str) -> str | None:
         limit_h = limit_ms / 3_600_000
         return (
             f"📉 Свечи <b>{tf}</b> устарели: данные ~{age_h:.1f}ч назад "
-            f"(порог {limit_h:.0f}ч) — HTF-контекст временно недоступен.\n"
-            f"Обычно самовосстанавливается за несколько минут после рестарта "
-            f"бота, пока 1h/4h догружаются по REST. Повтори через пару минут "
-            f"или запроси свежие данные: <code>/signal {short} --live</code>"
+            f"(порог {limit_h:.0f}ч) — HTF-контекст недоступен, сигнал не строю.\n"
+            f"Свежие данные в обход кэша: <code>/signal {short} --live</code>\n"
+            f"Если {tf} висит устаревшим дольше порога — это не прогрев, "
+            f"а сбой загрузки: стоит посмотреть логи."
         )
     m = _KLINE_FETCH_RE.match(err.strip())
     if m:

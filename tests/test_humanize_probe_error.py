@@ -34,3 +34,28 @@ def test_empty_frame_message() -> None:
 def test_unknown_code_falls_back_to_none() -> None:
     assert humanize_probe_error("symbol_not_tradable", symbol="FOOUSDT") is None
     assert humanize_probe_error("data.klines_incomplete", symbol="FOOUSDT") is None
+
+
+def test_stale_message_does_not_promise_a_recovery_that_never_comes() -> None:
+    """The advice must not invent a cause it cannot know.
+
+    This message used to tell the user the staleness "usually self-heals a few minutes
+    after a restart, while 1h/4h backfill over REST". Live, the real condition was a
+    permanent deadlock in the frame cache (fixed in 9ff1785): the majors had been stale
+    for four hours and nothing was ever going to backfill them. The message sent the
+    reader away to wait for a recovery that could not arrive, and it read as reassuring
+    while the bot was half blind.
+
+    A reject may describe what it measured; it must not narrate a cause.
+    """
+    msg = humanize_probe_error(
+        "klines.1h.stale.BTCUSDT.18999600ms>10800000ms", symbol="BTCUSDT"
+    )
+    assert msg is not None
+    for claim in ("самовосстан", "догружаются", "через пару минут", "временно"):
+        assert claim not in msg, f"message must not promise self-recovery: {claim!r}"
+    # It must still carry the measurements and the one action that bypasses the cache.
+    assert "1h" in msg
+    assert "5.3" in msg  # observed age
+    assert "3" in msg  # threshold
+    assert "/signal BTC --live" in msg
