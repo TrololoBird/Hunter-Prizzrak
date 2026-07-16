@@ -58,7 +58,6 @@ UNIVERSAL_DEFAULTS: dict[str, Any] = {
     "tracker": {
         "tp1_partial_fix_pct_normal": 50.0,
         "tp1_partial_fix_pct_hot": 80.0,
-        "tp1_profit_lock_fraction": 0.5,
         "breakeven_risk_fraction": 0.25,
         "mfe_stall_hours": 8.0,
         "mfe_stall_min_pct": 1.0,

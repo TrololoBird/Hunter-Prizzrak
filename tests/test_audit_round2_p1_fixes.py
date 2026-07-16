@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from hunt_core.track._trailing import apply_tp1_breakeven_trail
+from hunt_core.track._trailing import apply_tp1_breakeven_trail, apply_tp1_management
 
 _ROOT = Path(__file__).resolve().parents[1]
 
@@ -41,6 +41,48 @@ def test_g70_breakeven_stop_clamped_long() -> None:
     ok = apply_tp1_breakeven_trail(active, direction="long", symbol="", row=None)
     assert ok is True
     assert active["stop_loss"] == 100.6  # clamped to extreme_hi, NOT 101.0
+
+
+def test_gm3_post_tp1_stop_is_breakeven_long() -> None:
+    # G-M3: the method + validated backtest move the stop to ENTRY after TP1, not to
+    # entry + 0.5×(TP1−entry). No favorable extreme recorded → stop == entry exactly.
+    active = {
+        "entry_lo": 100.0, "entry_hi": 100.0, "tp1": 120.0, "stop_loss": 90.0,
+    }
+    ok = apply_tp1_management(active, direction="long", symbol="", row=None)
+    assert ok is True
+    assert active["stop_loss"] == 100.0  # BE, NOT 110.0 (the old half-gain lock)
+    assert active["sl_at_breakeven"] is True
+    assert active["tp1_managed"] is True
+
+
+def test_gm3_post_tp1_stop_is_breakeven_short() -> None:
+    active = {
+        "entry_lo": 100.0, "entry_hi": 100.0, "tp1": 80.0, "stop_loss": 110.0,
+    }
+    ok = apply_tp1_management(active, direction="short", symbol="", row=None)
+    assert ok is True
+    assert active["stop_loss"] == 100.0  # BE, NOT 90.0
+
+
+def test_gm3_breakeven_buffer_stays_g70_clamped() -> None:
+    # With a recorded favorable extreme the existing BE+buf refinement stands (its
+    # G-70 clamp is pinned above) — but never the 0.5×gain lock.
+    active = {
+        "entry_lo": 100.0, "entry_hi": 100.0, "tp1": 120.0, "stop_loss": 90.0,
+        "extreme_hi": 120.0, "extreme_lo": 100.0,
+    }
+    apply_tp1_management(active, direction="long", symbol="", row=None)
+    assert active["stop_loss"] == 101.0  # entry + 1% min buffer, NOT 110.0
+
+
+def test_gm3_never_loosens_a_tighter_trailed_stop() -> None:
+    active = {
+        "entry_lo": 100.0, "entry_hi": 100.0, "tp1": 120.0, "stop_loss": 112.0,
+        "extreme_hi": 125.0, "extreme_lo": 100.0,
+    }
+    apply_tp1_management(active, direction="long", symbol="", row=None)
+    assert active["stop_loss"] == 112.0  # trailed stop already in profit stays
 
 
 def test_g67_manipulation_delivery_does_not_double_record_burst() -> None:

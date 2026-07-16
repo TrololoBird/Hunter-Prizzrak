@@ -191,15 +191,16 @@ def apply_tp1_breakeven_trail(
 def apply_tp1_management(
     active: dict[str, Any], *, direction: str, symbol: str = "", row: dict[str, Any] | None = None
 ) -> bool:
-    """After TP1: partial fix (50% normal / 80% hot) + lock the runner in profit.
+    """After TP1: partial fix (50% normal / 80% hot) + stop to BREAKEVEN (entry).
 
-    The post-TP1 stop must NEVER sit in the loss zone. The old logic placed it
-    ``entry*(1+buf)`` with a 1% floor — i.e. >=1% *beyond entry on the adverse
-    side* — which turned TP1 winners into ~1.5% losses (EPIC/UBU 2026-06-12)
-    and clobbered an already profit-trailed stop (a +9%-locked trail reset to
-    -1%). Instead lock a fraction of the realised TP1 distance: the stop sits
-    between entry and TP1 — in profit, yet far enough from the entry-noise band
-    that 1m wicks cannot reach it — and we never loosen a tighter trailed stop.
+    The method and the validated backtest (research/backtest_scanner.py) both model
+    TP1 as «часть сделки фиксируем, стоп в безубыток»: bank the partial, move the
+    stop to ENTRY, let the runner ride. The old logic locked
+    ``entry + 0.5×(TP1−entry)`` — a profit-lock halfway to TP1 that stopped runners
+    out on ordinary retests of the entry zone (G-M3). The stop must never sit in
+    the loss zone and we never loosen a tighter trailed stop;
+    ``apply_tp1_breakeven_trail`` then refines BE with the ATR buffer clamped to
+    the realized extreme (G-70).
     """
     if active.get("tp1_managed"):
         return False
@@ -207,19 +208,11 @@ def apply_tp1_management(
     if entry <= 0:
         return False
     pct = _tp1_pct(symbol)
-    tp1 = float(active.get("tp1") or 0)
-    lock_frac = float(tracker_thresholds(symbol).get("tp1_profit_lock_fraction", 0.5))
     cur = float(active.get("stop_loss") or 0)
     if direction == "short":
-        gain = entry - tp1 if (0.0 < tp1 < entry) else 0.0
-        lock_stop = min(entry - lock_frac * gain, entry)  # at/below entry = BE/profit
-        if cur > 0:
-            lock_stop = min(lock_stop, cur)  # never loosen a tighter trailed stop
+        lock_stop = min(entry, cur) if cur > 0 else entry
     else:
-        gain = tp1 - entry if tp1 > entry else 0.0
-        lock_stop = max(entry + lock_frac * gain, entry)
-        if cur > 0:
-            lock_stop = max(lock_stop, cur)
+        lock_stop = max(entry, cur) if cur > 0 else entry
     active["stop_loss"] = round(lock_stop, 6)
     active["partial_fixed_pct"] = pct
     active["sl_at_breakeven"] = True

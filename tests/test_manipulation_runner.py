@@ -17,6 +17,10 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from hunt_core.track import tracker as T
+from hunt_core.track._evaluate_levels import (
+    SIGNAL_TIMEOUT_HOURS,
+    SIGNAL_TIMEOUT_HOURS_LONG,
+)
 
 
 def _state(*, phase: str, tp1: float, tp2: float | None, sl: float,
@@ -79,12 +83,39 @@ def test_non_manipulation_signals_keep_closing_at_tp1():
     assert sig["status"] == "closed"
 
 
-def test_manipulation_without_tp2_keeps_closing_at_tp1():
-    """No mid-term target to ride to -> old behaviour, never an unbounded hold."""
+def test_single_target_long_manipulation_holds_the_runner():
+    """G-M1: Pattern C longs carry a single-pool ladder (tp2=None). TP1 is a
+    partial fix + stop -> BE; the runner rides until stall/stop/timeout, it must
+    NOT full-close on the first touch."""
     state = _state(phase="manipulation", tp1=110.0, tp2=None, sl=90.0)
     closed, sig = _resolve(state, 111.0)
-    assert closed == ["X:long"]
+    assert closed == []
+    assert sig["status"] == "active"
+    assert sig["tp1_hit"] is True
+    assert sig["tp1_managed"] is True
+    assert sig["stop_loss"] == 100.0  # BE = entry
+    from hunt_core.params.store import tp1_partial_fix_pct
+
+    assert sig["partial_fixed_pct"] == tp1_partial_fix_pct("X")  # regime fraction unchanged
+
+
+def test_single_target_short_manipulation_still_closes_at_tp1():
+    """Pattern B shorts keep the full close at their first target (метод:
+    фиксируем первую цель у шорта)."""
+    state = _state(phase="manipulation", tp1=90.0, tp2=None, sl=110.0, direction="short")
+    closed, sig = _resolve(state, 89.0, direction="short")
+    assert closed == ["X:short"]
     assert sig["status"] == "closed"
+
+
+def test_runner_partial_fix_moves_stop_to_breakeven():
+    """G-M3: after TP1 the ladder runner's stop is BE (entry), not a profit lock."""
+    state = _state(phase="manipulation", tp1=110.0, tp2=150.0, sl=90.0)
+    closed, sig = _resolve(state, 111.0)
+    assert closed == []
+    assert sig["stop_loss"] == 100.0
+    closed, sig = _resolve(state, 99.0)
+    assert closed == ["X:long"] and sig["status"] == "closed"
 
 
 def test_runner_outlives_the_48h_timeout_but_not_the_runaway_guard():
@@ -93,13 +124,26 @@ def test_runner_outlives_the_48h_timeout_but_not_the_runaway_guard():
     assert closed == [] and sig["status"] == "active"
 
     stale = _state(phase="manipulation", tp1=110.0, tp2=150.0, sl=90.0,
-                   age_min=(T.AUTO_RESOLVE_TIMEOUT_HOURS_LADDER + 1) * 60)
+                   age_min=(SIGNAL_TIMEOUT_HOURS_LONG + 1) * 60)
     closed, _ = _resolve(stale, 105.0)
     assert closed == ["X:long"]
 
 
-def test_plain_signal_still_times_out_at_48h():
-    state = _state(phase="pre", tp1=110.0, tp2=150.0, sl=90.0,
-                   age_min=(T.AUTO_RESOLVE_TIMEOUT_HOURS + 1) * 60)
-    closed, _ = _resolve(state, 105.0)
+def test_plain_short_still_times_out_at_48h():
+    state = _state(phase="pre", tp1=90.0, tp2=50.0, sl=110.0, direction="short",
+                   age_min=(SIGNAL_TIMEOUT_HOURS + 1) * 60)
+    closed, _ = _resolve(state, 105.0, direction="short")
+    assert closed == ["X:short"]
+
+
+def test_plain_long_gets_the_medium_term_timeout():
+    """G-M1: longs are medium-term (21d, dataset_v10-validated) — a 49h-old long
+    must survive the old flat 48h wall."""
+    young = _state(phase="pre", tp1=110.0, tp2=150.0, sl=90.0, age_min=49 * 60)
+    closed, sig = _resolve(young, 105.0)
+    assert closed == [] and sig["status"] == "active"
+
+    stale = _state(phase="pre", tp1=110.0, tp2=150.0, sl=90.0,
+                   age_min=(SIGNAL_TIMEOUT_HOURS_LONG + 1) * 60)
+    closed, _ = _resolve(stale, 105.0)
     assert closed == ["X:long"]
