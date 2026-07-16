@@ -145,12 +145,6 @@ class PreparedSymbol:
     liquidation_score_age_seconds: float | None = None
     spot_lead_return_1m: float | None = None
     spot_futures_spread_bps: float | None = None
-    btc_bias: str | None = None
-    eth_bias: str | None = None
-    sol_bias: str | None = None
-    xau_bias: str | None = None
-    xag_bias: str | None = None
-    pax_bias: str | None = None
     altcoin_season_index: float | None = None
     btc_phase: str | None = None
     global_market_regime: str | None = None
@@ -232,38 +226,6 @@ class PreparedSymbol:
     @property
     def symbol(self) -> str:
         return self.universe.symbol
-
-    @property
-    def atr_pct(self) -> float | None:
-        if self.work_15m.is_empty() or "atr_pct" not in self.work_15m.columns:
-            return None
-        value = self.work_15m.item(-1, "atr_pct")
-        try:
-            return None if value is None else float(value)
-        except (TypeError, ValueError):
-            return None
-
-    @property
-    def volume_ratio(self) -> float | None:
-        if self.work_15m.is_empty() or "volume_ratio20" not in self.work_15m.columns:
-            return None
-        value = self.work_15m.item(-1, "volume_ratio20")
-        try:
-            return None if value is None else float(value)
-        except (TypeError, ValueError):
-            return None
-
-    @property
-    def adx_1h(self) -> float | None:
-        if self.work_1h.is_empty() or "adx14" not in self.work_1h.columns:
-            return None
-        value = self.work_1h.item(-1, "adx14")
-        try:
-            return None if value is None else float(value)
-        except (TypeError, ValueError):
-            return None
-
-
 
 
 # ── Typed Events ─────────────────────────────────────────────────────────────

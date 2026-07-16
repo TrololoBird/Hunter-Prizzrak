@@ -76,13 +76,19 @@ def _rest_age(
     key: str,
     *,
     market: dict[str, Any] | None = None,
+    market_key: str | None = None,
     stale_threshold_s: float = 300.0,
 ) -> tuple[float | None, bool]:
+    """REST age from the client cache-age snapshot, else the market dict stamp.
+
+    ``key`` is the client cache key; ``market_key`` the market-dict field name when
+    they differ (stamp_market_freshness writes ``{delivery_key}_age_seconds`` using
+    _REST_CACHE_TO_MARKET, e.g. cache "funding" → market "funding_rate")."""
     raw: Any = None
     if cache_ages and key in cache_ages:
         raw = cache_ages[key]
     elif isinstance(market, dict):
-        raw = market.get(f"{key}_age_seconds")
+        raw = market.get(f"{market_key or key}_age_seconds")
     if raw is None:
         return None, False
     try:
@@ -159,7 +165,9 @@ def build_data_plane_audit(
     di_age = (
         ws_age
         if "ws" in di_src
-        else _rest_age(cache_ages, "book_depth", market=market)[0]
+        # cache key "book_depth" is stamped onto the market dict as
+        # depth_imbalance_age_seconds (see _REST_CACHE_TO_MARKET).
+        else _rest_age(cache_ages, "book_depth", market=market, market_key="depth_imbalance")[0]
     )
     fields.append(
         _field_entry(
@@ -209,8 +217,11 @@ def build_data_plane_audit(
             )
         )
 
-    # Funding
-    funding_live = market.get("live_funding_rate") or market.get("funding_live")
+    # Funding — `is not None` chain: an exact 0.0 live funding rate is valid WS data
+    # and must not fall through to the REST label (falsy-zero, invariant I-6).
+    funding_live = market.get("live_funding_rate")
+    if funding_live is None:
+        funding_live = market.get("funding_live")
     if funding_live is not None and ws_connected:
         fields.append(
             _field_entry(
@@ -221,7 +232,8 @@ def build_data_plane_audit(
             )
         )
     else:
-        age, stale = _rest_age(cache_ages, "funding", market=market)
+        # cache key "funding" is stamped onto the market dict as funding_rate_age_seconds.
+        age, stale = _rest_age(cache_ages, "funding", market=market, market_key="funding_rate")
         fields.append(
             _field_entry(
                 field="funding_rate",
@@ -291,10 +303,11 @@ def build_data_plane_audit(
             source="scanner_cusum",
             age_s=None,
             extra={
+                # NB: no leg_gain_pct here — nothing ever writes that key into the
+                # lifecycle dict (phantom, always null; audit R2 chunk 7).
                 "phase": lc.get("phase"),
                 "cusum": lc.get("cusum"),
                 "band": lc.get("cusum_band") or lc.get("band"),
-                "leg_gain_pct": lc.get("leg_gain_pct"),
             },
         )
     )

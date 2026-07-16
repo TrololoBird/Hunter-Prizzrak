@@ -19,6 +19,14 @@ def price_sanity_check(row: dict[str, Any], *, max_deviation_pct: float = 25.0) 
     refs: list[float] = []
     market_raw = row.get("market")
     market: dict[str, Any] = market_raw if isinstance(market_raw, dict) else {}
+    # KNOWN PHANTOMS (audit R2 chunk 7, DEFERRED-BACKTEST): "mark_price",
+    # "index_price" and "last_close_1h" never exist in the market dict — the real
+    # producer keys are market["mark"] and market["index"] (features/snapshot.py),
+    # and last_close_1h has no producer at all (closest real source:
+    # row["timeframes"]["1h_closed"]["close"]). Only "map_vp_poc" resolves today.
+    # Re-pointing these anchors adds refs to the deviation mean and changes which
+    # signals pass this gate → emission change, so the rewire must go through the
+    # backtest gate rather than be silently "fixed" here.
     for key in ("mark_price", "index_price", "last_close_1h", "map_vp_poc"):
         try:
             v = float(market.get(key) or 0)
@@ -39,17 +47,6 @@ def price_sanity_check(row: dict[str, Any], *, max_deviation_pct: float = 25.0) 
                 refs.append(v)
         except (TypeError, ValueError):
             LOG.debug("price_sanity_check structure.key_levels.%s float conversion failed", key, exc_info=True)
-            continue
-
-    session_raw = row.get("session_meta")
-    session: dict[str, Any] = session_raw if isinstance(session_raw, dict) else {}
-    for key in ("price_high", "price_low", "last_price"):
-        try:
-            v = float(session.get(key) or 0)
-            if v > 0:
-                refs.append(v)
-        except (TypeError, ValueError):
-            LOG.debug("price_sanity_check session_meta.%s float conversion failed", key, exc_info=True)
             continue
 
     if not refs:

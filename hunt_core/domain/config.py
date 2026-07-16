@@ -311,19 +311,12 @@ def load_config_defaults_toml() -> dict[str, Any]:
         # kept (range_hot_pct, not the old hot_range_pct rename) so store's .get() hits.
         out["hunter"] = {k: v for k, v in scanner.items() if v is not None}
 
+    # NB (audit R2 chunk 7): only [confirm.short] is wired (→ "gates", consumed by
+    # effective_hunt_params). The [confirm] top-level keys (entry_confirm_tf* /
+    # dump_fast_confirm) used to be forwarded to store.py readers that had zero
+    # call-sites — that forwarding and those readers were deleted; the TOML block
+    # is annotated DOC-ONLY. Wiring it up is a tuning change (backtest gate).
     confirm_root = raw.get("confirm") if isinstance(raw.get("confirm"), dict) else None
-    if isinstance(confirm_root, dict):
-        confirm_cfg: dict[str, Any] = {}
-        for tf_key in ("entry_confirm_tf", "entry_confirm_tf_dump", "entry_confirm_tf_long"):
-            tf_val = confirm_root.get(tf_key)
-            if isinstance(tf_val, str) and tf_val.strip():
-                confirm_cfg[tf_key] = tf_val.strip().lower()
-        fast = confirm_root.get("dump_fast_confirm")
-        if isinstance(fast, bool):
-            confirm_cfg["dump_fast_confirm"] = fast
-        if confirm_cfg:
-            out["confirm"] = {**out.get("confirm", {}), **confirm_cfg}
-
     confirm_short = confirm_root.get("short") if isinstance(confirm_root, dict) else None
     if isinstance(confirm_short, dict):
         gates: dict[str, Any] = {}
@@ -351,24 +344,14 @@ def load_config_defaults_toml() -> dict[str, Any]:
             if v is not None
         }
 
-    lifecycle_sq = raw.get("lifecycle", {}).get("squeeze") if isinstance(raw.get("lifecycle"), dict) else None
-    if isinstance(lifecycle_sq, dict):
-        lc_block = dict(out.get("lifecycle") or {})
-        for k, v in {
-            "squeeze_bb_width_pctile_max": lifecycle_sq.get("bb_width_pctile_max"),
-            "squeeze_donchian_width_pct_max": lifecycle_sq.get("donchian_width_pct_max"),
-            "rsi_exhaustion_enter": lifecycle_sq.get("rsi_exhaustion_enter"),
-            "rsi_exhaustion_exit": lifecycle_sq.get("rsi_exhaustion_exit"),
-            "taker_buy_min": lifecycle_sq.get("taker_buy_min"),
-            "taker_sell_max": lifecycle_sq.get("taker_sell_max"),
-            "cascade_wick_ratio_min": lifecycle_sq.get("cascade_wick_ratio_min"),
-        }.items():
-            if v is not None:
-                lc_block[k] = v
-        if lc_block:
-            out["lifecycle"] = lc_block
-
-    for section in ("collect", "scoring", "tracker", "delivery", "intra_bar", "fusion"):
+    # NB (audit R2 chunk 7): forwarding for [lifecycle].squeeze, [collect], [scoring],
+    # [delivery], [intra_bar] and [fusion] was deleted — every reader of those sections
+    # (lifecycle/collect/scoring/delivery/confirm *_thresholds in params/store.py) had
+    # zero call-sites, and universal_section("fusion"/"intra_bar") was never invoked at
+    # all, so real tuned TOML values were silently ignored either way. Only sections
+    # with a live consumer are forwarded. Re-wiring any of them is a tuning change and
+    # must go through the backtest gate.
+    for section in ("tracker",):
         block = raw.get(section)
         if isinstance(block, dict):
             out[section] = {k: v for k, v in block.items() if v is not None}

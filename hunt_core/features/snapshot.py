@@ -873,6 +873,11 @@ def market_snapshot(
         "taker_15m": pack.get("taker_15m"),
         "taker_1h": prepared.taker_ratio,
         "depth_imbalance": prepared.depth_imbalance,
+        # True producing-path provenance for the data-plane audit (audit R2 chunk 7:
+        # the audit's market.get fallback was a phantom — sources lived only on
+        # `prepared`, which the live audit call site never receives).
+        "depth_imbalance_source": getattr(prepared, "depth_imbalance_source", None),
+        "orderflow_source": getattr(prepared, "orderflow_source", None),
         "microprice_bias": prepared.microprice_bias,
         "nearest_bid_wall": getattr(prepared, "nearest_bid_wall", None),
         "nearest_ask_wall": getattr(prepared, "nearest_ask_wall", None),

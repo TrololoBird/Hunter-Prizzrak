@@ -53,6 +53,17 @@ def classify_row_health(row: Mapping[str, Any]) -> str | None:
     keys — anything it cannot positively classify as a failure is treated as healthy."""
     if not isinstance(row, Mapping):
         return None
+    # rest_error rows (tick_path stamped by _cycle_tick's timeout / exception handlers)
+    # ARE data blackouts by construction: the symbol's snapshot could not be assembled
+    # at all. Before this branch existed they slipped past the error regex below
+    # ("symbol_tick_timeout" / repr(exc) match nothing) and a dead-proxy stall — the
+    # exact 2026-07-11 incident this module was built for — was classified HEALTHY.
+    if str(row.get("tick_path") or "") == "rest_error":
+        err = row.get("error")
+        err_s = str(err) if isinstance(err, str) and err else ""
+        if "timeout" in err_s.lower():
+            return "rest_error.timeout"
+        return "rest_error.exception"
     violations = row.get("data_violations")
     if isinstance(violations, (list, tuple)) and violations:
         return _violation_kind(violations[0])

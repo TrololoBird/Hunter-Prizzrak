@@ -34,6 +34,39 @@ def test_classify_fetch_failed_and_rows_shortfall():
     assert classify_row_health({"data_violations": ["klines.1m.rows=1<min_raw=300"]}) == "klines.1m.rows"
 
 
+def _rest_error_row(sym: str, *, error: str) -> dict:
+    """The exact row shape _cycle_tick produces for timeout / network-exception ticks."""
+    return {
+        "ts": "2026-07-11T12:00:00+00:00",
+        "symbol": sym,
+        "error": error,
+        "tick_path": "rest_error",
+        "snapshot_tier": "full",
+    }
+
+
+def test_rest_error_timeout_rows_are_blackout_failures():
+    # 2026-07-11 dead-proxy signature: every symbol times out — must NOT be HEALTHY.
+    assert classify_row_health(_rest_error_row("BTCUSDT", error="symbol_tick_timeout")) == "rest_error.timeout"
+    assert classify_row_health(_rest_error_row("ETHUSDT", error="TimeoutError()")) == "rest_error.timeout"
+
+
+def test_rest_error_exception_rows_are_blackout_failures():
+    assert (
+        classify_row_health(_rest_error_row("BTCUSDT", error="ClientProxyConnectionError('dead')"))
+        == "rest_error.exception"
+    )
+    # even with an empty/odd error string, tick_path=rest_error is a failure by construction
+    assert classify_row_health({"symbol": "X", "tick_path": "rest_error"}) == "rest_error.exception"
+
+
+def test_universe_of_rest_errors_is_critical():
+    rows = [_rest_error_row(s, error="symbol_tick_timeout") for s in ("A", "B", "C", "D", "E", "F")]
+    h = assess_universe_health(rows)
+    assert h.degraded and h.critical
+    assert h.dominant_kind == "rest_error.timeout"
+
+
 def test_healthy_row_is_not_a_failure():
     assert classify_row_health(_healthy_row("BTCUSDT")) is None
     # a legitimate no-signal tick (neutral phase, no data error) is NOT unhealthy

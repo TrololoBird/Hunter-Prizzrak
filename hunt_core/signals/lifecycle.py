@@ -5,7 +5,7 @@ import hashlib
 import json
 import structlog
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from hunt_core.paths import SESSION_DIR
@@ -17,7 +17,6 @@ from hunt_core.signals.model import Signal, SignalModule, SignalState
 MID_DUMP_LC_PHASES: frozenset[str] = frozenset({"mid"})
 
 _LOG = structlog.get_logger(__name__)
-_COOLDOWN_HOURS = 4.0
 _STORE_PATH = SESSION_DIR / "signal_lifecycle.json"
 
 
@@ -111,22 +110,6 @@ class SignalLifecycleStore:
             encoding="utf-8",
         )
 
-    def _cooldown_ok(self, setup_id: str, *, now: datetime | None = None) -> bool:
-        now = now or datetime.now(UTC)
-        entry = self.entries.get(setup_id)
-        if not entry:
-            return True
-        last = entry.get("last_emit_at")
-        if not last:
-            return True
-        try:
-            dt = datetime.fromisoformat(str(last).replace("Z", "+00:00"))
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=UTC)
-        except (TypeError, ValueError):
-            return True
-        return now - dt >= timedelta(hours=_COOLDOWN_HOURS)
-
     def record_emit(self, signal: Signal, *, event: str) -> None:
         self.entries[signal.setup_id] = {
             "symbol": signal.symbol,
@@ -154,7 +137,6 @@ def process_lifecycle_tick(
     summary: dict[str, Any] = summary_raw if isinstance(summary_raw, dict) else {}
     action = str(summary.get("action") or "wait").lower()
     sym = str(row.get("symbol") or "").upper()
-    as_of = str(row.get("as_of") or row.get("ts") or datetime.now(UTC).isoformat())
 
     if action not in {"long", "short"}:
         return LifecycleTransition(event="none", suppress_reason="wait_or_no_setup")
@@ -174,14 +156,14 @@ def process_lifecycle_tick(
     now_state: SignalState = "forming"
     event: Literal["signal", "activated", "none"] = "none"
 
+    # NB: the ``activation in {"near_entry", ...}`` elif that used to sit between
+    # these two branches was byte-equivalent to the else (and near_catalyst /
+    # at_catalyst never appear in prizrak_summary["activation"] — the orchestrator
+    # only writes idle / approaching / near_entry / in_entry_zone). Merged.
     if activation == "in_entry_zone":
         now_state = "activated"
         if prev_state != "activated":
             event = "activated"
-    elif activation in {"near_entry", "near_catalyst", "at_catalyst"}:
-        now_state = "signal"
-        if prev_state not in {"signal", "activated", "tracking"}:
-            event = "signal"
     else:
         now_state = "signal"
         if prev_state not in {"signal", "activated", "tracking"}:
@@ -190,23 +172,14 @@ def process_lifecycle_tick(
     if event == "none":
         return LifecycleTransition(event="none", suppress_reason="no_state_advance")
 
-    # Per-setup 4h cooldown. The old `and prev_state == "signal"` made this
-    # unreachable — event=="signal" is only set when prev_state is NOT in
-    # {signal,activated,tracking}, so that conjunct was always False and the
-    # cooldown never fired (SIG-1). Dropping it lets the cooldown do its job: a
-    # setup that already emitted a "signal" and then oscillated out of and back
-    # into the near-entry state within 4h is suppressed (anti-spam). The first
-    # emission passes (_cooldown_ok True when there is no prior last_emit_at).
-    if event == "signal" and not store._cooldown_ok(setup_id):
-        return LifecycleTransition(event="none", suppress_reason="setup_cooldown")
-
+    # NB: the per-setup 4h cooldown branch that used to sit here was unreachable in
+    # production even after the SIG-1 conjunct fix: event=="signal" only fires when
+    # the store has NO entry for the setup_id (record_emit always stores state
+    # "signal"/"activated", so any existing entry suppresses via prev_state), and a
+    # missing entry always passed the cooldown. The state machine itself is the
+    # dedup — entries never expire. Removed with its _cooldown_ok helper; reviving
+    # a real cooldown is an emission change and goes through the backtest gate.
     plan = _plan_from_summary(summary)
-    # NB: no local ``from datetime import ...`` here — that made ``datetime`` a
-    # function-local for the whole function, so the earlier use at ``as_of``
-    # raised UnboundLocalError and broke every live Prizrak emission. UTC /
-    # datetime / timedelta are imported at module level (top of file).
-    ttl = 120  # default: 2-minute opportunity window
-    expires_at = (datetime.now(UTC) + timedelta(seconds=ttl)).isoformat()
     signal = Signal(
         symbol=sym,
         module=module,
@@ -215,11 +188,6 @@ def process_lifecycle_tick(
         thesis=thesis_kind,
         plan=plan,
         state=now_state,
-        created_at=as_of,
-        activated_at=as_of if event == "activated" else "",
-        as_of=as_of,
-        ttl_seconds=ttl,
-        expires_at=expires_at,
         provenance={"path": summary.get("path"), "strength": summary.get("strength")},
     )
     # Attach scenario metadata when available

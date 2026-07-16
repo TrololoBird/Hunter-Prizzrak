@@ -33,12 +33,11 @@ def append_prescan_universe_audit(hit: Any, *, ts: datetime | None = None) -> No
             "energy": round(float(getattr(hit, "energy", 0) or 0), 2),
             "change_pct": round(float(getattr(hit, "change_pct", 0) or 0), 2),
             "interval": str(getattr(hit, "interval", "") or ""),
-            "readiness_direction": str(getattr(hit, "readiness_direction", "") or ""),
-            "cross_venues": int(getattr(hit, "cross_venues", 0) or 0),
+            # NB (audit R2 chunk 7): readiness_direction / cross_venues were dropped —
+            # this is called with a _DebouncedSymbol (slots), which never carries them,
+            # so they were always ""/0. leg_gain_pct / phase were hardcoded nulls.
             "oi_divergence": getattr(hit, "oi_divergence", None),
             "quote_volume": getattr(hit, "quote_volume", None),
-            "leg_gain_pct": None,
-            "phase": None,
         }
         UNIVERSE_AUDIT_JSONL.parent.mkdir(parents=True, exist_ok=True)
         append_jsonl_lines(
@@ -95,14 +94,11 @@ def append_tick_universe_audit(row: dict[str, Any]) -> None:
         lc = _lc if isinstance(_lc, dict) else {}
         _prescan = row.get("prescan_outlier")
         prescan = _prescan if isinstance(_prescan, dict) else {}
-        _dump = row.get("dump")
-        dump = _dump if isinstance(_dump, dict) else {}
-        _long_s = row.get("long")
-        long_s = _long_s if isinstance(_long_s, dict) else {}
-        fusion_score = max(
-            float(dump.get("fusion_score") or 0),
-            float(long_s.get("long_score") or long_s.get("fusion_score") or 0),
-        )
+        # NB (audit R2 chunk 7): leg_gain_pct / fall_from_high_pct were dropped — no
+        # producer anywhere writes those keys into the lifecycle dict (always null).
+        # fusion_score was dropped too: row["dump"]/row["long"] are permanently
+        # neutral stubs (tick_assembly) with no fusion_score/long_score keys, so the
+        # field was always 0 → null. Don't re-add without a real producer.
         record = {
             "ts": row.get("ts") or datetime.now(UTC).isoformat(),
             "event": "tick_snapshot",
@@ -110,14 +106,11 @@ def append_tick_universe_audit(row: dict[str, Any]) -> None:
             "tick_path": row.get("tick_path"),
             "snapshot_tier": row.get("snapshot_tier"),
             "chg_24h_pct": row.get("chg_24h_pct"),
-            "leg_gain_pct": lc.get("leg_gain_pct"),
-            "fall_from_high_pct": lc.get("fall_from_high_pct"),
             "phase": lc.get("phase") or lc.get("phase_fusion"),
             "watch_ok": lc.get("watch_ok"),
             "cusum": lc.get("cusum"),
             "cusum_band": lc.get("cusum_band") or lc.get("band"),
             "recommended_bias": lc.get("recommended_bias") or lc.get("bias"),
-            "fusion_score": round(fusion_score, 2) if fusion_score else None,
             "prescan_energy": prescan.get("energy"),
             "prescan_direction": prescan.get("direction"),
             "prescan_change_pct": prescan.get("change_pct"),

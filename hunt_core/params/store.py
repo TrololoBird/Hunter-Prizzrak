@@ -32,37 +32,15 @@ def self_tuning_frozen() -> bool:
 # Detection thresholds live in ``detect/calibrate.py`` (self-calibrating). This file
 # retains delivery floors, geometry caps, liquidity/cooldown, and sample-size floors.
 UNIVERSAL_DEFAULTS: dict[str, Any] = {
-    "fusion": {
-        "min_n": 30,
-        "q_gate": 0.92,
-        "q_phase": 0.85,
-        "min_active_factors": 2,
-        "lookback": 120,
-        "global_gate_floor": 0.06,
-        "abs_magnitude_floor": 0.5,
-        "vol_floor_pct": 0.15,
-        "fusion_score_scale": 25.0,
-        "cusum_k": 0.5,
-        "cusum_span": 96,
-        "phase_mid_exit_ratio": 0.65,
-        "phase_mid_exit_bars": 2,
-        "funding_min_n": 48,
-        "pre_gate_min_energy": 1,
-        "pre_gate_min_structure": 0.10,
-        "pre_gate_min_magnitude": 0.08,
-    },
+    # NB (audit R2 chunk 7): the "fusion", "delivery", "scoring" and "confirm"
+    # default blocks were deleted — universal_section() was never called with
+    # those names by any live code path (their reader functions had zero
+    # call-sites), so the values were dead data.
     "gates": {
         "confirm_min_score": 60.0,
         "confirm_min_score_no_div": 68.0,
         "forming_min_score": 45.0,
         "min_risk_reward": 1.15,
-    },
-    "delivery": {
-        "min_ev": 0.0,
-        "min_p_win": 0.42,
-        "min_p_win_forming": 0.35,
-        "min_fuel": 72.0,
-        "min_structural_hard": 2,
     },
     "levels": {
         "sl_max_pct_normal": 8.0,
@@ -105,19 +83,6 @@ UNIVERSAL_DEFAULTS: dict[str, Any] = {
         "min_samples": 12,
         "max_wr": 0.28,
         "prior_wr": 0.35,
-    },
-    "scoring": {
-        "cex_pump_ret_1m_min": 0.02,
-        "cex_dump_ret_1m_max": -0.02,
-        "cex_z_vol_30m_min": 3.0,
-        "cex_pump_buy_share_min": 0.65,
-        "cex_dump_buy_share_max": 0.35,
-    },
-    "confirm": {
-        "entry_confirm_tf": "5m",
-        "entry_confirm_tf_dump": "1m",
-        "entry_confirm_tf_long": "5m",
-        "dump_fast_confirm": True,
     },
     "ws": {
         "kline_grace_sec": 1.5,
@@ -284,11 +249,11 @@ def effective_hunt_params(symbol: str = "") -> HuntCalibratedParams:
     )
 
 
-def lifecycle_thresholds(symbol: str = "") -> dict[str, float]:
-    lc = universal_section("lifecycle")
-    per = symbol_section(symbol.upper(), "lifecycle") if symbol else {}
-    merged = _deep_merge(lc, per)
-    return {k: float(v) for k, v in merged.items() if isinstance(v, (int, float))}
+# NB (audit R2 chunk 7): the dead threshold readers lifecycle_thresholds /
+# confirm_thresholds / entry_confirm_tf / dump_fast_confirm_enabled /
+# collect_thresholds / scoring_thresholds / delivery_thresholds were deleted —
+# zero call-sites repo-wide; their TOML sections are annotated DOC-ONLY in
+# config.defaults.toml. Re-wiring is a tuning change (backtest gate).
 
 
 def levels_thresholds(symbol: str = "") -> dict[str, float]:
@@ -348,59 +313,6 @@ def basis_thresholds(symbol: str = "") -> dict[str, float]:
         if isinstance(v, (int, float)):
             out[k] = float(v)
     return out
-
-
-def confirm_thresholds(symbol: str = "") -> dict[str, float]:
-    conf = universal_section("confirm")
-    per = symbol_section(symbol.upper(), "confirm") if symbol else {}
-    merged = _deep_merge(conf, per)
-    return {k: float(v) for k, v in merged.items() if isinstance(v, (int, float))}
-
-
-_ENTRY_CONFIRM_TF_ALLOWED = frozenset({"1m", "5m", "15m"})
-
-
-def entry_confirm_tf(symbol: str = "", direction: str = "") -> str:
-    """Closed-bar interval for structural entry confirm (Phase 13A).
-
-    Direction-aware: dumps confirm on a faster TF than longs because a 5–8% dump
-    can complete in minutes while a pump builds over hours. ``direction="short"``
-    reads ``entry_confirm_tf_dump``, ``"long"`` reads ``entry_confirm_tf_long``,
-    both falling back to the base ``entry_confirm_tf``.
-    """
-    conf = universal_section("confirm")
-    per = symbol_section(symbol.upper(), "confirm") if symbol else {}
-    merged = _deep_merge(conf, per)
-    base = merged.get("entry_confirm_tf") or "5m"
-    dir_key = {"short": "entry_confirm_tf_dump", "long": "entry_confirm_tf_long"}.get(direction)
-    chosen = merged.get(dir_key) if dir_key else None
-    raw = str(chosen if chosen is not None else base).strip().lower().removesuffix("_closed")
-    if raw in _ENTRY_CONFIRM_TF_ALLOWED:
-        return raw
-    base_raw = str(base).strip().lower().removesuffix("_closed")
-    return base_raw if base_raw in _ENTRY_CONFIRM_TF_ALLOWED else "5m"
-
-
-def dump_fast_confirm_enabled(symbol: str = "") -> bool:
-    """Allow single fast-TF closed break + 1 secondary to confirm a dump."""
-    conf = universal_section("confirm")
-    per = symbol_section(symbol.upper(), "confirm") if symbol else {}
-    merged = _deep_merge(conf, per)
-    return bool(merged.get("dump_fast_confirm", True))
-
-
-def collect_thresholds(symbol: str = "") -> dict[str, float]:
-    col = universal_section("collect")
-    per = symbol_section(symbol.upper(), "collect") if symbol else {}
-    merged = _deep_merge(col, per)
-    return {k: float(v) for k, v in merged.items() if isinstance(v, (int, float))}
-
-
-def scoring_thresholds(symbol: str = "") -> dict[str, float]:
-    sc = universal_section("scoring")
-    per = symbol_section(symbol.upper(), "scoring") if symbol else {}
-    merged = _deep_merge(sc, per)
-    return {k: float(v) for k, v in merged.items() if isinstance(v, (int, float))}
 
 
 def hunter_thresholds() -> dict[str, float | int]:
@@ -474,13 +386,6 @@ def stats_thresholds(symbol: str = "") -> dict[str, float]:
     st = universal_section("stats")
     per = symbol_section(symbol.upper(), "stats") if symbol else {}
     merged = _deep_merge(st, per)
-    return {k: float(v) for k, v in merged.items() if isinstance(v, (int, float))}
-
-
-def delivery_thresholds(symbol: str = "") -> dict[str, float]:
-    dl = universal_section("delivery")
-    per = symbol_section(symbol.upper(), "delivery") if symbol else {}
-    merged = _deep_merge(dl, per)
     return {k: float(v) for k, v in merged.items() if isinstance(v, (int, float))}
 
 

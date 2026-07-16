@@ -58,7 +58,6 @@ from hunt_core.features.snapshot import (
     tf_snapshot_lite,
 )
 from hunt_core.scanner.detect.delivery_support import liquidity_skip_reason
-from hunt_core.domain.snapshot import MarketSnapshot
 from hunt_core.features.structure import assess_market_structure
 from hunt_core.data.tick_jsonl import ensure_fusion_lifecycle_fields
 from hunt_core.features.factors import build_factor_panel
@@ -760,9 +759,6 @@ async def snapshot_symbol(
     stamp_market_freshness(market, ws_snap, pack, client=client, symbol=symbol)
     stamp_market_derivatives_provenance(market)
 
-    _market_snapshot = MarketSnapshot.from_market(market)
-    market["_snapshot"] = _market_snapshot.to_dict()
-
     structure_ctx: dict[str, Any] = {**(market or {}), **(regime or {})}
     if hot_carry and isinstance(carry_cross, dict):
         structure_ctx["cross_microstructure"] = carry_cross
@@ -833,7 +829,6 @@ async def snapshot_symbol(
         else book_walls_from_depth(pack.get("book_depth")),
         "cross_microstructure": carry_cross if hot_carry else None,
         "structure": structure,
-        "snapshot": _market_snapshot.to_dict(),
         "_prepared": prepared,
     }
     if hot_carry and carry_liq is not None:
@@ -1063,13 +1058,6 @@ async def snapshot_symbol(
         )
 
     result["factor_panel"] = build_factor_panel(result)
-
-    try:
-        from hunt_core.domain.structure_state import structure_state_from_row
-
-        result["structure_state"] = structure_state_from_row(result).to_dict()
-    except Exception as exc:
-        LOG.warning("structure_state_snapshot_failed | symbol=%s error=%s", symbol, exc)
 
     try:
         from hunt_core.toolkit.forecast import stamp_forecasts_on_row

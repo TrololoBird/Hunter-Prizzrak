@@ -48,6 +48,11 @@ max_change_pct_for_merge = 8.0
 # Liquidation burst advisory (P1.9): HUNT_LIQ_BURST_TG=1 to enable cascade radar TG
 
 [confirm]
+# DOC-ONLY (these top-level keys; [confirm.short] below IS wired via "gates"):
+# audit R2 chunk 7 — the readers (entry_confirm_tf / dump_fast_confirm_enabled /
+# confirm_thresholds in params/store.py) had zero call-sites and were deleted, so
+# editing these keys never changed behaviour. Kept as documentation of the intended
+# confirm-TF policy; wiring them up is a tuning change (backtest gate).
 # Closed-bar TF for structural entry confirm (5m entry precision; 15m secondary).
 entry_confirm_tf = "5m"
 # Direction-aware confirm TF: dumps complete in minutes, pumps build over hours.
@@ -106,6 +111,9 @@ refresh_hours = 4
 min_liquid_qvol_usd = 10_000_000
 
 [delivery]
+# DOC-ONLY (audit R2 chunk 7): the reader (delivery_thresholds in params/store.py) had
+# zero call-sites and was deleted — editing these keys never changed behaviour. Kept as
+# documentation of the intended EV floors; wiring is a tuning change (backtest gate).
 # Catalog EV-primary is default; set HUNT_LEGACY_FUEL=1 to restore legacy fuel scoring only.
 ev_primary_default = false
 min_ev = 0.0
@@ -145,6 +153,8 @@ tp1_breakeven_atr_fraction = 0.25
 # and [fusion] below. Feature flags for collect/scoring fuel are in params/store.py.
 
 [scoring]
+# DOC-ONLY (audit R2 chunk 7): the reader (scoring_thresholds in params/store.py) had
+# zero call-sites and was deleted — editing these keys never changed behaviour.
 # Setup catalog CEX burst detectors only (setups/detectors.py).
 cex_pump_ret_1m_min = 0.02
 cex_dump_ret_1m_max = -0.02
@@ -206,6 +216,9 @@ voids_top_n = 5
 vp_value_area_pct = 0.70
 
 [intra_bar]
+# DOC-ONLY (audit R2 chunk 7): NOT wired — universal_section("intra_bar") is never
+# called anywhere; no engine reads these keys (the config.py forwarding to a dead end
+# was deleted). Kept as documentation of the intended sequence-detector tuning.
 # Intra-bar PRE-pump/PRE-dump — sequence detector.
 # Sub-signals (DOM -> trade_burst -> momentum_z) arrive sequentially.
 # PRE = DOM + trade_burst (confidence 0.67); ignition = + momentum (confidence 1.0).
@@ -224,8 +237,11 @@ sequence_window_seconds = 60
 dom_min_events = 1
 
 [fusion]
-# Official fusion tunables — see docs/FUSION_PARAMS.md (threshold-free detection is impossible).
-# These values are now actually read by fusion_params() via load_config_defaults_toml().
+# DOC-ONLY (audit R2 chunk 7): NOT wired — the previous comment claiming these values
+# are "actually read by fusion_params()" was FALSE (no such function exists), and
+# universal_section("fusion") is never called by any live code path — the detection
+# engines use their own in-module constants / self-calibration.
+# Kept as documentation — see docs/FUSION_PARAMS.md; wiring = tuning change (backtest gate).
 min_n = 30
 lookback = 120
 q_gate = 0.92

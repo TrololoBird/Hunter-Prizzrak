@@ -880,6 +880,10 @@ _REST_CACHE_TO_MARKET: dict[str, str] = {
     "taker_1h": "taker_1h",
     "funding": "funding_rate",
     "basis_5m": "basis_5m",
+    # Book-depth cache age is stamped against the market field the REST book feeds
+    # (depth_imbalance) so the data-plane audit can report a truthful REST depth age
+    # (audit R2 chunk 7: this age never resolved before — key-name mismatch).
+    "book_depth": "depth_imbalance",
 }
 
 
