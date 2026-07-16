@@ -15,7 +15,7 @@ dependencies = [
     "orjson>=3.10",
     "python-dotenv>=1.2.2",
     # Polars-plugin floors = the exact versions the 500+-test suite (incl.
-    # tests/test_indicator_reference_values.py + tests/test_polars_ds_reference.py
+    # tests/test_indicator_reference_values.py
     # canaries) is validated against. These plugins drift APIs without semver
     # discipline (precedent: polars_ols went to positional `features` args +
     # mode="coefficients"; ccxt fstream split) — do NOT lower the floors, and

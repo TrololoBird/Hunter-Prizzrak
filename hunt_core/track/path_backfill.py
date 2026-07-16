@@ -148,6 +148,16 @@ async def run_backfill_pass(client: Any, *, now_ms: int, max_rows: int = 200) ->
         except Exception:
             _LOG.exception("path_backfill_fetch_failed sym=%s candidate=%s", symbol, row.get("candidate_id"))
             continue
+        # fetch_ohlcv_list is the RAW list path — it bypasses finalize_kline_frame,
+        # so callers must drop the unclosed tail themselves (as analyst_assembly
+        # and manipulation_delivery do). Without this, a pass running near the
+        # window's expiry keeps the in-progress 1m candle, whose high/low still
+        # repaint — and the forward path is the ground truth every MFE/MAE and
+        # first-passage stat is derived from, so an extreme that no closed bar
+        # ever printed would be recorded as fact.
+        from hunt_core.market.factory import drop_unclosed_ohlcv_tail
+
+        ohlcv = drop_unclosed_ohlcv_tail(list(ohlcv), "1m", exchange=client.exchange)
         # fetch_ohlcv_list caps at 1500 bars/call; 24h@1m=1440 fits in one call.
         window = [b for b in ohlcv if decision_ts <= b[0] <= decision_ts + h_max_ms]
         forward_dq: dict[str, Any] = {}
@@ -193,6 +203,12 @@ async def path_backfill_loop(client: Any, *, interval_s: float = 900.0) -> None:
         try:
             import time as _time
 
+            # Roll the ledger BEFORE the pass: this loop is its only writer, so
+            # rotating here cannot interleave with an append. Live it had grown
+            # to 7.7 GB unbounded, and load_pending_backfill reads it whole.
+            from hunt_core.track.candidate_ledger import rotate_ledger_if_large
+
+            rotate_ledger_if_large()
             n = await run_backfill_pass(client, now_ms=int(_time.time() * 1000))
             if n:
                 _LOG.info("path_backfill_loop_tick backfilled=%s", n)

@@ -170,17 +170,35 @@ async def _manipulation_scan_loop(
     while not should_stop():
         try:
             # Pinned symbols are Prizrak's exclusive domain; scanner owns the rest.
+            # Blacklisted symbols are skipped like the tick loop does: without
+            # this a symbol blacklisted mid-session kept costing 6 TFs of REST +
+            # funding every cycle, failing at debug level and burning weight.
             pinned_upper = {str(s).upper() for s in PINNED_SYMBOLS}
             symbols = [
                 s
                 for s in dict.fromkeys(list(cli_symbols) + load_watchlist_symbols())
-                if str(s).upper() not in pinned_upper
+                if str(s).upper() not in pinned_upper and not is_blacklisted(s)
             ]
+            cycle_started = time.monotonic()
+            delivered: list[dict[str, Any]] = []
             if send_telegram and broadcaster is not None and symbols:
                 ts = load_tracker_state()
-                await deliver_manipulation_setups(symbols, client, broadcaster, tracker_state=ts)
+                delivered = await deliver_manipulation_setups(
+                    symbols, client, broadcaster, tracker_state=ts
+                ) or []
                 buffer_tracker_state(ts)
                 flush_tracker_state()
+            # One line per cycle. The loop used to log ONLY on delivery, so a
+            # quiet scanner was indistinguishable from a broken one: 2h of live
+            # silence could not be attributed without reading the source.
+            LOG.info(
+                "manipulation_scan_cycle",
+                symbols=len(symbols),
+                delivered=len(delivered),
+                delivered_syms=[str(d.get("symbol")) for d in delivered][:5],
+                duration_s=round(time.monotonic() - cycle_started, 1),
+                telegram=bool(send_telegram and broadcaster is not None),
+            )
         except asyncio.CancelledError:
             break
         except Exception:

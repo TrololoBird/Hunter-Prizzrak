@@ -25,13 +25,19 @@ per-candidate decision path.
 """
 from __future__ import annotations
 
+import gzip
 import json
+import shutil
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import structlog
+
 from hunt_core.paths import DATA
+
+LOG = structlog.get_logger("hunt_core.track.candidate_ledger")
 
 CANDIDATE_LEDGER_PATH = DATA / "candidate_observations.jsonl"
 
@@ -147,6 +153,69 @@ def record_candidate_forward_path(
         fh.write(json.dumps(row, default=str) + "\n")
 
 
+_ROTATE_BYTES = 1_000_000_000  # 1 GB
+
+
+def rotate_ledger_if_large(
+    *,
+    path: Path | None = None,
+    max_bytes: int = _ROTATE_BYTES,
+) -> Path | None:
+    """Roll the ledger into a gzip archive once it exceeds ``max_bytes``.
+
+    The denormalized-per-candidate schema is a deliberate tradeoff (see the
+    module docstring: "tens of GB/month at scale"), so growth is by design — but
+    a single unbounded file is not. Live it reached 7.7 GB, and every
+    ``load_pending_backfill`` reads the whole thing.
+
+    Nothing is deleted: the file is renamed and gzipped into
+    ``data/archive/``, and a fresh empty ledger takes its place. Rows are
+    self-contained JSONL (a decision row and its path patch are joined by
+    ``candidate_id`` at read time), so an archived pair stays joinable —
+    but a decision row and its later path patch CAN land either side of a
+    rotation, so **offline readers must scan the archives together with the
+    live file**, not the live file alone.
+
+    Args:
+        path: Ledger to rotate; defaults to ``CANDIDATE_LEDGER_PATH``.
+        max_bytes: Size threshold above which the file is rolled.
+
+    Returns:
+        The archive path when a rotation happened, else ``None``.
+    """
+    p = path or CANDIDATE_LEDGER_PATH
+    try:
+        if not p.is_file() or p.stat().st_size <= max_bytes:
+            return None
+    except OSError:
+        return None
+
+    archive_dir = p.parent / "archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    archive = archive_dir / f"{p.stem}-{stamp}.jsonl.gz"
+
+    # Rename first: the writer only ever appends, so moving the inode out of the
+    # way is atomic on POSIX and a concurrent append cannot interleave with the
+    # compression pass.
+    staged = archive_dir / f"{p.stem}-{stamp}.jsonl.tmp"
+    try:
+        p.rename(staged)
+    except OSError:
+        LOG.warning("candidate_ledger_rotate_rename_failed | path=%s", p)
+        return None
+    try:
+        with staged.open("rb") as src, gzip.open(archive, "wb") as dst:
+            shutil.copyfileobj(src, dst, length=8 * 1024 * 1024)
+        staged.unlink()
+    except OSError:
+        # Compression failed — keep the raw file rather than lose observations.
+        LOG.exception("candidate_ledger_rotate_gzip_failed | staged=%s", staged)
+        return None
+    LOG.info("candidate_ledger_rotated | archive=%s", archive.name)
+    return archive
+
+
 def load_pending_backfill(
     *,
     now_ms: int,
@@ -194,6 +263,7 @@ def load_pending_backfill(
 
 __all__ = [
     "CANDIDATE_LEDGER_PATH",
+    "rotate_ledger_if_large",
     "DEFAULT_H_MAX_HOURS",
     "new_candidate_id",
     "record_candidate_decision",

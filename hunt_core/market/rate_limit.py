@@ -32,9 +32,17 @@ REST_WEIGHT_CRITICAL_LIMIT = 2350
 # REST depth-snapshot seeds (capped at depth-20 = weight 2/symbol) and WS-API
 # handshakes (5 each). fstream market-data streams are weight-FREE and need no
 # reserve (REVIEW_market.md correction to the ADR).
+#
+# RESERVE default calibrated against a live run (2026-07-16, 18-symbol universe):
+# the server header reported 300-405 more weight than the local ledger had
+# counted, sustained — i.e. unpaced spend is ~2x the 200 the reserve assumed, and
+# `hunt_weight_drift_high` (warns above 300) fired continuously. Peak observed
+# server_used was 413 against the 2400 cap and the 2000 header-stop fuse, so this
+# is headroom ACCOUNTING, not a limit change: it makes the local pacer stop
+# believing it owns quota that ccxt.pro's snapshot seeds have already spent.
 _BINANCE_WEIGHT_LIMIT_1M = 2400
 GOVERNOR_MARGIN = float(os.getenv("HUNT_WEIGHT_MARGIN", "0.75") or 0.75)
-WS_RESERVE_WEIGHT = int(os.getenv("HUNT_WEIGHT_RESERVE", "200") or 200)
+WS_RESERVE_WEIGHT = int(os.getenv("HUNT_WEIGHT_RESERVE", "400") or 400)
 # Background loops (hot_enrich / path_backfill / lake warmup) yield to the
 # watch tick: they are admitted only while usage is under this share of TARGET.
 BACKGROUND_CEILING_SHARE = 0.8
