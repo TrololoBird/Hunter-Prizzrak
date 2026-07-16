@@ -1,4 +1,11 @@
-"""ManipulationFusionScore — multi-domain assessment for hunt archetypes."""
+"""ManipulationFusionScore — multi-domain assessment for hunt archetypes.
+
+Known-inert sub-checks pending backtest-gated key fixes (audit R2, chunk 6): obi_bid
+reads phantom market.orderbook_imbalance (real: market.depth_imbalance); sweep_reclaim
+reads phantom structure.bsl_sweep/support_break (real: choch_detected / event / bos_choch /
+break_confirmed); predump above_vah reads phantom market.map_vah (real: market.map_vp_vah);
+squeeze-veto taker reads phantom market.taker_buy_sell_ratio (real: market.taker_5m/_15m/_1h).
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field

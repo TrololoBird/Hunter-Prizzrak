@@ -23,11 +23,13 @@ scan_interval_s = 900
 watchlist_limit = 50
 
 [watch]
-# DOC-ONLY (top-level keys): these are NOT wired through the defaults parser — the
-# effective values are code constants (e.g. telegram_cooldown_min ↔ COOLDOWN_MINUTES=45
-# in domain/config.py; the tick cadence is set at the watch-loop call site). Kept in
-# sync here for documentation. The NESTED [watch.prescan] below IS wired
-# (params/store.py::prescan_thresholds via universal_section).
+# DOC-ONLY (entire [watch] tree, incl. [watch.prescan]): NOT wired through the
+# defaults parser — the effective values are code constants (e.g. telegram_cooldown_min
+# ↔ COOLDOWN_MINUTES=45 in domain/config.py; the tick cadence is set at the watch-loop
+# call site; prescan values are the inline fallbacks in
+# params/store.py::prescan_thresholds). Kept in sync here for documentation. Prescan
+# thresholds gate signal emission (prescan→Full-tier merge), so wiring them is a
+# backtest-gated change, not a config fix.
 tick_interval_s = 30
 # Ignition TG alerts off by default (watchlist-only); set true in env if needed.
 ignition_telegram = false
@@ -39,7 +41,6 @@ max_dynamic_symbols = 12
 [watch.prescan]
 debounce_s = 90
 merge_cap = 12
-cadence_s = 90
 # Skip late-chase prescan outliers already extended on 24h (pre-pump mission).
 max_change_pct_for_merge = 8.0
 # Advisory digest: optional periodic summary (additive). 0 = no top-N cap.
@@ -242,8 +243,8 @@ funding_min_n = 48
 pre_gate_min_energy = 1
 pre_gate_min_structure = 0.10
 pre_gate_min_magnitude = 0.08
-mad_epsilon = 0.000001
-robust_z_clip = 12.0
+# mad_epsilon / robust_z_clip removed (audit R2 chunk 6): they were never wired into
+# toolkit/robust_stats.py, which uses its own module constants (1e-6 / 12.0).
 horizon_bars = 16
 replay_warmup = 60
 replay_target_atr = 1.5

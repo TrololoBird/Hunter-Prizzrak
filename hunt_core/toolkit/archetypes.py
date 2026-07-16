@@ -17,17 +17,8 @@ def canonical_archetype(name: str | None) -> CanonicalArchetype:
     return "none"
 
 
-def playbook_archetype_key(name: str | None) -> str:
-    """Map fusion archetype to playbook dict key."""
-    canon = canonical_archetype(name)
-    if canon in {"predump_short", "prepump_long", "ignition_long"}:
-        return canon
-    return "none"
-
-
 __all__ = [
     "CANONICAL_ARCHETYPES",
     "CanonicalArchetype",
     "canonical_archetype",
-    "playbook_archetype_key",
 ]

@@ -50,8 +50,6 @@ UNIVERSAL_DEFAULTS: dict[str, Any] = {
         "pre_gate_min_energy": 1,
         "pre_gate_min_structure": 0.10,
         "pre_gate_min_magnitude": 0.08,
-        "mad_epsilon": 1e-6,
-        "robust_z_clip": 12.0,
     },
     "gates": {
         "confirm_min_score": 60.0,
@@ -77,7 +75,6 @@ UNIVERSAL_DEFAULTS: dict[str, Any] = {
         "min_rr": 1.0,
     },
     "hunter": {
-        "hot_range_pct": 8.0,
         "pump_extreme_pct": 15.0,
     },
     "tracker": {
@@ -432,7 +429,15 @@ def hunter_thresholds() -> dict[str, float | int]:
 
 
 def prescan_thresholds() -> dict[str, float | int]:
-    """Lite prescan cadence (D1) — debounce 60–120s, merge into Full-tier slots."""
+    """Lite prescan cadence (D1) — debounce 60–120s, merge into Full-tier slots.
+
+    NOTE: the "watch" section is NOT forwarded from config.defaults.toml
+    (domain/config.py::load_config_defaults_toml has no [watch] branch), so the
+    inline fallbacks below are the effective values; the TOML [watch.prescan]
+    block is doc-only. Not wired deliberately — these thresholds gate which
+    prescan outliers merge into Full-tier slots (signal-emission path), so any
+    wiring must go through the backtest gate.
+    """
     ps = universal_section("watch").get("prescan")
     ps = ps if isinstance(ps, dict) else {}
     debounce = float(ps.get("debounce_s", 90))
@@ -440,7 +445,6 @@ def prescan_thresholds() -> dict[str, float | int]:
     return {
         "debounce_s": debounce,
         "merge_cap": int(ps.get("merge_cap", 12)),
-        "cadence_s": int(ps.get("cadence_s", 90)),
         "max_change_pct_for_merge": float(ps.get("max_change_pct_for_merge", 8.0)),
     }
 
