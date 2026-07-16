@@ -37,12 +37,35 @@ def test_aligned_bias_long_has_no_counter_warning() -> None:
 
 def test_co_trend_zone_confirmed_symmetrically() -> None:
     # A co-trend zone must get a positive «✓ по HTF-bias» confirmation, symmetric to
-    # the counter-trend warning — and surface its touch-count as structural strength.
+    # the counter-trend warning — and surface its touch-count.
     txt = _report("long").interest_zones_text()
     assert "по HTF-bias — ко-тренд" in txt
-    assert "структурно крепкая (5 касаний)" in txt  # touches folded into strength
+    assert "5 касаний" in txt
 
 
-def test_counter_trend_also_shows_structural_strength() -> None:
+def test_counter_trend_also_shows_touch_count() -> None:
     txt = _report("short").interest_zones_text()
-    assert "структурно крепкая (5 касаний)" in txt
+    assert "5 касаний" in txt
+
+
+def test_touch_count_is_not_sold_as_confirmation() -> None:
+    """Touches are CONSUMPTION in this method, not strength — the card must not invert it.
+
+    The note used to read « · структурно крепкая (5 касаний)», and a test pinned that
+    exact wording as intended behaviour. The course is the only authority here, and it
+    says the opposite in as many words (стр.25): «Как только уровень был отработан на 1
+    касание … этот уровень становится больше не актуальным, т.е. мы этот уровень удаляем
+    и ищем новые НЕ отработанные уровни… можно рассматривать вход от 2 или 3 касания
+    ТОЛЬКО по факту слома структуры на младшем ТФ». «Касание» occurs four times in the
+    whole course and never denotes strength.
+
+    Ranking zones BY touches is still fine and stays — it was verified head-to-head
+    against the author's own levels on 6 instruments, so it is a good selector. Selecting
+    a zone and licensing an entry into it are different claims; only the second one was
+    wrong, and it was the one printed to the user.
+    """
+    for bias in ("long", "short"):
+        txt = _report(bias).interest_zones_text()
+        assert "структурно крепк" not in txt, "must not present touches as confirmation"
+        assert "тестировалась" in txt, "should state what the count actually measures"
+        assert "по слому структуры на младшем ТФ" in txt, "must carry the course's rule"

@@ -230,7 +230,7 @@ class AnalystReport:
     def interest_zones_text(self) -> str:
         """Pending limit zones (long-at-support / short-at-resistance) so a WAIT tick
         still shows WHERE to act — the trader's «локальные трейды 4ч» framing."""
-        from hunt_core.deliver._labels import fmt_price
+        from hunt_core.deliver._labels import fmt_dist, fmt_price
 
         iz = self.row.get("prizrak_interest_zones")
         if not isinstance(iz, dict) or not (iz.get("long") or iz.get("short")):
@@ -305,18 +305,47 @@ class AnalystReport:
                 parts.append(f"инвалидация {word} <code>{fmt_price(inval)}</code> (за структурой с запасом)")
             tgt = single.get("first_target")
             if isinstance(tgt, (int, float)) and tgt > 0:
-                parts.append(f"первая реакция → <code>{fmt_price(tgt)}</code>")
+                # «первая реакция → X» read as a take-profit, which it is not: it is the
+                # LOW/HIGH of the nearest structural box on the far side of this zone
+                # (orchestrator: first_target), i.e. the first place price meets opposing
+                # structure. Naming the thing removes the guess — an unexplained arrow to
+                # a bare number invites the reader to treat it as a target and size to it.
+                parts.append(
+                    f"встречная структура → <code>{fmt_price(tgt)}</code>"
+                    f"{fmt_dist(tgt, float(self.row.get('price') or 0))} <i>(ориентир, не тейк)</i>"
+                )
             if parts:
                 lines.append("   " + " · ".join(parts))
 
         def _bias_note(single: Any, side: str) -> None:
             # SYMMETRIC bias annotation. Counter-trend zones were warned; co-trend zones
             # got no matching confirmation, so an operator couldn't tell which side is
-            # structurally firmer. Also fold the zone's touch-count into a strength note
-            # (touches ARE structural strength — the author reads an 8-touch zone as
-            # strong — but it was shown and never surfaced as conviction).
+            # structurally firmer.
+            #
+            # The touch-count note used to read « · структурно крепкая (11 касаний)»,
+            # asserting that more touches = a better zone. The course says the OPPOSITE,
+            # and it is the only authority here (стр.25, verbatim): «Как только уровень
+            # был отработан на 1 касание … этот уровень становится больше не актуальным,
+            # т.е. мы этот уровень удаляем и ищем новые НЕ отработанные уровни… можно
+            # рассматривать вход от 2 или 3 касания ТОЛЬКО по факту слома структуры на
+            # младшем ТФ». «Касание» appears four times in the whole course and never
+            # once as strength; it appears as CONSUMPTION.
+            #
+            # A high touch count still earns the zone its place — ranking by touches was
+            # verified head-to-head against the author's own chosen levels on 6
+            # instruments (see orchestrator._zone_rank), so it is a good SELECTOR. It is
+            # not a licence to enter. So report the count as what it is — how many times
+            # the boundary has been tested — and carry the course's actual rule with it,
+            # instead of inverting the rule into a confidence badge.
             touches = int(single.get("touches") or 0) if isinstance(single, dict) else 0
-            strength = f" · структурно крепкая ({_touches_ru(touches)})" if touches >= 4 else ""
+            if touches >= 4:
+                strength = (
+                    f" · граница тестировалась {_touches_ru(touches)}"
+                    " — по курсу это НЕ подтверждение: отработанный уровень удаляют,"
+                    " вход от повторного касания — только по слому структуры на младшем ТФ"
+                )
+            else:
+                strength = ""
             _is_co = (bias == "short" and side == "short") or (bias == "long" and side == "long")
             # A zone AGAINST the HTF bias is a counter-trend REACTION/добор — not a
             # standalone trend signal, but a valid play the way the author works it

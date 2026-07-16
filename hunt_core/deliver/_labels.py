@@ -150,8 +150,12 @@ def fmt_dist(value: float | None, ref: float | None) -> str:
     if r <= 0 or not math.isfinite(v) or not math.isfinite(r):
         return ""
     pct = (v / r - 1.0) * 100.0
-    # −0.0% reads as a rounding artefact; below a basis point say "at price".
-    if abs(pct) < 0.01:
+    # The cutoff must match the RENDER, not some smaller idea of "negligible": at .1f
+    # anything under 0.05% prints as "(+0.0%)" / "(-0.0%)", which reads as a broken
+    # number rather than as "touching price". A 0.01 threshold left the 0.01–0.05 band
+    # rendering exactly the artefact this guard exists to prevent — live, a 15m support
+    # 0.028% away printed "(-0.0%)".
+    if abs(pct) < 0.05:
         return " (у цены)"
     return f" ({pct:+.1f}%)"
 
