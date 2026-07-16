@@ -311,6 +311,7 @@ def _build_tp_ladder(
     swing_levels: list[float],
     *,
     max_steps: int = 5,
+    min_gap: float = 0.0,
 ) -> list[float]:
     """Build an honest TP ladder: entry → intermediate swing levels → zone targets.
 
@@ -318,9 +319,28 @@ def _build_tp_ladder(
     intermediate swing highs/lows (structural resistance/support), followed by
     accumulation zone edges. This prevents fake R:R where TP1 skips over real
     structural obstacles.
+
+    ``min_gap`` is the minimum price distance between consecutive rungs. The
+    course's tейки are «следующие реальные зоны» (стр.24) — distinct places the
+    move can stall — so two levels a few ticks apart are ONE zone described
+    twice, not two targets. Deduplication used to be exact float equality, which
+    never collapses near-duplicates: a live BTCUSDT ladder rendered
+    63929.6 · 64185.7 · 64241.3 · 64245.6 · 64596.8, where TP3→TP4 is 4.3 points
+    (0.007%) against a risk of 2329 — a five-rung ladder delivering three rungs.
+
+    Args:
+        entry: Entry price; levels at or behind it are dropped.
+        direction: ``"long"`` or ``"short"``.
+        zone_targets: Accumulation-zone edges ahead of entry.
+        swing_levels: Intermediate structural swings ahead of entry.
+        max_steps: Maximum number of rungs to return.
+        min_gap: Minimum absolute price distance between consecutive rungs.
+
+    Returns:
+        Price levels ordered nearest-first, each at least ``min_gap`` from the
+        previous rung.
     """
     ladder: list[float] = []
-    seen: set[float] = set()
 
     candidates = swing_levels + zone_targets
     if direction == "long":
@@ -329,15 +349,16 @@ def _build_tp_ladder(
         candidates.sort(reverse=True)
 
     for p in candidates:
-        if p in seen:
-            continue
-        seen.add(p)
         if len(ladder) >= max_steps:
             break
         # Skip levels that are behind entry
         if direction == "long" and p <= entry:
             continue
         if direction == "short" and p >= entry:
+            continue
+        # Collapse near-duplicates into the nearest rung (candidates are sorted
+        # by distance from entry, so the first of a cluster is kept).
+        if ladder and abs(p - ladder[-1]) < min_gap:
             continue
         ladder.append(round(p, 8))
 
@@ -362,6 +383,7 @@ def _structural_targets(
     entry: float,
     swing_levels: list[float] | None = None,
     min_tf: str | None = None,
+    min_gap: float = 0.0,
 ) -> list[float]:
     """Real targets ahead of ``entry`` in the trade direction — the next accumulation
     zone(s), nearest first. Searched across the setup's own TF and HIGHER (``min_tf``):
@@ -424,10 +446,14 @@ def _structural_targets(
     zone_edges = _edges(pool)
 
     if not swing_levels:
-        return zone_edges[:3]
+        return _build_tp_ladder(
+            entry, direction, zone_targets=zone_edges, swing_levels=[],
+            max_steps=3, min_gap=min_gap,
+        )
 
     return _build_tp_ladder(
-        entry, direction, zone_targets=zone_edges, swing_levels=swing_levels, max_steps=5,
+        entry, direction, zone_targets=zone_edges, swing_levels=swing_levels,
+        max_steps=5, min_gap=min_gap,
     )
 
 
@@ -582,9 +608,12 @@ def _geometry_from_zone(
     risk = entry - stop if direction == "long" else stop - entry
     if risk <= 0:
         return None
+    # Rungs closer than a quarter of the risk (floored at 0.15% of entry for very
+    # tight stops) describe one zone twice rather than two distinct targets.
+    min_gap = max(risk * 0.25, entry * 0.0015)
     targets = _structural_targets(
         ohlcv_by_tf, cfg=cfg, direction=direction, entry=entry, swing_levels=swing_levels,
-        min_tf=min_tf,
+        min_tf=min_tf, min_gap=min_gap,
     )
     if not targets:
         return None

@@ -316,7 +316,22 @@ def _backfill_signal_geometry(sig: dict[str, Any]) -> None:
     tp1 = float(sig.get("tp1") or 0)
     if sl <= 0 or tp1 <= 0 or eh <= 0:
         return
-    worst = eh if direction == "short" else el
+    # Conservative R:R must be anchored at the WORST fill: a long's worst fill is
+    # the entry-band HIGH (paid the most), a short's is the LOW (sold cheapest).
+    # This function had the inverted convention (short→hi, long→lo) — the BEST
+    # fill under a variable literally named `worst` — the same defect that was
+    # fixed in `contract.worst_entry_edge` and `_trailing._worst_entry` but left
+    # live here. It is not a legacy-only path: `_plan_from_summary` carries no
+    # `risk_reward`, so `register_signal_open` stores None and EVERY prizrak row
+    # gets its R:R from this backfill on each `load_tracker_state`.
+    # Numbers: short band 100–102, SL 105, TP1 92 → conservative (from 100)
+    # 8/5 = 1.6; the old anchor (102) gave 10/3 = 3.33 — 2× overstated in
+    # closed_history, signal_history.jsonl and the calibration stats.
+    from hunt_core.contract import worst_entry_edge  # noqa: PLC0415
+
+    worst = worst_entry_edge({"entry_zone": [el, eh]}, direction=direction)
+    if worst is None or worst <= 0:
+        return
     risk = abs(worst - sl)
     reward = abs(worst - tp1)
     if risk > 0:
@@ -865,16 +880,24 @@ def auto_resolve_active_signals(
         tp2 = float(sig.get("tp2") or 0)
         sl = float(sig.get("stop_loss") or 0)
 
-        # A manipulation setup is delivered as «тейки частями … держим до цели/стопа»:
-        # TP1 is a PARTIAL fix (bank 50%, stop → BE), the runner rides to the
+        # TP1 is a PARTIAL fix (bank 50%, stop → BE); the runner rides to the
         # «среднесрочная цель». Closing the whole position on the first touch
         # contradicted _trailing.py, which already exempts these signals from the
-        # trail for exactly that reason. LONG manipulation entries hold the runner
-        # even without a tp2 (single-target ladder — Pattern C): medium-term longs
-        # ride until stall/stop/timeout. Single-target SHORTS (Pattern B) keep the
-        # full close at their first target — метод фиксирует первую цель у шорта.
-        manipulation = str(sig.get("setup_phase") or "") == "manipulation"
-        holds_runner = manipulation and (tp2 > 0 or direction == "long")
+        # trail for exactly that reason. LONG entries hold the runner even without
+        # a tp2 (single-target ladder — Pattern C): medium-term longs ride until
+        # stall/stop/timeout. Single-target SHORTS keep the full close at their
+        # first target — метод фиксирует первую цель у шорта.
+        #
+        # This used to be gated on `setup_phase == "manipulation"`, but Prizrak
+        # rows register with setup_phase = signal.thesis ("pp_break_long", …) and
+        # scanner rows with "dump_confirmed"/"long_confirmed" — so every deep
+        # signal fell through to the plain full-close-at-TP1 branch below, while
+        # `evaluate_levels` (same tick) had already banked 50% and moved SL→BE and
+        # the delivered card promised «На TP1: фиксировать 50%, не 100% — приоритет
+        # по тренду (стр.19)». The runner was killed and the ledger recorded a
+        # full close at TP1 for a trade the method models as partial + runner.
+        # The partial-fix rule is the course's, not the manipulation lane's.
+        holds_runner = tp2 > 0 or direction == "long"
 
         # Grace period: ignore TP1/SL hits during entry fill window
         age_min = _signal_age_min(sig, ts)

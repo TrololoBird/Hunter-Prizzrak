@@ -173,6 +173,13 @@ def _maybe_armed_to_triggered(
     if not trk._followup_allowed(state, msg_key, now=ts):
         return None
     active["delivery_tier"] = "triggered"
+    # The fill starts the trade's price history: re-seed the extremes at the
+    # fill price. Anything recorded while ARMED is pre-entry market movement —
+    # carrying it forward would hand the freshly-opened position an MFE/MAE it
+    # never experienced (and could instantly satisfy TP1 or the trailing gate).
+    active["extreme_hi"] = price
+    active["extreme_lo"] = price
+    active["opened_at"] = ts.isoformat()
     trk._transition(active, trk.SignalPhase.ARMED, trk.SignalPhase.TRIGGERED, strict=False)
     return trk.HuntFollowUp(
         event="entry_triggered",

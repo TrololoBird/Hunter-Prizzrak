@@ -250,6 +250,15 @@ def evaluate_levels(
         return events
     if trk._close_already_notified(state, symbol, direction):
         return events
+    # An ARMED signal is a resting limit that has NOT filled — there is no
+    # position to manage. Running the SL/TP machine on it books outcomes for a
+    # trade that never opened: extremes accumulate from spot, so MFE is the
+    # unfilled distance to the zone, trailing ratchets, and a TP that sits
+    # between spot and the zone "hits" on the registration tick. Promotion to
+    # TRIGGERED happens in `_maybe_armed_to_triggered` (followups) once price
+    # actually enters the latched entry zone; only then does management start.
+    if str(active.get("delivery_tier") or "").lower() == "armed":
+        return events
     announced = bool(active.get("telegram_sent")) or bool(active.get("entry_message_id"))
 
     tr = tracker_thresholds(symbol)

@@ -75,11 +75,30 @@ def test_short_runner_is_symmetric():
     assert closed == ["X:short"] and sig["status"] == "closed"
 
 
-def test_non_manipulation_signals_keep_closing_at_tp1():
-    """Blast radius: only the ladder-carrying manipulation signals change."""
-    state = _state(phase="pre", tp1=110.0, tp2=150.0, sl=90.0)
+def test_deep_lane_signals_also_hold_the_runner_at_tp1():
+    """The partial-fix rule is the COURSE's, not the manipulation lane's.
+
+    This test used to pin the opposite ("only manipulation signals change") as
+    the blast radius of the G-M1 fix. That scope turned out to be the bug: the
+    runner was gated on ``setup_phase == "manipulation"``, but Prizrak rows carry
+    setup_phase = signal.thesis ("pp_break_long", …) and scanner rows carry
+    "dump_confirmed"/"long_confirmed" — so every deep signal fell through to the
+    full-close branch while its delivered card promised «На TP1: фиксировать 50%,
+    не 100% — приоритет по тренду (стр.19)» and ``evaluate_levels`` had already
+    banked 50% and moved SL→BE in the same tick.
+    """
+    state = _state(phase="pp_break_long", tp1=110.0, tp2=150.0, sl=90.0)
     closed, sig = _resolve(state, 111.0)
-    assert closed == ["X:long"]
+    assert closed == []
+    assert sig["status"] == "active"
+    assert sig["tp1_hit"] is True
+
+
+def test_single_target_short_still_closes_at_first_target():
+    """Unchanged exception: метод фиксирует первую цель у шорта (no tp2 ladder)."""
+    state = _state(phase="pp_break_short", tp1=90.0, tp2=None, sl=110.0, direction="short")
+    closed, sig = _resolve(state, 89.0, direction="short")
+    assert closed == ["X:short"]
     assert sig["status"] == "closed"
 
 

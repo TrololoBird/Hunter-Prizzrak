@@ -99,6 +99,21 @@ def _register_tracker(signal: Signal, row: dict[str, Any]) -> None:
         setup = dict(signal.plan)
         setup["direction"] = signal.direction
         setup["phase"] = signal.thesis
+        # A deep plan is emitted long before the limit fills: the lifecycle spine
+        # emits event "signal" for every activation that is not "in_entry_zone"
+        # (lifecycle.py), i.e. for forward/deep zones whose entry sits percent
+        # away from spot. Registering those as TRIGGERED told the tracker the
+        # position was already open: `extreme_hi/lo` seed at spot, so MFE is
+        # instantly the whole unfilled distance — trailing fires, TP1 "hits",
+        # and auto_resolve books a win for an order that never filled.
+        # (Live proof: BTCUSDT long, spot 64468, entry 58961-59198 (-8.9%),
+        # TP1 64185 *below spot* → fabricated tp1_hit on the registration tick.)
+        # ARMED is the state the tracker already models for exactly this —
+        # `_maybe_armed_to_triggered` promotes it once price enters the zone —
+        # but nothing ever set the tier, so the gate was unreachable.
+        setup["delivery_tier"] = (
+            "triggered" if signal.state == "activated" else "armed"
+        )
         register_signal_open(
             state,
             symbol=signal.symbol,
