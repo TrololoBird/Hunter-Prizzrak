@@ -13,6 +13,29 @@ its signals (the project's open "не доказал эффективность"
 tool — the sample here (dataset_v8, 6 coins) is far too small to tune thresholds against;
 expand the dataset first (see research/fetch/) to avoid overfitting.
 
+**SCOPE — what this does NOT replay.** It drives the raw DETECTOR. Between a completed
+setup and Telegram, ``manipulation_delivery`` applies gates that are NOT modelled here:
+the SHORT lower-TF-confirmation gate (``HUNT_MANIP_SHORT_REQUIRE_LTF``, on by default),
+``has_active_signal`` (no re-fire while a call is open), and the burst-cap / stop-hit /
+loss-streak / daily-cap / repeat-loser cooldowns. So the raw totals below describe a
+system that does not exist.
+
+This matters enormously rather than marginally. Measured on dataset_v11 (2026-07-16),
+**65 of 66 shorts are suppressed by the SHORT gate alone**: the headline "SHORT −0.72R"
+is a statistic about trades the bot never places, and the ungated total (+0.116 R/trade)
+understates what the bot would actually have traded (+0.304 R/trade over n=295) by
+~2.6×. Any conclusion drawn from the raw total — "the scanner is net-losing", a fix that
+"improves expectancy" — can be an artifact of the suppressed population.
+
+The SHORT gate is a pure function of ``setup.micro_confirmed``, so ``main`` reports BOTH
+populations and neither is hidden. The other gates are stateful and remain unmodelled;
+treat the delivered figure as an upper bound on n.
+
+Two further fidelity gaps, both un-modelled and worth knowing:
+  * ``funding_ctx`` is never passed, so funding-modulated targets and the Pattern B
+    funding short-signal never execute here (the dataset carries no funding history);
+  * the scan cadence is the 1h close, so the 1h/15m ladder advances 4× slower than live.
+
 Run:  uv run python -m research.backtest_scanner       (or: python research/backtest_scanner.py)
 """
 from __future__ import annotations
@@ -261,7 +284,8 @@ def main(ds: str = _DEFAULT_DS) -> None:
             print(f"  {setup.direction:5s} {setup.pattern_type:2s} meso={setup.meso_tf:3s} "
                   f"entry={entry:.6g} stop={stop:.6g}({risk_pct:.1f}%) tgt={target:.6g}({tgt_pct:.0f}%) "
                   f"-> {outcome:7s}{legs_tag} R={r_mult:+.1f} MAE={mae_r:.1f}R ev={','.join(setup.evidence[:2])}")
-            grand.append((setup.direction, setup.pattern_type, outcome, r_mult, mae_r, legs))
+            grand.append((setup.direction, setup.pattern_type, outcome, r_mult, mae_r, legs,
+                          bool(getattr(setup, "micro_confirmed", True))))
             per_pattern[setup.pattern_type][outcome] += 1
     outs = collections.Counter(g[2] for g in grand)
     wins, losses = outs.get("win", 0), outs.get("loss", 0)
@@ -290,6 +314,43 @@ def main(ds: str = _DEFAULT_DS) -> None:
     print(f"campaign: mode={mode}  доборы≤{int(_MAX_UNITS - 1)}  extra legs (перезаход/переворот)={extra_legs}")
     print("by pattern:", {p: dict(c) for p, c in per_pattern.items()})
     print("by direction:", dict(collections.Counter(g[0] for g in grand)))
+    _print_delivered_split(grand)
+
+
+def _print_delivered_split(grand: list[tuple]) -> None:
+    """Split the raw detector population into what delivery would and would not emit.
+
+    Everything above counts setups the live bot mostly never places. The SHORT gate in
+    manipulation_delivery (HUNT_MANIP_SHORT_REQUIRE_LTF, default on) drops shorts whose
+    lower timeframe has not confirmed, and on dataset_v11 that is 65 of 66 of them — so
+    reading the raw total as "the scanner's expectancy" is off by ~2.6× and inverts the
+    sign of what the SHORT numbers appear to say.
+
+    Only this one gate is reproduced, because it is a pure function of the setup. The
+    stateful gates (has_active_signal, burst/cooldown/daily caps) can only remove more
+    setups, never add any, so DELIVERED n is an upper bound and its R is not adjusted
+    for the order in which live would have taken them.
+    """
+    def _line(label: str, rows: list[tuple]) -> None:
+        if not rows:
+            print(f"  {label:34s} n=   0")
+            return
+        tot = sum(r[3] for r in rows)
+        o = collections.Counter(r[2] for r in rows)
+        print(f"  {label:34s} n={len(rows):4d}  R/trade={tot / len(rows):+.3f}  totR={tot:+7.1f}  "
+              f"win={o.get('win', 0)} scratch={o.get('scratch', 0)} loss={o.get('loss', 0)} "
+              f"timeout={o.get('timeout', 0)}")
+
+    shorts = [g for g in grand if g[0] == "short"]
+    delivered = [g for g in grand if g[0] == "long" or g[6]]
+    print("\n===== delivery gate: raw detector vs what live would EMIT =====")
+    _line("raw (every completed setup)", grand)
+    _line("DELIVERED (live-gated)", delivered)
+    _line("  shorts: delivered", [g for g in shorts if g[6]])
+    _line("  shorts: SUPPRESSED (no LTF conf)", [g for g in shorts if not g[6]])
+    if shorts and len(shorts) - sum(1 for g in shorts if g[6]) > 0.5 * len(shorts):
+        print("  NOTE: most shorts here never reach Telegram — do not read the raw")
+        print("        SHORT row as the strategy's short performance.")
 
 
 if __name__ == "__main__":
