@@ -835,12 +835,15 @@ def _htf_bias(
     trend_1w = votes.get("1w", "neutral")
     trend_1d = votes.get("1d", "neutral")
 
-    # Accumulation: 4h bull against higher-TF bear → no directional edge
+    # Accumulation: 4h bull against higher-TF bear → no directional edge.
+    # `regime` is published so the render can say WHICH kind of neutral this is: a
+    # detected accumulation is the most informative read on the card, and collapsing it
+    # into the same "neutral/undetermined" caption as "no data" throws that away.
     if trend_4h == "bull" and (trend_1w == "bear" or trend_1d == "bear"):
-        return {"bias": "neutral", "score": 0.0, "weight_available": 1.0, "votes": votes, "struct_by_tf": struct_by_tf, "weights": weights_pub}
+        return {"bias": "neutral", "score": 0.0, "weight_available": 1.0, "votes": votes, "struct_by_tf": struct_by_tf, "weights": weights_pub, "regime": "accumulation"}
     # Distribution: 4h bear against higher-TF bull → no directional edge
     if trend_4h == "bear" and (trend_1w == "bull" or trend_1d == "bull"):
-        return {"bias": "neutral", "score": 0.0, "weight_available": 1.0, "votes": votes, "struct_by_tf": struct_by_tf, "weights": weights_pub}
+        return {"bias": "neutral", "score": 0.0, "weight_available": 1.0, "votes": votes, "struct_by_tf": struct_by_tf, "weights": weights_pub, "regime": "distribution"}
 
     # All TFs agree or mixed without accumulation — use weighted vote.
     net = 0.0

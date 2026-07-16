@@ -164,7 +164,29 @@ class AnalystReport:
             if action in ("long", "short"):
                 direction = action
         if bias in ("unknown", "neutral"):
-            lines.append("<i>HTF-bias нейтрален/не определён — сила не корректировалась</i>")
+            # "neutral" covers three different facts and the caption used to merge them
+            # into one uninformative line. An accumulation/distribution verdict is NOT
+            # "we don't know" — it is the single most actionable read the МТФ block
+            # produces (4h rising against falling higher TFs = institutional absorption
+            # per the course, which is exactly why a weighted vote is suppressed here),
+            # and it was being reported as if the bias were merely undetermined.
+            regime = str(htf.get("regime") or "")
+            if regime == "accumulation":
+                lines.append(
+                    "<i>🟢 НАКОПЛЕНИЕ: 4h растёт против падающих 1w/1d — крупный "
+                    "игрок набирает. Направленного перевеса нет до слома старших "
+                    "ТФ; шорт против 4h здесь — против набора.</i>"
+                )
+            elif regime == "distribution":
+                lines.append(
+                    "<i>🔴 РАСПРЕДЕЛЕНИЕ: 4h падает против растущих 1w/1d — крупный "
+                    "игрок раздаёт. Направленного перевеса нет до слома старших "
+                    "ТФ; лонг против 4h здесь — против раздачи.</i>"
+                )
+            elif bias == "unknown":
+                lines.append("<i>HTF-bias не определён (нет данных) — сила не корректировалась</i>")
+            else:
+                lines.append("<i>HTF-bias нейтрален (ТФ разнонаправлены) — сила не корректировалась</i>")
         elif direction is None:
             # bias IS determined (long/short) here — just no candidate this tick to
             # compare it against. Must not collapse into the same "neutral" caption

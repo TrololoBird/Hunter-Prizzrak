@@ -569,17 +569,29 @@ def format_liquidity_heatmap_section(row: dict[str, Any]) -> str:
     # NOTHING: depth bands keyed on `price` while _depth_heatmap_matrix writes
     # `price_center`, and voids keyed on `price_lo`/`price_hi`/`direction` while
     # _detect_voids writes `price_center`/`depth_usd`/`distance_pct`. Read the real keys.
+    # _depth_heatmap_matrix emits one row per (TIME SAMPLE × price bucket) — up to 12
+    # samples of the same bucket. Ranking the raw rows by intensity therefore returned
+    # the SAME band several times over ("64054.7 (100%) · 64054.7 (100%) · 64054.7
+    # (100%)" live): three readings of one price dressed up as three bands. Collapse by
+    # price first, keeping each band's strongest sample, so the three slots hold three
+    # distinct prices.
+    by_price: dict[float, dict[str, Any]] = {}
+    for m in matrix:
+        if not isinstance(m, dict) or m.get("price_center") is None:
+            continue
+        center = round(float(m["price_center"]), 6)
+        best = by_price.get(center)
+        if best is None or float(m.get("intensity") or 0) > float(best.get("intensity") or 0):
+            by_price[center] = m
     hot = sorted(
-        [m for m in matrix if isinstance(m, dict) and m.get("price_center") is not None],
-        key=lambda m: float(m.get("intensity") or 0),
-        reverse=True,
+        by_price.values(), key=lambda m: float(m.get("intensity") or 0), reverse=True
     )[:3]
     if hot:
         bits = [
             f"{_fmt_price(float(m['price_center']))} ({float(m.get('intensity') or 0):.0%})"
             for m in hot
         ]
-        lines.append("Depth bands: " + " · ".join(bits))
+        lines.append("Плотность стакана (устойчивые полосы): " + " · ".join(bits))
     try:
         cur_px = float(row.get("price") or 0)
     except (TypeError, ValueError):

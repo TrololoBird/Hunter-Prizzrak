@@ -50,7 +50,44 @@ def test_heatmap_section_renders_producer_keys() -> None:
         "market": {},
     }
     out = format_liquidity_heatmap_section(row)
-    assert "Depth bands" in out
+    assert "Плотность стакана" in out
     assert "101.5" in out
     assert "Разрежение" in out
     assert "103" in out
+
+
+def test_depth_bands_collapse_repeated_time_samples_of_one_band() -> None:
+    """One price seen across N snapshots is ONE band, not N.
+
+    depth_heatmap_matrix is a (time sample × price bucket) grid, so the same bucket
+    appears once per sample. Ranking the raw rows by intensity printed the strongest
+    bucket three times over — live: "64054.7 (100%) · 64054.7 (100%) · 64054.7 (100%)",
+    three readings of one price presented as three distinct bands.
+    """
+    row = {
+        "price": 100.0,
+        "maps": {
+            "orderbook": {
+                "sticky_walls": [],
+                "spoof_flags": [],
+                "depth_heatmap_matrix": [
+                    # one strong band, sampled 3×, plus two weaker distinct bands
+                    {"sample": 0, "price_center": 101.5, "depth_usd": 9_000.0, "intensity": 1.0},
+                    {"sample": 1, "price_center": 101.5, "depth_usd": 8_900.0, "intensity": 0.98},
+                    {"sample": 2, "price_center": 101.5, "depth_usd": 8_800.0, "intensity": 0.97},
+                    {"sample": 0, "price_center": 102.5, "depth_usd": 5_000.0, "intensity": 0.55},
+                    {"sample": 1, "price_center": 99.0, "depth_usd": 3_000.0, "intensity": 0.33},
+                ],
+                "liquidity_voids": [],
+            }
+        },
+        "market": {},
+    }
+    out = format_liquidity_heatmap_section(row)
+    band_line = next(ln for ln in out.splitlines() if "Плотность стакана" in ln)
+    assert band_line.count("101.5") == 1, f"band repeated: {band_line}"
+    # the slots freed by dedup must carry the OTHER real bands
+    assert "102.5" in band_line
+    assert "99" in band_line
+    # strongest sample of the deduped band wins (1.0, not 0.97)
+    assert "100%" in band_line

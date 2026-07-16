@@ -509,6 +509,28 @@ _PRIMARY = "binance"
 _CROSS_BOOK_STALE_MS = 750.0
 
 
+def _venue_contract_size(ex: Any, ccxt_sym: str) -> float:
+    """Base units per contract for this venue's symbol; 1.0 when unknown.
+
+    Failing OPEN (1.0) is deliberate and is the safe direction here: an unknown
+    multiplier leaves the venue's depth at face value, whereas guessing could invent
+    liquidity. It cannot silently reintroduce the 100× bug for the venue that has it —
+    OKX publishes contractSize on every swap market — and a venue we cannot resolve at
+    all is far more likely to be a 1.0-contract linear USDT market than not.
+    """
+    try:
+        size = (ex.market(ccxt_sym) or {}).get("contractSize")
+    except Exception:  # noqa: BLE001 — markets not loaded / unknown symbol
+        return 1.0
+    try:
+        value = float(size)  # type: ignore[arg-type]  # None/str handled below
+    except (TypeError, ValueError):
+        return 1.0
+    if not math.isfinite(value) or value <= 0:
+        return 1.0
+    return value
+
+
 async def fetch_exchange_order_book(
     client: Any,
     symbol: str,
@@ -516,7 +538,7 @@ async def fetch_exchange_order_book(
     *,
     limit: int = 100,
 ) -> dict[str, Any] | None:
-    """Depth snapshot for one venue."""
+    """Depth snapshot for one venue, with sizes normalised to BASE units."""
     bin_sym = client._bin_sym(symbol)  # noqa: SLF001
     try:
         if exchange == _PRIMARY:
@@ -539,11 +561,37 @@ async def fetch_exchange_order_book(
             lambda: ex.fetch_order_book(ccxt_sym, limit=min(100, max(5, int(limit)))),
             context=f"order_book:{ccxt_sym}",
         )
-        bids = [(float(row[0]), float(row[1])) for row in (ob.get("bids") or []) if row]
-        asks = [(float(row[0]), float(row[1])) for row in (ob.get("asks") or []) if row]
+        # Order-book sizes are in the venue's CONTRACT units, and those units differ.
+        # CCXT does not normalise them: fetch_order_book returns the raw `sz`/`amount`
+        # straight from the venue. OKX's BTC-USDT-SWAP has contractSize=0.01, while
+        # Binance/Bitget/Bybit linear USDT use 1.0 — so treating OKX's numbers as base
+        # units overstated its notional by exactly 100×, and since these snapshots are
+        # merged across venues, that phantom depth then dominated the whole cross book.
+        #
+        # Measured live (2026-07-16, BTC): OKX top-20 bids priced as base units came to
+        # $86.20M against a true $0.86M; its real best-bid depth is 6.58 BTC vs
+        # Binance's 188.1 BTC — i.e. the smallest book rendered as the largest wall.
+        # The deep-analysis card showed a $279.4M bid band that was ~97% fictional.
+        #
+        # Normalise HERE, at the venue boundary, so everything downstream (raw
+        # bids/asks, depth_snapshot_from_book's notionals, merge_full_depth_bins)
+        # speaks base units and no consumer has to know the venue. Same defect class
+        # the liquidation path already fixed via maps/liquidation.liq_contract_size.
+        contract_size = _venue_contract_size(ex, ccxt_sym)
+        bids = [
+            (float(row[0]), float(row[1]) * contract_size)
+            for row in (ob.get("bids") or [])
+            if row
+        ]
+        asks = [
+            (float(row[0]), float(row[1]) * contract_size)
+            for row in (ob.get("asks") or [])
+            if row
+        ]
         if not bids or not asks:
             return None
         snap = depth_snapshot_from_book(bids, asks)
+        snap["contract_size"] = contract_size
         snap["exchange"] = exchange
         snap["bids"] = bids
         snap["asks"] = asks
