@@ -17,11 +17,12 @@ Presentation-only changes (labels, stats display, dead-code deletion) do NOT nee
 
 ## Run (chunked — the full run OOMs, exit 137)
 
-The backtest is `research/backtest_scanner.py::main(ds=...)` over a parquet dataset
-(`dataset_v8` default; `dataset_v10` is larger/current — see the `_DEFAULT_DS` and horizon
-notes in the file). The first unchunked run was killed by the OS (exit 137, memory). Run it
-memory-bounded — per-coin or per-chunk, accumulating results — rather than loading the whole
-dataset at once:
+The backtest is `research/backtest_scanner.py::main(ds=...)` over a parquet dataset.
+**The canonical dataset is whatever `research/dataset_active_version.txt` says** (currently
+11 → `research/dataset_v11`, 120 coins × 6 TF) — do NOT trust hardcoded `_DEFAULT_DS`
+(dataset_v8) or stale doc mentions of v10. The first unchunked v11 run was killed by the
+OS (exit 137, memory). Run it memory-bounded — one PROCESS per symbol (a per-symbol loop
+in one process still accumulates polars memory), emitting per-trade JSONL, then aggregate:
 
 ```bash
 # baseline (stash or checkout the pre-change code), then after (the change): same dataset.
@@ -39,6 +40,10 @@ before and after so the delta is attributable to the change.
 - Verdict: does the change hold or improve mean-R without collapsing trade count? If it
   starves the funnel, the gate is a §5 knob (min_rr etc.), not the fix.
 
-Caveat: dataset_v8 (6 coins) is far too small to TUNE against (overfit risk); use the
+Scope caveat: this backtest replays ONLY the scanner pattern detector
+(`advance_manipulation_scales` + production `_geometry`). It cannot measure fusion
+(display/journal-only layer — no emission gate reads it), levels-veto, price_sanity, or
+anything needing orderbook/taker/VP-map history (absent from OHLCV datasets). Small
+datasets are far too small to TUNE against (overfit risk); use the
 gate to catch REGRESSIONS, and expand the dataset (research/fetch/) before trusting absolute
 R. See memory scanner-negative-expectancy-backtest.
