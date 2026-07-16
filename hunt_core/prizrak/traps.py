@@ -54,4 +54,39 @@ def classify_level_touch(
     return {}
 
 
-__all__ = ["classify_level_touch"]
+# «Пила» на уровне (course стр.28, сценарий 7): conservative defaults — over the last
+# 12 native-TF bars the level must be crossed by candle BODIES at least 3 times in EACH
+# direction to count as a saw (wick noise doesn't qualify; bodies do).
+_SAW_WINDOW_BARS = 12
+_SAW_MIN_CROSSINGS_EACH = 3
+
+
+def detect_level_saw(
+    bars: list[dict[str, float]],
+    *,
+    level: float,
+    window: int = _SAW_WINDOW_BARS,
+    min_crossings_each: int = _SAW_MIN_CROSSINGS_EACH,
+) -> bool:
+    """True when price is SAWING ``level`` — candle bodies cross it repeatedly in BOTH
+    directions within the recent ``window`` bars.
+
+    Course (стр.28, сценарий 7): «пила» на уровне = накопление НА уровне; приоритет —
+    выйти в БУ, дождаться выхода цены из пилы и входить на тесте нового накопления.
+    A one-sided прокол/пробой is NOT a saw — that's classify_level_touch's territory.
+    """
+    if level <= 0 or not bars:
+        return False
+    up = down = 0
+    for b in bars[-window:]:
+        body_lo = min(b["open"], b["close"])
+        body_hi = max(b["open"], b["close"])
+        if body_lo < level < body_hi:
+            if b["close"] > b["open"]:
+                up += 1
+            else:
+                down += 1
+    return up >= min_crossings_each and down >= min_crossings_each
+
+
+__all__ = ["classify_level_touch", "detect_level_saw"]

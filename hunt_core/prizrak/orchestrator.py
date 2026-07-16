@@ -37,11 +37,12 @@ from hunt_core.prizrak.dominance import compute_dominance_factor
 from hunt_core.prizrak.liq_reconcile import compute_liquidation_factor
 from hunt_core.prizrak.figures import tag_squeeze_pattern
 from hunt_core.prizrak.marketcap import compute_marketcap_factor
-from hunt_core.prizrak.pp import detect_pereprior
+from hunt_core.prizrak.figures import _narrowing
+from hunt_core.prizrak.pp import _pivots, detect_pereprior
 from hunt_core.prizrak.poc import zone_poc
 from hunt_core.prizrak.stop_volume import find_stop_volume
 from hunt_core.prizrak.structure import bars_from_ohlcv, multi_scale_structure, _tier_structure
-from hunt_core.prizrak.traps import classify_level_touch
+from hunt_core.prizrak.traps import classify_level_touch, detect_level_saw
 
 _TIER_SETUP_KIND = {"intraday": "level_intraday_scalp", "meso": "level_core", "macro": "level_core"}
 
@@ -107,6 +108,7 @@ def _management_plan(direction: Literal["long", "short"]) -> list[str]:
         "На TP1: фиксировать 50%, не 100% — приоритет по тренду (стр.19)",
         f"Возврат к {back} без факторов разворота → добор те же 50% (стр.16/19)",
         "Хедж только под уже прибыльную позицию, ½ объёма (стр.10-11)",
+        "Пила на уровне (тела с двух сторон) → выйти в БУ, ждать выхода из пилы, вход на тесте нового накопления (стр.28 сц.7)",
     ]
 
 
@@ -443,8 +445,68 @@ def _poc_entry(edge: float, *, zone: dict[str, Any], poc_info: dict[str, Any]) -
     return float(poc) if lo <= float(poc) <= hi else edge
 
 
+# Ф1 (курс стр.19): a boundary with 3+ touches that has been wicked (прокол) anchors
+# the stop behind the WICK extreme, not the cluster-averaged boundary.
+_WICK_STOP_MIN_TOUCHES = 3
+# Ф2 (курс стр.19): «если в 2–5% от границы есть стоповый объём / база мелкого ТФ /
+# лой ТФ-1 — прятать стоп за них». Beyond 5% the structure is too far — ignored.
+_NEIGHBOR_STOP_MIN_PCT = 0.02
+_NEIGHBOR_STOP_MAX_PCT = 0.05
+
+
+def _neighbor_stop_anchor(
+    direction: Literal["long", "short"],
+    boundary: float,
+    *,
+    ohlcv_by_tf: dict[str, list[list[float]]],
+    tf: str | None,
+    zone: dict[str, Any] | None,
+    cfg: PrizrakConfig,
+) -> float | None:
+    """Nearest ТФ-1 structure in the 2–5% band BEYOND ``boundary`` to hide the stop
+    behind (курс стр.19: «если в диапазоне 2-5% от границы есть стоповый объём / база
+    мелкого ТФ / лой ТФ-1 — стоп прятать за них»).
+
+    Candidates: ТФ-1 swing lows (long) / highs (short) and the ТФ-1 стоповый объём's
+    far edge. Returns the candidate NEAREST to the boundary inside the band (the course
+    hides behind the closest such structure, not the deepest), or None when the lower
+    timeframe is unavailable or nothing sits in the band.
+    """
+    if boundary <= 0 or not ohlcv_by_tf or not tf:
+        return None
+    lower_tf = _LOWER_TF.get(str(tf).lower())
+    raw = ohlcv_by_tf.get(lower_tf) if lower_tf else None
+    if not raw:
+        return None
+    lookback = max(_tf_lookback_map(cfg).get(lower_tf or "", 120), 120)
+    rows = raw[-lookback:]
+    bars = bars_from_ohlcv(rows)
+    pts: list[float] = []
+    for _idx, kind, px in _pivots(bars):
+        if (direction == "long" and kind == "low") or (direction == "short" and kind == "high"):
+            pts.append(float(px))
+    if zone and zone.get("width_pct"):
+        sv = find_stop_volume(rows, zone=zone, cfg=cfg)
+        if sv:
+            pts.append(float(sv["lo"] if direction == "long" else sv["hi"]))
+    if direction == "long":
+        band = [p for p in pts
+                if boundary * (1 - _NEIGHBOR_STOP_MAX_PCT) <= p <= boundary * (1 - _NEIGHBOR_STOP_MIN_PCT)]
+        return max(band) if band else None
+    band = [p for p in pts
+            if boundary * (1 + _NEIGHBOR_STOP_MIN_PCT) <= p <= boundary * (1 + _NEIGHBOR_STOP_MAX_PCT)]
+    return min(band) if band else None
+
+
 def _structural_stop(
-    direction: Literal["long", "short"], entry: float, zone: dict[str, Any] | None, *, buffer_pct: float
+    direction: Literal["long", "short"],
+    entry: float,
+    zone: dict[str, Any] | None,
+    *,
+    buffer_pct: float,
+    ohlcv_by_tf: dict[str, list[list[float]]] | None = None,
+    tf: str | None = None,
+    cfg: PrizrakConfig | None = None,
 ) -> float:
     """Stop behind the STRUCTURE with a 1-3% buffer (course стр.33: "Безопасный СТОП за
     дно структуры с запасом 1-3%"), not a flat distance off the entry.
@@ -453,13 +515,42 @@ def _structural_stop(
     trades, the тень-свечи zone for ПП (стр.50), the стоповый объём for its own scalp
     (стр.35). Long → behind the zone LOW; short → behind the zone HIGH. Falls back to a
     buffer off the entry only when no usable zone boundary is available.
+
+    Two course refinements deepen the anchor (2026-07-15, PRIZRAK_METHODOLOGY §5 п.1-2):
+    - Ф1 (стр.19): a boundary with 3+ touches that carries wick-проколы (``ext_lo``/
+      ``ext_hi`` from accumulation.py) anchors behind the deepest прокол, never inside
+      the already-wicked range. Zones without prokol data behave as before.
+    - Ф2 (стр.19): when ``ohlcv_by_tf``/``tf``/``cfg`` are supplied, a ТФ-1 stop-volume /
+      swing-low(high) found 2–5% beyond the boundary pulls the anchor behind it
+      (``_neighbor_stop_anchor``); beyond 5% is ignored. Callers without context
+      (tests, bare geometry) keep the plain boundary anchor.
     """
     if zone:
         lo, hi = zone.get("lo"), zone.get("hi")
         if direction == "long" and lo is not None and float(lo) <= entry:
-            return float(lo) * (1 - buffer_pct)
+            anchor = float(lo)
+            ext_lo = zone.get("ext_lo")
+            if ext_lo is not None and int(zone.get("lo_touches") or 0) >= _WICK_STOP_MIN_TOUCHES:
+                anchor = min(anchor, float(ext_lo))
+            if ohlcv_by_tf and cfg is not None:
+                neighbor = _neighbor_stop_anchor(
+                    "long", anchor, ohlcv_by_tf=ohlcv_by_tf, tf=tf, zone=zone, cfg=cfg,
+                )
+                if neighbor is not None:
+                    anchor = min(anchor, neighbor)
+            return anchor * (1 - buffer_pct)
         if direction == "short" and hi is not None and float(hi) >= entry:
-            return float(hi) * (1 + buffer_pct)
+            anchor = float(hi)
+            ext_hi = zone.get("ext_hi")
+            if ext_hi is not None and int(zone.get("hi_touches") or 0) >= _WICK_STOP_MIN_TOUCHES:
+                anchor = max(anchor, float(ext_hi))
+            if ohlcv_by_tf and cfg is not None:
+                neighbor = _neighbor_stop_anchor(
+                    "short", anchor, ohlcv_by_tf=ohlcv_by_tf, tf=tf, zone=zone, cfg=cfg,
+                )
+                if neighbor is not None:
+                    anchor = max(anchor, neighbor)
+            return anchor * (1 + buffer_pct)
     return entry * (1 - buffer_pct) if direction == "long" else entry * (1 + buffer_pct)
 
 
@@ -484,7 +575,10 @@ def _geometry_from_zone(
     swing levels between entry and zone targets — prevents fake R:R where TP1 skips
     structural resistance ahead.
     """
-    stop = _structural_stop(direction, entry, zone, buffer_pct=cfg.stop_buffer_pct)
+    stop = _structural_stop(
+        direction, entry, zone, buffer_pct=cfg.stop_buffer_pct,
+        ohlcv_by_tf=ohlcv_by_tf, tf=min_tf, cfg=cfg,
+    )
     risk = entry - stop if direction == "long" else stop - entry
     if risk <= 0:
         return None
@@ -1066,6 +1160,12 @@ def _zone_edge_candidate(
     if trap.get("kind") == "prokol":
         trap_evidence.append("прокол_level_held")
 
+    # Ф4 (курс стр.28, сценарий 7): «пила» на уровне — тела пересекают уровень с
+    # двух сторон = накопление НА уровне, вход только на тесте нового накопления
+    # после выхода из пилы. Abstain (пила_на_уровне).
+    if detect_level_saw(bars, level=catalyst):
+        return None
+
     poc_info = zone_poc(ohlcv, zone=zone, cfg=cfg)
     setup_kind = _TIER_SETUP_KIND[tier_name]
     swing_levels = _extract_swing_levels(struct_by_tier, direction=direction, entry=catalyst)
@@ -1167,6 +1267,22 @@ def _zone_candidate(
     if trap.get("kind") == "prokol":
         trap_evidence.append("прокол_level_held")
 
+    # Ф4 (курс стр.28, сценарий 7): цена «пилит» уровень телами с двух сторон =
+    # накопление НА уровне — от такого уровня не входим, ждём выхода из пилы и вход
+    # на тесте нового накопления. Abstain (пила_на_уровне).
+    if detect_level_saw(bars, level=catalyst):
+        return None
+
+    # Ф3 (курс стр.31/стр.26): «отработка на 1 касание → уровень УДАЛЯЕМ, лимитными
+    # ордерами больше не торгуем»; вход от 2-3-го касания — ТОЛЬКО по факту слома
+    # структуры на МТФ. A worked level therefore BLOCKS the reactive limit candidate
+    # entirely (уровень_отработан — вход только по слому МТФ); the slом paths
+    # (_pp_candidate, _trap_flip_candidate) remain the only road in. This replaces
+    # the earlier soft downgrade (−0.15/касание), which still let the limit emit —
+    # something the course explicitly forbids.
+    if _level_already_worked(bars, level=catalyst, direction=direction) >= 1:
+        return None
+
     swing_levels = _extract_swing_levels(struct_by_tier, direction=direction, entry=catalyst)
     summary = _base_summary(
         direction=direction, entry=catalyst, zone=zone, setup_kind=setup_kind,
@@ -1177,14 +1293,6 @@ def _zone_candidate(
         return None
     near = abs(price - catalyst) / catalyst <= _ENTRY_BAND_PCT if catalyst else False
     summary["activation"] = "in_entry_zone" if near else "near_entry"
-    # Course стр.31: a level that already reacted once is weaker — don't trade it
-    # with a fresh limit order (only on an LTF slom). Downgrade the reactive limit
-    # candidate rather than remove it (the pp/slom paths still cover a real break).
-    worked = _level_already_worked(bars, level=catalyst, direction=direction)
-    if worked >= 1:
-        summary["gates_failed"] = summary.get("gates_failed", []) + [f"уровень_отработан_x{worked}"]
-        summary["geometry_confidence"] = max(0.3, summary.get("geometry_confidence", 0.7) - 0.15 * worked)
-        summary["strength"] = max(0.1, summary.get("strength", 0.5) - 0.15 * worked)
     result = _apply_confluence(
         summary, ohlcv=ohlcv,
         cfg=cfg, htf_bias=htf_bias, struct_by_tier=struct_by_tier,
@@ -1633,6 +1741,173 @@ def _trap_flip_candidate(
     return None
 
 
+# Ф5 (курс стр.35): «можно зайти ещё ДО выхода цены из стопового (по тренду от нижней
+# границы)» — the pre-exit leg. Price must sit in the trend-side third of the стоповый.
+_SV_PRE_EXIT_EDGE_BAND = 1.0 / 3.0
+
+
+def _stop_volume_pre_exit_candidate(
+    *,
+    sv: dict[str, Any],
+    ohlcv: list[list[float]],
+    ohlcv_by_tf: dict[str, list[list[float]]],
+    price: float,
+    tf: str,
+    tier_name: str,
+    cfg: PrizrakConfig,
+    htf_bias: dict[str, Any] | None = None,
+    struct_by_tier: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    """Entry INSIDE the стоповый объём, before price exits it (курс стр.35: «зайти ещё
+    до выхода цены из стопового, по тренду от нижней границы, а потом повторно на тесте
+    уровня»). Fires only when price sits in the trend-side third of the стоповый (lower
+    third for a long trend, upper third for short) — the same boundary-side discipline
+    as flat trading. Stop = behind the стоповый's own boundary (same as the retest leg);
+    the retest leg itself is unchanged and remains the second, repeat entry.
+    """
+    lo, hi = float(sv.get("lo") or 0), float(sv.get("hi") or 0)
+    width = hi - lo
+    if lo <= 0 or width <= 0 or not (lo <= price <= hi):
+        return None
+    bias = (htf_bias or {}).get("bias")
+    position = (price - lo) / width
+    if bias == "long" and position <= _SV_PRE_EXIT_EDGE_BAND:
+        direction: Literal["long", "short"] = "long"
+    elif bias == "short" and position >= 1 - _SV_PRE_EXIT_EDGE_BAND:
+        direction = "short"
+    else:
+        return None  # no trend, or price not at the trend-side boundary — retest leg owns it
+    swing_levels = _extract_swing_levels(struct_by_tier, direction=direction, entry=price)
+    summary = _base_summary(
+        direction=direction, entry=price, zone=sv, setup_kind="level_intraday_scalp",
+        tf_tier=tier_name, tf=tf, catalyst_level=price, poc_info={},
+        ohlcv_by_tf=ohlcv_by_tf, cfg=cfg, swing_levels=swing_levels,
+    )
+    if summary is None:
+        return None
+    summary["activation"] = "in_entry_zone"
+    result = _apply_confluence(
+        summary, ohlcv=ohlcv, cfg=cfg, htf_bias=htf_bias, struct_by_tier=struct_by_tier,
+    )
+    if result is None:
+        return None
+    # Explicit label — this is the PRE-EXIT leg, distinct from the retest scalp.
+    result["pattern"] = "стоповый_объём_вход_до_выхода"
+    result["management_plan"] = list(result.get("management_plan") or []) + [
+        "Повторный вход на тесте уровня стопового после выхода (стр.35)",
+    ]
+    result["invalidation"] = build_invalidation(
+        direction=direction, entry_lo=result.get("entry_lo", price * 0.998),
+        entry_hi=result.get("entry_hi", price * 1.002),
+        stop=result.get("stop", 0), catalyst_level=price, zone=sv,
+        swing_highs=swing_levels if direction == "long" else None,
+        swing_lows=swing_levels if direction == "short" else None,
+        entry_tf=tf,
+    )
+    return result
+
+
+# Ф6 (курс стр.60): вымпел/треугольник по тренду — «не успели войти от уровня → вход
+# на 6-м касании + доливка на случай расширения; стоп за всю структуру 1-3%».
+_PENNANT_WINDOW = 40  # same window _narrowing reads
+_PENNANT_MIN_TOUCHES = 6
+# «Цена у трендовой границы» = within this of the MOST RECENT swing touch of that
+# boundary (a converging trendline is best proxied by its latest touch, not the
+# window extreme — in a symmetric pennant the current boundary sits well inside the
+# window's min/max). Same tolerance as the ПП/flip retest band.
+_PENNANT_EDGE_TOL = 0.007
+
+
+def _figure_pennant_candidate(
+    *,
+    ohlcv: list[list[float]],
+    ohlcv_by_tf: dict[str, list[list[float]]],
+    price: float,
+    tf: str,
+    tier_name: str,
+    cfg: PrizrakConfig,
+    htf_bias: dict[str, Any] | None = None,
+    struct_by_tier: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    """Вымпел 6-е касание (курс стр.60) — the ONE deliberate exception to «фигуры =
+    только контекст» (figures.py), overridden by explicit user decision 2026-07-15.
+
+    Fires when a ``_narrowing`` figure has accumulated >= 6 boundary touches (swing
+    pivots inside the figure window) AND price sits at the TREND-side boundary of the
+    current (narrowed) range. Entry at the boundary, stop behind the WHOLE structure
+    × stop_buffer (стр.60: «стоп за всю структуру 1-3%»), targets structural via the
+    shared ``_structural_targets`` path, plus a доливка-on-expansion annotation.
+    """
+    bias = (htf_bias or {}).get("bias")
+    if bias not in ("long", "short"):
+        return None  # вымпел торгуем строго по тренду (стр.57)
+    if not _narrowing(ohlcv, window=_PENNANT_WINDOW):
+        return None
+    tail = ohlcv[-_PENNANT_WINDOW:]
+    bars = bars_from_ohlcv(tail)
+    pivots = _pivots(bars)
+    touches = len(pivots)
+    if touches < _PENNANT_MIN_TOUCHES:
+        return None
+    struct_hi = max(r[2] for r in tail)
+    struct_lo = min(r[3] for r in tail)
+    if struct_lo <= 0 or struct_hi <= struct_lo:
+        return None
+    # «Цена у трендовой границы»: the converging trendline's live location is its most
+    # recent swing touch (in a symmetric pennant the current boundary sits well inside
+    # the window's min/max, so window-extreme proximity would never fire). Long trend →
+    # the lower boundary = latest swing low; short → latest swing high.
+    lows = [px for _i, kind, px in pivots if kind == "low"]
+    highs = [px for _i, kind, px in pivots if kind == "high"]
+    if bias == "long" and lows:
+        boundary = float(lows[-1])
+        direction: Literal["long", "short"] = "long"
+    elif bias == "short" and highs:
+        boundary = float(highs[-1])
+        direction = "short"
+    else:
+        return None
+    if not (boundary * (1 - _PENNANT_EDGE_TOL) <= price <= boundary * (1 + _PENNANT_EDGE_TOL)):
+        return None  # not at the trend boundary (or already broken out/down) — no 6-touch entry
+    # Stop structure = the WHOLE figure (стр.60), not the narrowed half.
+    zone: dict[str, Any] = {
+        "tf": tf,
+        "lo": round(struct_lo, 8),
+        "hi": round(struct_hi, 8),
+        "touches": touches,
+        "width_pct": round((struct_hi - struct_lo) / struct_lo * 100, 4),
+    }
+    swing_levels = _extract_swing_levels(struct_by_tier, direction=direction, entry=price)
+    summary = _base_summary(
+        direction=direction, entry=price, zone=zone, setup_kind="figure_pennant_6touch",
+        tf_tier=tier_name, tf=tf, catalyst_level=price, poc_info={},
+        ohlcv_by_tf=ohlcv_by_tf, cfg=cfg, swing_levels=swing_levels,
+    )
+    if summary is None:
+        return None
+    summary["activation"] = "in_entry_zone"
+    result = _apply_confluence(
+        summary, ohlcv=ohlcv, cfg=cfg, htf_bias=htf_bias, struct_by_tier=struct_by_tier,
+    )
+    if result is None:
+        return None
+    # Set AFTER confluence — tag_figure would otherwise overwrite with its generic tag.
+    result["pattern"] = "вымпел_6е_касание"
+    result["pattern_touches"] = touches
+    result["management_plan"] = list(result.get("management_plan") or []) + [
+        "Доливка на случай расширения структуры вымпела (стр.60)",
+    ]
+    result["invalidation"] = build_invalidation(
+        direction=direction, entry_lo=result.get("entry_lo", price * 0.998),
+        entry_hi=result.get("entry_hi", price * 1.002),
+        stop=result.get("stop", 0), catalyst_level=price, zone=zone,
+        swing_highs=swing_levels if direction == "long" else None,
+        swing_lows=swing_levels if direction == "short" else None,
+        entry_tf=tf,
+    )
+    return result
+
+
 def build_prizrak_signals(
     ohlcv_by_tf: dict[str, list[list[float]]],
     *,
@@ -1851,12 +2126,30 @@ def _scan_tier_timeframe(
     if flip_sig:
         out.append(flip_sig)
 
+    # Вымпел 6-е касание (курс стр.60) — the deliberate exception to «фигуры = только
+    # контекст»; see _figure_pennant_candidate.
+    pennant_sig = _figure_pennant_candidate(
+        ohlcv=ohlcv, ohlcv_by_tf=ohlcv_by_tf, price=price, tf=tf, tier_name=tier_name, cfg=cfg,
+        htf_bias=htf_bias, struct_by_tier=struct_by_tier,
+    )
+    if pennant_sig:
+        out.append(pennant_sig)
+
     # Stop-volume, when found inside this tier's zone, is its own scalp-scale candidate.
     # Detected on ТФ-1 within the zone's time span (course стр.34), not the move's own TF.
     if zone:
         sv_bars = _stop_volume_bars(zone, tf=tf, ohlcv=ohlcv, ohlcv_by_tf=ohlcv_by_tf)
         sv = find_stop_volume(sv_bars, zone=zone, cfg=cfg)
-        if sv and not (sv["lo"] <= price <= sv["hi"]):
+        if sv and (sv["lo"] <= price <= sv["hi"]):
+            # Ф5 (курс стр.35): price still INSIDE the стоповый at its trend-side
+            # boundary — the pre-exit leg. The retest leg below stays the repeat entry.
+            pre_sig = _stop_volume_pre_exit_candidate(
+                sv=sv, ohlcv=ohlcv, ohlcv_by_tf=ohlcv_by_tf, price=price, tf=tf,
+                tier_name=tier_name, cfg=cfg, htf_bias=htf_bias, struct_by_tier=struct_by_tier,
+            )
+            if pre_sig:
+                out.append(pre_sig)
+        elif sv:
             direction: Literal["long", "short"] = "long" if price > sv["hi"] else "short"
             catalyst = sv["hi"] if direction == "long" else sv["lo"]
             swing_levels = _extract_swing_levels(struct_by_tier, direction=direction, entry=catalyst)

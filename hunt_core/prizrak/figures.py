@@ -9,10 +9,16 @@ so this reuses them rather than re-recognizing geometry from scratch:
 - Вымпел/клин/треугольник       = сужающееся накопление (стр.57-60)   -> narrowing range
 - Флаг                          = коррекционный канал после импульса (стр.56)
 
-A figure NEVER creates a new candidate and NEVER gates one — it only tags an
-existing candidate's ``summary["pattern"]`` (course: фигуры это контекст входа
-от уровня/ПП, доп-фактор). Falls back to the v1 squeeze proxy when no richer
-figure is recognized.
+A figure normally does NOT create a new candidate and NEVER gates one — it only
+tags an existing candidate's ``summary["pattern"]`` (course: фигуры это контекст
+входа от уровня/ПП, доп-фактор). Falls back to the v1 squeeze proxy when no
+richer figure is recognized.
+
+ONE deliberate exception (explicit user decision, 2026-07-15): the вымпел 6-е
+касание entry (course стр.60: «не успели войти от уровня → вход на 6-м касании
++ доливка на случай расширения; стоп за всю структуру 1-3%») IS a candidate —
+implemented as ``orchestrator._figure_pennant_candidate``, which reuses this
+module's ``_narrowing`` detector. Everything else here remains tag-only.
 """
 from __future__ import annotations
 
