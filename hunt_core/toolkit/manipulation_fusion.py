@@ -5,6 +5,10 @@ reads phantom market.orderbook_imbalance (real: market.depth_imbalance); sweep_r
 reads phantom structure.bsl_sweep/support_break (real: choch_detected / event / bos_choch /
 break_confirmed); predump above_vah reads phantom market.map_vah (real: market.map_vp_vah);
 squeeze-veto taker reads phantom market.taker_buy_sell_ratio (real: market.taker_5m/_15m/_1h).
+
+A shadow re-evaluation with the real keys runs on every call and logs
+``fusion_shadow_keyfix_flip`` when the archetype decision would change — collect those
+flips live to size the emission impact before flipping the keys through /backtest-gate.
 """
 from __future__ import annotations
 
@@ -322,6 +326,52 @@ def evaluate_manipulation_fusion(row: dict[str, Any]) -> ManipulationAssessment:
     archetype, primary, pc, req = best_archetype_by_ratio(checks)
     if archetype == "none":
         primary = 0.0
+
+    # R2 deferred-backtest shadow: re-run the same checklist with the REAL producer
+    # keys for the four inert sub-checks and log only when the archetype decision
+    # would flip. Telemetry only — never alters the returned assessment. The flip
+    # counts collected live are the evidence for (or against) the backtest-gated
+    # key fixes listed in the module docstring.
+    try:
+        shadow = dict(checks)
+        shadow["obi_bid"] = _f(row, "market.depth_imbalance", default=0.0) > 0.08
+        shadow["sweep_reclaim"] = bool(
+            struct.get("choch_detected") or struct.get("break_confirmed")
+        )
+        vah_fixed = market.get("map_vp_vah")
+        above_vah_fixed = False
+        if price > 0 and vah_fixed is not None:
+            try:
+                above_vah_fixed = price > float(vah_fixed)
+            except (TypeError, ValueError):
+                above_vah_fixed = False
+        shadow["pos_near_high"] = pos >= 0.85 or above_vah_fixed
+        taker_fixed = _f(row, "market.taker_5m", "market.taker_15m", default=1.0)
+        squeeze_fixed = (
+            int(funding < -0.0002)
+            + int(oi_regime in {"squeeze", "new_money_long"})
+            + int(taker_fixed >= 1.02)
+            + int(_bool_market(row, "map_accum_bid_absorption"))
+            + int(cvd == "bullish_div")
+        ) >= 4
+        shadow["anti_squeeze"] = not squeeze_fixed
+        shadow_arch, _, shadow_pc, _ = best_archetype_by_ratio(shadow)
+        if shadow_arch != archetype:
+            LOG.info(
+                "fusion_shadow_keyfix_flip",
+                symbol=str(row.get("symbol") or ""),
+                current=archetype,
+                fixed=shadow_arch,
+                pass_count=pc,
+                fixed_pass_count=shadow_pc,
+                flipped={
+                    k: (bool(checks.get(k)), bool(shadow[k]))
+                    for k in ("obi_bid", "sweep_reclaim", "pos_near_high", "anti_squeeze")
+                    if bool(checks.get(k)) != bool(shadow[k])
+                },
+            )
+    except Exception:
+        LOG.debug("fusion_shadow_keyfix_failed", exc_info=True)
 
     return ManipulationAssessment(
         archetype=archetype,  # type: ignore[arg-type]
