@@ -1,14 +1,11 @@
 """ManipulationFusionScore — multi-domain assessment for hunt archetypes.
 
-Known-inert sub-checks pending backtest-gated key fixes (audit R2, chunk 6): obi_bid
-reads phantom market.orderbook_imbalance (real: market.depth_imbalance); sweep_reclaim
-reads phantom structure.bsl_sweep/support_break (real: choch_detected / event / bos_choch /
-break_confirmed); predump above_vah reads phantom market.map_vah (real: market.map_vp_vah);
-squeeze-veto taker reads phantom market.taker_buy_sell_ratio (real: market.taker_5m/_15m/_1h).
-
-A shadow re-evaluation with the real keys runs on every call and logs
-``fusion_shadow_keyfix_flip`` when the archetype decision would change — collect those
-flips live to size the emission impact before flipping the keys through /backtest-gate.
+Display/journal layer ONLY: stamped by the deep panel (analyst_assembly), consumed by
+TG forecast sections, primary-forecast selection, and the outcome ledger. No delivery
+gate reads pass_count/archetype — the scanner lane never calls this module (verified
+audit R2 follow-up, 2026-07-15). The four sub-check keys were fixed to the real
+producer keys at that time (was: orderbook_imbalance / bsl_sweep+support_break /
+map_vah / taker_buy_sell_ratio phantoms).
 """
 from __future__ import annotations
 
@@ -110,7 +107,7 @@ def _squeeze_blocks_predump(row: dict[str, Any]) -> bool:
     market = row.get("market") if isinstance(row.get("market"), dict) else {}
     funding = _f(row, "market.funding_rate", "market.live_funding_rate")
     oi_regime = oi_regime_from_row(row)
-    taker = _f(row, "market.taker_buy_sell_ratio", default=1.0)
+    taker = _f(row, "market.taker_5m", "market.taker_15m", default=1.0)
     checks = 0
     if funding < -0.0002:
         checks += 1
@@ -145,7 +142,7 @@ def _coil_prebreak_checks(row: dict[str, Any], market: dict[str, Any], price: fl
     """
     tf = row.get("timeframes") if isinstance(row.get("timeframes"), dict) else {}
     r5 = tf.get("5m_closed") or tf.get("5m") or {}
-    vah = r5.get("vah") or market.get("map_vah") or market.get("vah")
+    vah = r5.get("vah") or market.get("map_vp_vah") or market.get("vah")
     price_near = False
     vol_dry = False
     bid_abs = False
@@ -201,7 +198,7 @@ def evaluate_manipulation_fusion(row: dict[str, Any]) -> ManipulationAssessment:
         predump += 1.0
         factors.append(FactorHit("D3", "distribution_phase", phase, 1.0, "wyckoff"))
     price = float(row.get("price") or 0)
-    vah = market.get("map_vah") or market.get("vah")
+    vah = market.get("map_vp_vah") or market.get("vah")
     above_vah = False
     if price > 0 and vah is not None:
         try:
@@ -231,7 +228,7 @@ def evaluate_manipulation_fusion(row: dict[str, Any]) -> ManipulationAssessment:
         checks,
         check_sources,
         "sweep_reclaim",
-        bool(struct.get("bsl_sweep") or struct.get("support_break")),
+        bool(struct.get("choch_detected") or struct.get("break_confirmed")),
         "smc",
     ):
         predump += 1.0
@@ -312,7 +309,7 @@ def evaluate_manipulation_fusion(row: dict[str, Any]) -> ManipulationAssessment:
     ):
         ignition += 1.0
         factors.append(FactorHit("D6", "cvd_absorption", True, 1.0, "markettrace"))
-    obi = _f(row, "market.orderbook_imbalance", default=0.0)
+    obi = _f(row, "market.depth_imbalance", default=0.0)
     if _apply_check(checks, check_sources, "obi_bid", obi > 0.08, "microstructure") and obi > 0.08:
         ignition += 1.0
         factors.append(FactorHit("D1", "obi_bid", obi, 1.0, "microstructure"))
@@ -326,52 +323,6 @@ def evaluate_manipulation_fusion(row: dict[str, Any]) -> ManipulationAssessment:
     archetype, primary, pc, req = best_archetype_by_ratio(checks)
     if archetype == "none":
         primary = 0.0
-
-    # R2 deferred-backtest shadow: re-run the same checklist with the REAL producer
-    # keys for the four inert sub-checks and log only when the archetype decision
-    # would flip. Telemetry only — never alters the returned assessment. The flip
-    # counts collected live are the evidence for (or against) the backtest-gated
-    # key fixes listed in the module docstring.
-    try:
-        shadow = dict(checks)
-        shadow["obi_bid"] = _f(row, "market.depth_imbalance", default=0.0) > 0.08
-        shadow["sweep_reclaim"] = bool(
-            struct.get("choch_detected") or struct.get("break_confirmed")
-        )
-        vah_fixed = market.get("map_vp_vah")
-        above_vah_fixed = False
-        if price > 0 and vah_fixed is not None:
-            try:
-                above_vah_fixed = price > float(vah_fixed)
-            except (TypeError, ValueError):
-                above_vah_fixed = False
-        shadow["pos_near_high"] = pos >= 0.85 or above_vah_fixed
-        taker_fixed = _f(row, "market.taker_5m", "market.taker_15m", default=1.0)
-        squeeze_fixed = (
-            int(funding < -0.0002)
-            + int(oi_regime in {"squeeze", "new_money_long"})
-            + int(taker_fixed >= 1.02)
-            + int(_bool_market(row, "map_accum_bid_absorption"))
-            + int(cvd == "bullish_div")
-        ) >= 4
-        shadow["anti_squeeze"] = not squeeze_fixed
-        shadow_arch, _, shadow_pc, _ = best_archetype_by_ratio(shadow)
-        if shadow_arch != archetype:
-            LOG.info(
-                "fusion_shadow_keyfix_flip",
-                symbol=str(row.get("symbol") or ""),
-                current=archetype,
-                fixed=shadow_arch,
-                pass_count=pc,
-                fixed_pass_count=shadow_pc,
-                flipped={
-                    k: (bool(checks.get(k)), bool(shadow[k]))
-                    for k in ("obi_bid", "sweep_reclaim", "pos_near_high", "anti_squeeze")
-                    if bool(checks.get(k)) != bool(shadow[k])
-                },
-            )
-    except Exception:
-        LOG.debug("fusion_shadow_keyfix_failed", exc_info=True)
 
     return ManipulationAssessment(
         archetype=archetype,  # type: ignore[arg-type]

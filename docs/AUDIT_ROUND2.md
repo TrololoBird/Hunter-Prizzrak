@@ -1440,6 +1440,9 @@ Command: `grep -rn <sym> . --exclude-dir=.git | grep -v toolkit/trend.py` → em
 | 7 domain+signals+diagnostics (25) | 4892c48 | 25 закрыты: **P0 blackout-детектор чинит классификацию rest_error/timeout** (+4 теста); удалены мёртвые модули signal_horizon/snapshot/structure_state; честные source/age в data_plane_audit; price_sanity анкеры — DEFERRED-BACKTEST |
 | 8 root (19) | 2f9b8ef | 19 закрыты: contract.py 1192→~200 строк, 10 мёртвых errors.py-экспортов, 18 paths-констант, Clock-ABC; `--interval 30` больше не теряется; Secrets → Pydantic |
 
+### Переклассификация fusion (2026-07-15, после гейт-трассы)
+4 фантом-ключа manipulation_fusion (obi_bid, sweep_reclaim, map_vah, taker) **исправлены напрямую** (коммит после 9096ffc): трасса потребителей доказала, что fusion — слой отображения/журнала (deep-панель, TG-секции, outcome-ledger); **ни один гейт эмиссии pass_count/archetype не читает, сканер-лейн модуль не вызывает**. Аудиторская метка P0 «ignition_long не эмитит» была неверна по импакту — fusion не эмитит ничего. Docstring-ложь «actual delivery decision uses pass_count» удалена. Фиксы = presentation honesty, бектест не требуется.
+
 ### Леджер DEFERRED-BACKTEST (кандидаты на оживление через /backtest-gate)
 | Что | Фантом → реальный ключ | Эффект оживления |
 |---|---|---|
@@ -1447,10 +1450,6 @@ Command: `grep -rn <sym> . --exclude-dir=.git | grep -v toolkit/trend.py` → em
 | G-90 pump_history record_signal_open | только cold-start | signal_short/long перестанут замерзать |
 | G-94 baseline_store funding ≤0 drop | guard отбрасывает отрицательный funding | смещение baseline |
 | levels-veto (чанк 5) | `reanchor_setup_levels` без вызовов → levels_viable/levels_veto инертны | включится delivery-time вето по уровням |
-| fusion obi_bid (P0, чанк 6) | `market.orderbook_imbalance` → `market.depth_imbalance` | ignition_long сможет достичь 5/5 |
-| fusion sweep_reclaim (чанк 6) | `structure.bsl_sweep`/`support_break` → `choch_detected`/`event`/`break_confirmed`/`bos_direction` | predump_short получит 5-й балл |
-| fusion map_vah (чанк 6) | `market.map_vah` → `market.map_vp_vah` | above_vah заработает |
-| fusion taker veto (чанк 6) | `market.taker_buy_sell_ratio` → `market.taker_5m` | анти-сквиз вето получит taker-подпроверку |
 | price_sanity анкеры (чанк 7) | `mark_price`→`mark`, `index_price`→`index`, `last_close_1h` — нет продюсера (ближайшее: `timeframes.1h_closed.close`) | санити-гейт цены начнёт реально сверять анкеры |
 
 ---
