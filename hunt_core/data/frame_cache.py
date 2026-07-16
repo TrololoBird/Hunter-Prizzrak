@@ -1,10 +1,11 @@
 """In-memory OHLCV + prepared + enrichment — WS-first hot tick plane."""
 from __future__ import annotations
 
+import os
 import structlog
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -35,7 +36,8 @@ _KLINE_MERGE_CAP = 2000
 # HTF timeframes worth persisting across a restart: REST-only (WS captures only
 # 5m/15m) and slow to warm, so a cold cache serves a stale bootstrap seed for
 # hours until backfill catches up. 1m/5m/15m warm fast and are not persisted.
-_HTF_PERSIST_TFS: tuple[str, ...] = ("1h", "4h", "1d")
+# 1w exists only for PINNED_SYMBOLS but is the slowest of all to re-warm.
+_HTF_PERSIST_TFS: tuple[str, ...] = ("1h", "4h", "1d", "1w")
 
 
 def _frame_newest_ms(df: pl.DataFrame) -> int | None:
@@ -159,12 +161,23 @@ class SymbolFrameCache:
         self._frame_ts.setdefault(sym, {}).update(ts_bucket)
         self._bootstrapped.add(sym)
 
-    def persist_htf_frames(self, directory: str | Path) -> int:
-        """Write HTF (1h/4h/1d) frames to disk (one parquet per TF, symbol column).
+    def persist_htf_frames(self, directory: str | Path, *, now_ms: int | None = None) -> int:
+        """Write HTF (1h/4h/1d/1w) frames to disk (one parquet per TF, symbol column).
 
         Called periodically + on shutdown so a restart can reload a fresh-enough
-        HTF fallback instead of serving a stale bootstrap seed for hours. Best
-        effort — never raises. Returns the number of (symbol, TF) frames written.
+        HTF fallback instead of serving a stale bootstrap seed for hours.
+
+        Discipline at write time:
+        - closed bars only — any still-forming tail row (close_time in the
+          future) is dropped so a reload can never repaint (defense in depth;
+          finalize_kline_frame should have dropped it already);
+        - frames whose newest bar exceeds the TF fallback max-age are skipped
+          (housekeeping: symbols that left the universe age out of the file);
+        - atomic write via tmp + os.replace, so a SIGKILL mid-write can never
+          leave a truncated parquet behind.
+
+        Best effort — never raises. Returns the number of (symbol, TF) frames
+        written.
         """
         try:
             directory = Path(directory)
@@ -172,26 +185,52 @@ class SymbolFrameCache:
         except OSError as exc:
             LOG.warning("htf_persist_mkdir_failed | dir=%s err=%s", directory, exc)
             return 0
+        if now_ms is None:
+            from hunt_core import clock
+
+            now_ms = int(clock.now_ms())
+        now_utc = datetime.fromtimestamp(now_ms / 1000.0, tz=UTC)
         written = 0
         for tf in _HTF_PERSIST_TFS:
+            max_age_ms = _KLINE_FRAME_MAX_AGE_S.get(tf, _DEFAULT_KLINE_FRAME_MAX_AGE_S) * 1000
             parts: list[pl.DataFrame] = []
             for sym, frames in self._frames.items():
                 df = frames.get(tf)
-                if isinstance(df, pl.DataFrame) and not df.is_empty() and "symbol" not in df.columns:
-                    parts.append(df.with_columns(pl.lit(sym).alias("symbol")))
+                if not isinstance(df, pl.DataFrame) or df.is_empty() or "symbol" in df.columns:
+                    continue
+                if "close_time" in df.columns:
+                    try:
+                        df = df.filter(pl.col("close_time") < pl.lit(now_utc))
+                    except Exception:  # noqa: BLE001 — schema drift → skip oddball
+                        continue
+                    if df.is_empty():
+                        continue
+                newest = _frame_newest_ms(df)
+                if newest is not None and now_ms - newest > max_age_ms:
+                    continue  # symbol left the universe / long-dead frame — age out
+                parts.append(df.with_columns(pl.lit(sym).alias("symbol")))
             path = directory / f"htf_{tf}.parquet"
             if not parts:
+                # Nothing fresh for this TF: remove the leftover file so a later
+                # restart cannot even attempt genuinely-dead data.
+                path.unlink(missing_ok=True)
                 continue
             # Align to the majority schema — WS-merged frames can drift a column,
             # and pl.concat needs identical column sets. Drop the oddballs rather
             # than fail the whole TF (they re-persist once REST normalizes them).
             ref_cols = parts[0].columns
             aligned = [p for p in parts if p.columns == ref_cols]
+            tmp = path.with_name(path.name + ".tmp")
             try:
-                pl.concat(aligned, how="vertical_relaxed").write_parquet(path)
+                pl.concat(aligned, how="vertical_relaxed").write_parquet(tmp)
+                os.replace(tmp, path)
                 written += len(aligned)
             except Exception as exc:
                 LOG.debug("htf_persist_write_failed | tf=%s err=%s", tf, exc)
+                try:
+                    tmp.unlink(missing_ok=True)
+                except OSError:
+                    pass
         return written
 
     def load_htf_frames(self, directory: str | Path, *, now_ms: int | None = None) -> int:

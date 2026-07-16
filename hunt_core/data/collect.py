@@ -286,6 +286,50 @@ def ws_kline_frame_serves(
         return False
 
 
+# HTF timeframes eligible for cache-first serve from the (disk-reloaded or
+# REST-seeded) frame cache. Deliberately excludes 15m: 15m frames are WS-merged
+# and go through the fidelity-checked 1m/WS path instead.
+_HTF_CACHE_SERVE_TFS = frozenset({"1h", "4h", "1d", "1w"})
+
+
+def htf_cache_frame_serves(
+    df: Any,
+    interval: str,
+    need: int,
+    *,
+    exchange: Any,
+    now_ms: int | None = None,
+) -> bool:
+    """True when a cached HTF frame can serve INSTEAD of a full REST re-fetch.
+
+    The frame serves only when it is *current* — its newest closed bar is the
+    latest one that can exist (``now - newest_close < one TF step``) — so a REST
+    call could not return anything newer and skipping it is a pure weight win.
+    This is what makes the disk-persisted HTF reload an incremental top-up: a
+    restart re-fetches a TF over REST only once its bar actually rolls over,
+    instead of re-downloading hundreds of unchanged bars per symbol. Gates:
+    - coverage: >= ``need`` bars (structure analysis depth);
+    - currency: newest closed bar is the latest possible one.
+    """
+    try:
+        if df is None or exchange is None or df.is_empty() or df.height < max(1, int(need)):
+            return False
+        from hunt_core.data.frame_cache import _frame_newest_ms
+        from hunt_core.market.factory import interval_to_seconds
+
+        newest = _frame_newest_ms(df)
+        if newest is None:
+            return False
+        if now_ms is None:
+            from hunt_core import clock
+
+            now_ms = int(clock.now_ms())
+        step_ms = interval_to_seconds(interval, exchange) * 1000
+        return now_ms - newest < step_ms
+    except Exception:  # noqa: BLE001 — any doubt → REST
+        return False
+
+
 async def resolve_kline_map(
     client: HuntCcxtClient,
     symbol: str,
@@ -370,6 +414,17 @@ async def resolve_kline_map(
             if cached is not None and not cached.is_empty():
                 kline_map[name] = cached
                 return
+            # Cache-first HTF serve: a disk-reloaded (post-restart) or previously
+            # seeded frame that already holds the latest closed bar makes a full
+            # REST re-download a no-op — serve it and let REST top up only after
+            # the bar rolls over.
+            if name in _HTF_CACHE_SERVE_TFS:
+                htf_df = get_frame_cache().get_kline_frame(symbol, name)
+                if htf_df is not None and htf_cache_frame_serves(
+                    htf_df, name, int(limits[name]), exchange=exchange
+                ):
+                    kline_map[name] = htf_df
+                    return
             res = await safe_fetch(
                 lambda n=name: client.fetch_klines_cached(symbol, n, limit=limits[n]),
                 context=f"klines.{symbol}.{name}",
@@ -593,6 +648,7 @@ __all__ = [
     "fetch_rest_pack",
     "_fetch_rest_pack",
     "resolve_kline_map",
+    "htf_cache_frame_serves",
     "rest_pack_specs",
     "ws_orderflow_fresh",
     "sort_symbols_for_tick",

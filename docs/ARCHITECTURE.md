@@ -139,6 +139,14 @@ no one. The contract below prevents a silent repeat:
 4. **Hang watchdog** — `faulthandler.dump_traceback_later(HUNT_WATCHDOG_S, exit=True)`
    stays: it dumps every thread's stack to `data/hunt_watchdog.log` then exits, so a hung
    loop becomes a restartable crash (not a frozen zombie). Default 300s.
+5. **HTF frame persistence** (`data/frame_cache.py::persist_htf_frames/load_htf_frames`)
+   — 1h/4h/1d/1w closed-bar frames are written to `data/htf_frames/htf_<tf>.parquet`
+   every ~5 min + on shutdown (atomic tmp-rename), and reloaded at startup before the
+   first tick. A reloaded frame that still holds the latest closed bar serves the tick
+   path directly (`collect.py::htf_cache_frame_serves`), so a restart no longer opens a
+   ~4h universe-wide HTF-staleness window while lazy per-symbol REST re-warms; REST tops
+   up a TF only when its bar rolls over. Corrupt/stale files are skipped (REST fallback);
+   frames past the TF fallback max-age age out of the file at persist time.
 
 Future work (specified, not yet built): proxy **failover** (rotate through
 `effective_proxy_urls()` when the active one fails preflight mid-run, not only at start).
