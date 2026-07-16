@@ -26,6 +26,7 @@ from hunt_core.market.factory import (
     create_pro_binance_future,
 )
 from hunt_core.market.network import mask_proxy_url
+from hunt_core.market.tick_registry import register_ticks_from_markets
 from hunt_core.market.factory import ccxt_ohlcv_to_frame, finalize_kline_frame
 from hunt_core.market.symbols import (
     is_linear_usdt_swap_market,
@@ -299,6 +300,7 @@ class HuntCcxtClient:
             try:
                 await self._ex.load_markets()
                 self._markets_loaded = True
+                self._register_tick_sizes()
                 await self._sync_time_offset()
                 return
             except ccxt.BaseError as exc:
@@ -319,7 +321,15 @@ class HuntCcxtClient:
         )
         await self._bootstrap_markets_via_ccxt_implicit()
         self._markets_loaded = True
+        self._register_tick_sizes()
         await self._sync_time_offset()
+
+    def _register_tick_sizes(self) -> None:
+        """Feed per-symbol price ticks to the global tick registry (public metadata)."""
+        try:
+            register_ticks_from_markets((self._ex.markets or {}).values())
+        except Exception:
+            LOG.warning("tick_registry_populate_failed", exc_info=True)
 
     async def _bootstrap_markets_via_ccxt_implicit(self) -> None:
         """CCXT implicit ``fapiPublicGetExchangeInfo`` when ``load_markets`` fails."""

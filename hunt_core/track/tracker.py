@@ -24,6 +24,7 @@ SignalEvent = Literal[
     "avg_zone",
 ]
 
+from hunt_core.market.tick_registry import quantize_conservative, quantize_price
 from hunt_core.params.store import tracker_thresholds
 from hunt_core.features.prepare_columns import feature_vector_from_row
 from hunt_core.paths import SIGNAL_STATE as STATE_PATH
@@ -277,12 +278,19 @@ def _apply_early_breakeven_lock(
         return False
     buf_pct = float(tr.get("early_breakeven_buffer_pct", 0.12))
     cur = float(active.get("stop_loss") or 0)
+    # Tick-quantized, conservative side: round(x, 6) erased sub-1% BE buffers
+    # entirely on sub-1e-4 priced perps (tick 1e-7/1e-8), so the lock either
+    # never fired (stop == entry → guard) or jumped a whole 1e-6 grid step.
     if direction == "short":
-        new_stop = round(entry * (1.0 - buf_pct / 100.0), 6)
+        new_stop = quantize_conservative(
+            entry * (1.0 - buf_pct / 100.0), symbol, direction=direction
+        )
         if new_stop >= entry or (cur > 0 and new_stop >= cur):
             return False
     else:
-        new_stop = round(entry * (1.0 + buf_pct / 100.0), 6)
+        new_stop = quantize_conservative(
+            entry * (1.0 + buf_pct / 100.0), symbol, direction=direction
+        )
         if new_stop <= entry or (cur > 0 and new_stop <= cur):
             return False
     active["stop_loss"] = new_stop
@@ -436,6 +444,13 @@ def mark_close_notified(
         state.setdefault("signals", {}).pop(k, None)
 
 
+def _float_or_none(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def register_signal_open(
     state: dict[str, Any],
     *,
@@ -484,6 +499,22 @@ def register_signal_open(
     entry_lo = float(ez[0] if len(ez) > 0 else price)
     entry_hi = float(ez[1] if len(ez) > 1 else price)
     initial_phase = _initial_signal_phase(setup)
+    # Snap geometry onto the exchange price grid at the single registration
+    # point (all producers — prizrak, manipulation, main lane — emit raw
+    # floats). Entries: nearest tick; stop/TPs: conservative side (stop lands
+    # further from entry, TP closer — never promises sub-tick edge). Falls
+    # back to round(x, 8) when the registry has no tick for the symbol.
+    entry_lo = quantize_price(entry_lo, symbol)
+    entry_hi = quantize_price(entry_hi, symbol)
+    setup = {
+        **setup,
+        "stop_loss": quantize_conservative(
+            _float_or_none(setup.get("stop_loss")), symbol, direction=dir_l
+        ),
+        "tp1": quantize_conservative(_float_or_none(setup.get("tp1")), symbol, direction=dir_l),
+        "tp2": quantize_conservative(_float_or_none(setup.get("tp2")), symbol, direction=dir_l),
+        "tp3": quantize_conservative(_float_or_none(setup.get("tp3")), symbol, direction=dir_l),
+    }
     orig_sl = setup.get("stop_loss")
     signal: dict[str, Any] = {
         "status": "active",
@@ -507,7 +538,7 @@ def register_signal_open(
         "tp3": setup.get("tp3"),
         "risk_reward": setup.get("risk_reward"),
         "level_mode": setup.get("level_mode"),
-        "entry_zone": list(ez) if isinstance(ez, (list, tuple)) else [price, price],
+        "entry_zone": [entry_lo, entry_hi],
         "lifecycle_phase": (lifecycle or {}).get("phase") or setup.get("lifecycle_phase"),
         # immutable entry bucket — never updated by followups
         "entry_lifecycle_phase": (

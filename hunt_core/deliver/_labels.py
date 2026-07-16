@@ -120,7 +120,14 @@ def fmt_price(value: float | None) -> str:
         return f"{v:.4f}"
     if a >= 0.01:
         return f"{v:.5f}"
-    return f"{v:.6f}"
+    if a >= 0.001:
+        return f"{v:.6f}"
+    # Sub-milli-dollar perps (1000SATS ≈ 3.5e-5, DOGS, NEIRO…) trade on 1e-7/1e-8
+    # ticks; a flat .6f collapsed distinct levels (entry_lo/entry_hi, SL vs TP)
+    # into the same rendered string. Binance max pricePrecision is 8.
+    if a >= 0.0001:
+        return f"{v:.7f}"
+    return f"{v:.8f}"
 
 
 def format_symbol_telegram(symbol: str) -> str:

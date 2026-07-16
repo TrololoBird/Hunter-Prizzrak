@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from hunt_core.market.tick_registry import quantize_conservative
 from hunt_core.params.store import tp1_partial_fix_pct as _tp1_pct
 from hunt_core.params.store import tracker_thresholds
 
@@ -130,7 +131,10 @@ def _update_trailing_stop(
             return False, cur_stop
     if cur_stop > 0 and abs(new_stop - cur_stop) < min_ratchet:
         return False, cur_stop
-    active["stop_loss"] = round(new_stop, 6)
+    # round(x, 6) here gridded stops 10-100× coarser than the exchange tick on
+    # sub-1e-4 coins (1000SATS/DOGS/NEIRO…) — the whole trail distance vanished
+    # or doubled. Quantize to the real tick, conservative side (long→floor).
+    active["stop_loss"] = quantize_conservative(new_stop, symbol, direction=direction)
     active["trailing_active"] = True
     # Once trailing SL is in profit territory, suppress bias_flip exits.
     if direction == "short" and new_stop < entry:
@@ -173,12 +177,12 @@ def apply_tp1_breakeven_trail(
         # placing the runner stop beyond the best and stopping it out at an over-stated
         # profit. Never lock more than price actually gave.
         ext_lo = float(active.get("extreme_lo") or entry)
-        new_stop = round(max(entry - buf, ext_lo), 6)
+        new_stop = quantize_conservative(max(entry - buf, ext_lo), symbol, direction=direction)
         if new_stop >= entry or (cur > 0 and new_stop >= cur):
             return False
     else:
         ext_hi = float(active.get("extreme_hi") or entry)
-        new_stop = round(min(entry + buf, ext_hi), 6)
+        new_stop = quantize_conservative(min(entry + buf, ext_hi), symbol, direction=direction)
         if new_stop <= entry or (cur > 0 and new_stop <= cur):
             return False
     active["stop_loss"] = new_stop
@@ -213,7 +217,7 @@ def apply_tp1_management(
         lock_stop = min(entry, cur) if cur > 0 else entry
     else:
         lock_stop = max(entry, cur) if cur > 0 else entry
-    active["stop_loss"] = round(lock_stop, 6)
+    active["stop_loss"] = quantize_conservative(lock_stop, symbol, direction=direction)
     active["partial_fixed_pct"] = pct
     active["sl_at_breakeven"] = True
     active["tp1_managed"] = True
