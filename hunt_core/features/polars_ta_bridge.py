@@ -23,7 +23,7 @@ from hunt_core.features.research_plugins import (
     polars_trading_available,
 )
 
-from .shared import clean_non_finite, materialize_series
+from .shared import clean_non_finite, materialize_series, wilder_mean
 
 LOG = structlog.get_logger("hunt_core.features.polars_ta_bridge")
 _BRIDGE_SKIPS: set[str] = set()
@@ -138,28 +138,66 @@ def adx_from_polars_ta(
     df: pl.DataFrame,
     period: int = 14,
 ) -> tuple[pl.Series, pl.Series, pl.Series]:
-    """ADX + DI via polars_ta.tdx (0..1 backend → 0..100)."""
-    high, low, close = _ohlc()
-    n = int(period)
-    adx = _series_from_expr(
-        df, ptdx.ADX(high, low, close, N=n), name=f"adx{period}", fill=0.0, percent=True, clip=(0.0, 100.0)
+    """Canonical Wilder (1978) ADX + DI, pure Polars, SMA-seeded RMA smoothing.
+
+    Replaced the ``ptdx.ADX``/``PLUS_DI``/``MINUS_DI`` backend (2026-07 numeric
+    audit): that is the TDX variant — DI from 14-bar rolling *sums* and ADX as a
+    6-bar simple MA of DX — which diverged from Wilder ADX by up to ~40 points
+    (rel. ~190%) on real 1h data, while every consumer threshold
+    (``toolkit.adx_thresholds`` 20/25 regime bands) assumes Wilder semantics.
+    Verified against an independent numpy Wilder reference (rtol < 1e-9 at tail).
+    """
+    n = max(1, int(period))
+    base = (
+        df.select(
+            pl.col("high").cast(pl.Float64, strict=False).alias("h"),
+            pl.col("low").cast(pl.Float64, strict=False).alias("l"),
+            pl.col("close").cast(pl.Float64, strict=False).alias("c"),
+        )
+        .with_columns(
+            (pl.col("h") - pl.col("h").shift(1)).alias("up"),
+            (pl.col("l").shift(1) - pl.col("l")).alias("dn"),
+        )
+        .with_columns(
+            pl.when((pl.col("up") > pl.col("dn")) & (pl.col("up") > 0.0))
+            .then(pl.col("up"))
+            .otherwise(0.0)
+            .alias("plus_dm"),
+            pl.when((pl.col("dn") > pl.col("up")) & (pl.col("dn") > 0.0))
+            .then(pl.col("dn"))
+            .otherwise(0.0)
+            .alias("minus_dm"),
+            pl.max_horizontal(
+                (pl.col("h") - pl.col("l")).abs(),
+                (pl.col("h") - pl.col("c").shift(1)).abs(),
+                (pl.col("l") - pl.col("c").shift(1)).abs(),
+            ).alias("tr"),
+        )
     )
-    plus_di = _series_from_expr(
-        df,
-        ptdx.PLUS_DI(high, low, close, N=n),
-        name=f"plus_di{period}",
-        fill=0.0,
-        percent=True,
-        clip=(0.0, 100.0),
+    # seed_offset=1: Wilder smoothing starts at the first bar with a prior close.
+    atr = wilder_mean(base["tr"], period=n, name="atr", seed_offset=1)
+    plus_sm = wilder_mean(base["plus_dm"], period=n, name="plus_sm", seed_offset=1)
+    minus_sm = wilder_mean(base["minus_dm"], period=n, name="minus_sm", seed_offset=1)
+    di = pl.DataFrame({"atr": atr, "plus_sm": plus_sm, "minus_sm": minus_sm}).with_columns(
+        pl.when(pl.col("atr") > 0.0)
+        .then(100.0 * pl.col("plus_sm") / pl.col("atr"))
+        .otherwise(None)
+        .alias("pdi"),
+        pl.when(pl.col("atr") > 0.0)
+        .then(100.0 * pl.col("minus_sm") / pl.col("atr"))
+        .otherwise(None)
+        .alias("mdi"),
+    ).with_columns(
+        pl.when((pl.col("pdi") + pl.col("mdi")) > 0.0)
+        .then(100.0 * (pl.col("pdi") - pl.col("mdi")).abs() / (pl.col("pdi") + pl.col("mdi")))
+        .otherwise(0.0)
+        .alias("dx")
     )
-    minus_di = _series_from_expr(
-        df,
-        ptdx.MINUS_DI(high, low, close, N=n),
-        name=f"minus_di{period}",
-        fill=0.0,
-        percent=True,
-        clip=(0.0, 100.0),
-    )
+    # DX is defined from index n (first DI); the ADX seed averages DX[n .. 2n-1].
+    adx_raw = wilder_mean(di["dx"], period=n, name="adx_raw", seed_offset=n)
+    adx = _clean(adx_raw, fill=0.0).clip(0.0, 100.0).rename(f"adx{period}")
+    plus_di = _clean(di["pdi"], fill=0.0).clip(0.0, 100.0).rename(f"plus_di{period}")
+    minus_di = _clean(di["mdi"], fill=0.0).clip(0.0, 100.0).rename(f"minus_di{period}")
     return adx, plus_di, minus_di
 
 
