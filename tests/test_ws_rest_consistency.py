@@ -1,0 +1,266 @@
+"""WS↔REST snapshot consistency pinning (audit G).
+
+Pins the units contract between the WS snapshot producers
+(``HuntCcxtStreams.mark_snapshot`` / ``snapshot()``) and the REST-prepared
+fields the overlays write:
+
+- ``funding_live`` / ``live_funding_rate`` are FRACTIONS like REST
+  ``fundingRate`` (``funding_pct`` = ×100);
+- ``basis_bps_live`` is BASIS POINTS; ``prepared.basis_pct`` is PERCENT
+  (bps / 100), and ``market["basis_bps"]`` round-trips back (×100);
+- missing index/funding surface as ``None``, never a fabricated ``0.0``
+  that would clobber a real REST value (invariant I-6);
+- the hot-carry patch reads ``live_depth_imbalance`` (the old
+  ``"depth_imbalance"`` carry key was a phantom — the WS snapshot never
+  exposes that name) and gates on ``ws_connected``;
+- the two ``_overlay_ws_market`` implementations (features/snapshot.py and
+  data/collect.py) stay in lock-step on the shared fields.
+"""
+
+from __future__ import annotations
+
+import time
+from types import SimpleNamespace
+from typing import Any, cast
+
+import pytest
+
+from hunt_core.data.collect import _overlay_ws_market as overlay_collect
+from hunt_core.features.snapshot import (
+    _overlay_ws_market as overlay_snapshot,
+)
+from hunt_core.features.snapshot import stamp_derivative_zscores
+from hunt_core.market.streams import HuntCcxtStreams
+from hunt_core.runtime.tick_assembly import _patch_market_live
+
+
+def _streams() -> HuntCcxtStreams:
+    return HuntCcxtStreams(client=cast(Any, object()))
+
+
+def _prepared(**overrides: Any) -> SimpleNamespace:
+    base: dict[str, Any] = {
+        "funding_rate": 0.0007,
+        "mark_price": 99.0,
+        "basis_pct": None,
+        "mark_index_spread_bps": None,
+        "agg_trade_delta_30s": None,
+        "orderflow_source": "agg_trade_rest",
+        "depth_imbalance": 0.9,
+        "depth_imbalance_source": "rest_depth",
+        "microprice_bias": 0.9,
+        "microprice_bias_source": "rest_depth",
+        "agg_trade_buy_ratio_60s": None,
+        "agg_trade_buy_ratio_30s": None,
+    }
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+# ---------------------------------------------------------------------------
+# mark_snapshot: units + None-semantics
+# ---------------------------------------------------------------------------
+
+
+def test_mark_snapshot_units() -> None:
+    ws = _streams()
+    now_ms = int(time.time() * 1000)
+    ws._mark_state["BTCUSDT"] = (now_ms, 100.5, 100.0, 0.0001)
+    snap = ws.mark_snapshot("BTCUSDT")
+    assert snap is not None
+    assert snap["mark_live"] == 100.5
+    assert snap["index_live"] == 100.0
+    # fraction, same units as REST fundingRate
+    assert snap["funding_live"] == pytest.approx(0.0001)
+    # (100.5 - 100) / 100 * 10_000 = 50 bps
+    assert snap["basis_bps_live"] == pytest.approx(50.0)
+
+
+def test_mark_snapshot_missing_index_and_funding_are_none_not_zero() -> None:
+    ws = _streams()
+    now_ms = int(time.time() * 1000)
+    # index/funding parsed via `or 0` from a message that lacked them
+    ws._mark_state["BTCUSDT"] = (now_ms, 100.5, 0.0, 0.0)
+    snap = ws.mark_snapshot("BTCUSDT")
+    assert snap is not None
+    assert snap["mark_live"] == 100.5
+    assert snap["index_live"] is None
+    assert snap["funding_live"] is None
+    assert snap["basis_bps_live"] is None
+
+
+def test_mark_snapshot_age_gate() -> None:
+    ws = _streams()
+    stale_ms = int(time.time() * 1000) - 60_000
+    ws._mark_state["BTCUSDT"] = (stale_ms, 100.5, 100.0, 0.0001)
+    assert ws.mark_snapshot("BTCUSDT", max_age_s=10.0) is None
+
+
+# ---------------------------------------------------------------------------
+# _overlay_ws_market: both implementations, identical units + gating
+# ---------------------------------------------------------------------------
+
+OVERLAYS = [
+    pytest.param(overlay_snapshot, id="features.snapshot"),
+    pytest.param(overlay_collect, id="data.collect"),
+]
+
+
+@pytest.mark.parametrize("overlay", OVERLAYS)
+def test_overlay_basis_bps_to_pct_units(overlay: Any) -> None:
+    prepared = _prepared()
+    overlay(
+        prepared,
+        {"basis_bps_live": 50.0, "funding_live": 0.0001, "mark_live": 100.5},
+    )
+    # bps → percent: 50 bps == 0.5 %
+    assert prepared.basis_pct == pytest.approx(0.5)
+    assert prepared.mark_index_spread_bps == pytest.approx(50.0)
+    assert prepared.funding_rate == pytest.approx(0.0001)
+    assert prepared.mark_price == 100.5
+    # round-trip back to bps the way market_snapshot does (basis_pct * 100)
+    assert round(prepared.basis_pct * 100.0, 2) == pytest.approx(50.0)
+
+
+@pytest.mark.parametrize("overlay", OVERLAYS)
+def test_overlay_none_values_do_not_clobber_rest(overlay: Any) -> None:
+    prepared = _prepared(basis_pct=0.3, mark_index_spread_bps=30.0)
+    overlay(
+        prepared,
+        {"basis_bps_live": None, "funding_live": None, "mark_live": None},
+    )
+    assert prepared.funding_rate == pytest.approx(0.0007)
+    assert prepared.mark_price == 99.0
+    assert prepared.basis_pct == pytest.approx(0.3)
+    assert prepared.mark_index_spread_bps == pytest.approx(30.0)
+
+
+@pytest.mark.parametrize("overlay", OVERLAYS)
+def test_overlay_depth_requires_ws_connected(overlay: Any) -> None:
+    prepared = _prepared()
+    overlay(
+        prepared,
+        {
+            "live_depth_imbalance": -0.4,
+            "live_microprice_bias": -0.2,
+            "ws_connected": False,
+        },
+    )
+    assert prepared.depth_imbalance == 0.9
+    assert prepared.microprice_bias == 0.9
+
+    overlay(
+        prepared,
+        {
+            "live_depth_imbalance": -0.4,
+            "live_microprice_bias": -0.2,
+            "ws_connected": True,
+        },
+    )
+    assert prepared.depth_imbalance == pytest.approx(-0.4)
+    assert prepared.depth_imbalance_source == "ws_book"
+    assert prepared.microprice_bias == pytest.approx(-0.2)
+    assert prepared.microprice_bias_source == "ws_book"
+
+
+# ---------------------------------------------------------------------------
+# hot-carry market patch: live book keys, not the phantom "depth_imbalance"
+# ---------------------------------------------------------------------------
+
+
+def test_patch_market_live_reads_live_depth_key() -> None:
+    market: dict[str, Any] = {"depth_imbalance": 0.9, "microprice_bias": 0.9}
+    _patch_market_live(
+        market,
+        prepared=SimpleNamespace(),
+        pack={},
+        book={},
+        ws_snap={
+            "live_depth_imbalance": -0.4,
+            "live_microprice_bias": -0.2,
+            "ws_connected": True,
+        },
+        price=0.0,
+    )
+    assert market["depth_imbalance"] == pytest.approx(-0.4)
+    assert market["depth_imbalance_source"] == "ws_book"
+    assert market["microprice_bias"] == pytest.approx(-0.2)
+    assert market["microprice_bias_source"] == "ws_book"
+
+
+def test_patch_market_live_keeps_carry_when_ws_down() -> None:
+    market: dict[str, Any] = {"depth_imbalance": 0.9}
+    _patch_market_live(
+        market,
+        prepared=SimpleNamespace(),
+        pack={},
+        book={},
+        ws_snap={"live_depth_imbalance": -0.4, "ws_connected": False},
+        price=0.0,
+    )
+    assert market["depth_imbalance"] == 0.9
+
+
+def test_patch_market_live_carries_ws_live_fields() -> None:
+    market: dict[str, Any] = {}
+    _patch_market_live(
+        market,
+        prepared=SimpleNamespace(),
+        pack={},
+        book={},
+        ws_snap={
+            "basis_bps_live": 50.0,
+            "mark_live": 100.5,
+            "live_funding_rate": 0.0001,
+            "ws_connected": True,
+        },
+        price=100.6,
+    )
+    assert market["basis_bps_live"] == pytest.approx(50.0)
+    assert market["mark_live"] == 100.5
+    assert market["live_funding_rate"] == pytest.approx(0.0001)
+    assert market["last_price"] == 100.6
+
+
+# ---------------------------------------------------------------------------
+# stamp_derivative_zscores: WS gap-fill keeps REST units
+# ---------------------------------------------------------------------------
+
+
+def test_stamp_ws_gap_fill_units() -> None:
+    market: dict[str, Any] = {}
+    stamp_derivative_zscores(
+        market,
+        ws_snap={
+            "basis_bps_live": 50.0,
+            "mark_live": 100.5,
+            "live_funding_rate": 0.0001,
+        },
+    )
+    assert market["basis_bps"] == pytest.approx(50.0)
+    assert market["mark"] == 100.5
+    assert market["funding_rate"] == pytest.approx(0.0001)
+    # funding_pct is percent (fraction × 100)
+    assert market["funding_pct"] == pytest.approx(0.01)
+
+
+def test_stamp_ws_does_not_override_rest_values() -> None:
+    market: dict[str, Any] = {
+        "basis_bps": 12.0,
+        "mark": 99.0,
+        "funding_rate": 0.0007,
+        "funding_pct": 0.07,
+    }
+    stamp_derivative_zscores(
+        market,
+        ws_snap={
+            "basis_bps_live": 50.0,
+            "mark_live": 100.5,
+            "live_funding_rate": 0.0001,
+        },
+    )
+    # gap-fill only: REST-derived values win when already present
+    assert market["basis_bps"] == pytest.approx(12.0)
+    assert market["mark"] == 99.0
+    assert market["funding_rate"] == pytest.approx(0.0007)
+    assert market["funding_pct"] == pytest.approx(0.07)

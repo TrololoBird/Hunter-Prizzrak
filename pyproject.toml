@@ -14,10 +14,16 @@ authors = [{ name = "Crypto Signal Bot" }]
 dependencies = [
     "orjson>=3.10",
     "python-dotenv>=1.2.2",
+    # Polars-plugin floors = the exact versions the 500+-test suite (incl.
+    # tests/test_indicator_reference_values.py + tests/test_polars_ds_reference.py
+    # canaries) is validated against. These plugins drift APIs without semver
+    # discipline (precedent: polars_ols went to positional `features` args +
+    # mode="coefficients"; ccxt fstream split) — do NOT lower the floors, and
+    # re-run the canaries when bumping.
     "polars>=1.41.2",
-    "polars-ols>=0.3.5",
-    "polars_ta>=0.5.17",
-    "polars-ds>=0.12",
+    "polars-ols>=0.3.5",   # compute_(rolling_)least_squares positional exprs, mode=, RollingKwargs(null_policy=)
+    "polars_ta>=0.5.17",   # polars_ta.ta/.tdx/.wq surfaces used by features/polars_ta_bridge.py
+    "polars-ds>=0.12.0",   # query_entropy / ks_2samp exprs used by features/research_plugins.py
     "numpy>=2.4.6",
     "bottleneck>=1.4",
     "aiohttp>=3.13.5,<4",
@@ -27,7 +33,9 @@ dependencies = [
     "tenacity>=9.1.4",
     "structlog>=25.5.0",
     "pydantic>=2.13.4,<2.14",
-    "ccxt>=4.5",
+    # Hard floor 4.5.44: older ccxt silently loses kline/markPrice/forceOrder WS
+    # after Binance's 2026-04-23 fstream split (docs/HUNTER_TARGET_SPEC.md).
+    "ccxt>=4.5.44",
 ]
 
 [project.urls]

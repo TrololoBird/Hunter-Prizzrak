@@ -168,6 +168,18 @@ def _patch_market_live(
     if getattr(prepared, "mark_index_spread_bps", None) is not None:
         market["mark_index_spread_bps"] = prepared.mark_index_spread_bps
     if ws_snap:
+        # ws_snap exposes the live book imbalance as "live_depth_imbalance", not
+        # "depth_imbalance" — the old key here was a phantom, so hot-carry ticks
+        # kept serving the stale carried book (audit G). Gate on ws_connected
+        # like _overlay_ws_market does for `prepared`.
+        live_di = ws_snap.get("live_depth_imbalance")
+        if live_di is not None and ws_snap.get("ws_connected"):
+            market["depth_imbalance"] = float(live_di)
+            market["depth_imbalance_source"] = "ws_book"
+        live_mp = ws_snap.get("live_microprice_bias")
+        if live_mp is not None and ws_snap.get("ws_connected"):
+            market["microprice_bias"] = float(live_mp)
+            market["microprice_bias_source"] = "ws_book"
         for key in (
             "liquidation_score_5m",
             "liquidation_long_notional_5m",
@@ -178,8 +190,6 @@ def _patch_market_live(
             "ws_cvd_5m",
             "ws_price_chg_1m",
             "ws_price_chg_5m",
-            "depth_imbalance",
-            "basis_ap_bps",
             "basis_bps_live",
             "mark_live",
             "live_mark_price",

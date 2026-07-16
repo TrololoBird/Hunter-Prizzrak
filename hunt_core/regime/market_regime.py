@@ -332,7 +332,7 @@ def compute_return_entropy_50(df: Any) -> float | None:
         return None
 
 
-def detect_volume_regime_break(df: Any, *, window: int = 50) -> bool:
+def detect_volume_regime_break(df: Any, *, window: int = 64) -> bool:
     """Volume distribution KS break between recent/prior halves (Phase 11C)."""
     try:
         from hunt_core.features.research_plugins import detect_volume_regime_break as _ks

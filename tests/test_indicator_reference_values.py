@@ -181,3 +181,107 @@ def test_funding_zscore_convention() -> None:
     std = float(s.std(ddof=1))
     ours = float((s[-1] - s.mean()) / std)
     assert ours == pytest.approx(0.24264225, rel=1e-8)
+
+
+# ---------------------------------------------------------------------------
+# polars-ds canaries (audit H) — pin the exact polars_ds surfaces used by
+# hunt_core/features/research_plugins.py against reference values, so a plugin
+# upgrade that drifts the API/output contract fails loudly instead of silently
+# disabling detectors. Contract pinned for polars-ds 0.12.0:
+#   * query_entropy(col) -> Shannon entropy in NATS (natural log);
+#   * ks_2samp(a, b) -> struct {statistic, pvalue} where "pvalue" is a MISNOMER:
+#     it is the KS rejection threshold c(alpha)*sqrt(2/n), NOT a p-value
+#     (reject the null, i.e. regime break, when statistic > threshold);
+#   * ks_2samp degrades to statistic=0 / threshold=NaN when either sample has
+#     fewer than 30 finite values — windows must keep both halves >= 30.
+# ---------------------------------------------------------------------------
+
+
+def test_polars_ds_query_entropy_reference_nats() -> None:
+    import math
+
+    import polars_ds
+
+    two_even_bins = pl.DataFrame({"bin": [1, 1, 2, 2]})
+    assert two_even_bins.select(polars_ds.query_entropy("bin")).item() == pytest.approx(
+        math.log(2)
+    )
+    uniform_four = pl.DataFrame({"bin": [1, 2, 3, 4]})
+    assert uniform_four.select(polars_ds.query_entropy("bin")).item() == pytest.approx(
+        math.log(4)
+    )
+    degenerate = pl.DataFrame({"bin": [7, 7, 7, 7]})
+    assert degenerate.select(polars_ds.query_entropy("bin")).item() == pytest.approx(0.0)
+
+
+def test_polars_ds_ks_2samp_struct_and_threshold_semantics() -> None:
+    import math
+
+    import polars_ds
+
+    n = 40
+    ks = (
+        pl.DataFrame(
+            {"a": [float(i) for i in range(n)], "b": [float(i + 1000) for i in range(n)]}
+        )
+        .select(polars_ds.ks_2samp("a", "b").alias("ks"))
+        .item(0, 0)
+    )
+    assert isinstance(ks, dict)
+    assert set(ks) == {"statistic", "pvalue"}
+    # fully separated samples -> maximal KS statistic
+    assert ks["statistic"] == pytest.approx(1.0)
+    # "pvalue" is the rejection threshold c(0.05)*sqrt(2/n), NOT a p-value
+    expected_threshold = math.sqrt(-math.log(0.05 / 2.0) / 2.0) * math.sqrt(2.0 / n)
+    assert ks["pvalue"] == pytest.approx(expected_threshold, rel=1e-6)
+    assert ks["statistic"] > ks["pvalue"]
+
+    ks_same = (
+        pl.DataFrame(
+            {"a": [float(i) for i in range(n)], "b": [float(i) for i in range(n)]}
+        )
+        .select(polars_ds.ks_2samp("a", "b").alias("ks"))
+        .item(0, 0)
+    )
+    assert ks_same["statistic"] <= ks_same["pvalue"]
+
+
+def test_polars_ds_ks_2samp_small_sample_sentinel() -> None:
+    """polars-ds silently degrades below 30 samples/side — pin the sentinel."""
+    import math
+
+    import polars_ds
+
+    n = 20
+    ks = (
+        pl.DataFrame(
+            {"a": [float(i) for i in range(n)], "b": [float(i + 1000) for i in range(n)]}
+        )
+        .select(polars_ds.ks_2samp("a", "b").alias("ks"))
+        .item(0, 0)
+    )
+    assert ks["statistic"] == pytest.approx(0.0)
+    assert math.isnan(ks["pvalue"])
+
+
+def test_volume_regime_break_fires_on_level_shift() -> None:
+    from hunt_core.features.research_plugins import detect_volume_regime_break
+
+    half = 32
+    shifted = pl.DataFrame(
+        {"volume": [float(i + 1) for i in range(half)] + [float(i + 1001) for i in range(half)]}
+    )
+    assert detect_volume_regime_break(shifted) is True
+    flat = pl.DataFrame(
+        {"volume": [float(i + 1) for i in range(half)] + [float(i + 1) for i in range(half)]}
+    )
+    assert detect_volume_regime_break(flat) is False
+    # below-window frames stay quietly False (no fabricated verdicts)
+    assert detect_volume_regime_break(pl.DataFrame({"volume": [1.0] * 40})) is False
+
+
+def test_return_entropy_constant_returns_is_zero() -> None:
+    from hunt_core.features.research_plugins import compute_return_entropy_50
+
+    closes = [100.0 * (1.01**i) for i in range(51)]
+    assert compute_return_entropy_50(pl.DataFrame({"close": closes})) == pytest.approx(0.0)

@@ -25,10 +25,12 @@ LOG = structlog.get_logger("hunt_core.features.research_plugins")
 
 _OLS_WINDOW = 20
 _ENTROPY_WINDOW = 50
-_KS_VOLUME_WINDOW = 50
-_KS_HALF = 25
+# polars-ds ks_2samp returns statistic=0 / threshold=NaN when either sample has
+# fewer than 30 finite values, so each half must be >= 30 (audit H canary: the
+# old 50/25 split tripped the _KS_MIN_SAMPLES guard and the detector never fired).
+_KS_VOLUME_WINDOW = 64
+_KS_HALF = 32
 _KS_MIN_SAMPLES = 30
-_KS_PVALUE_MAX = 0.05
 
 
 def polars_ols_available() -> bool:
@@ -232,9 +234,14 @@ def detect_volume_regime_break(df: pl.DataFrame, *, window: int = _KS_VOLUME_WIN
         return False
     ks = ks_row.item(0, 0)
     if isinstance(ks, dict):
+        # polars-ds names the second struct field "pvalue" but it is the KS
+        # REJECTION THRESHOLD (c(alpha)*sqrt(2/n)), not a p-value: reject the
+        # null (= regime break) when statistic > threshold. The old
+        # `pvalue <= 0.05` reading compared the threshold itself against 0.05,
+        # which is false for any realistic n — the detector could never fire.
         stat = float(ks.get("statistic") or 0.0)
-        pval = float(ks.get("pvalue") or 1.0)
-        return math.isfinite(pval) and pval <= _KS_PVALUE_MAX and stat > 0.0
+        threshold = float(ks.get("pvalue") or float("nan"))
+        return math.isfinite(threshold) and stat > threshold
     return False
 
 

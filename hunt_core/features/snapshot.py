@@ -248,13 +248,7 @@ def stamp_derivative_zscores(
         if fz is not None:
             market["funding_zscore_48h"] = round(float(fz), 3)
 
-    # Basis / premium — WS mark/index AP is authoritative on hot_carry; REST/cache fills gaps.
-    try:
-        if ws.get("basis_ap_bps") is not None:
-            market["basis_ap_bps"] = float(ws["basis_ap_bps"])
-    except (TypeError, ValueError):
-        LOG.debug("ws basis_ap_bps float conversion failed", exc_info=True)
-        pass
+    # Basis / premium — WS mark/index is authoritative on hot_carry; REST/cache fills gaps.
     for ws_key, mkey in (
         ("basis_bps_live", "basis_bps"),
         ("mark_live", "mark"),
@@ -328,7 +322,8 @@ def stamp_derivative_zscores(
             spread_bps = stats.get("mark_index_spread_bps")
             if spread_bps is not None:
                 market.setdefault("mark_index_spread_bps", float(spread_bps))
-                market.setdefault("basis_ap_bps", float(spread_bps))
+                # (removed: setdefault("basis_ap_bps", spread_bps) — a name-lie
+                # copy of the mark-index spread with zero readers, audit G.)
 
 
 _RETURN_Z_WINDOW = 50
@@ -779,13 +774,15 @@ def _overlay_ws_market(prepared: Any, ws_snap: dict[str, Any] | None) -> None:
     if ws_snap.get("mark_live") is not None:
         prepared.mark_price = float(ws_snap["mark_live"])
     if ws_snap.get("basis_bps_live") is not None:
+        # basis_bps_live is in BASIS POINTS; basis_pct is in PERCENT (see
+        # update_basis_from_websocket: (mark-index)/index*100), hence /100.
         bps = float(ws_snap["basis_bps_live"])
         prepared.basis_pct = bps / 100.0
         prepared.mark_index_spread_bps = bps
-    if ws_snap.get("basis_ap_bps") is not None:
-        ap_bps = float(ws_snap["basis_ap_bps"])
-        prepared.basis_pct = ap_bps / 100.0
-        prepared.mark_index_spread_bps = ap_bps
+    # (removed: basis_ap_bps branch — the WS producer never emitted it (no "ap"
+    # in Binance markPriceUpdate) and, had it fired, it would have silently
+    # replaced the mark-index basis with an ap-index basis under the same
+    # field names, audit G.)
     live_di = ws_snap.get("live_depth_imbalance")
     if live_di is not None and ws_snap.get("ws_connected"):
         prepared.depth_imbalance = float(live_di)

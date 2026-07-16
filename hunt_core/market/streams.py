@@ -218,7 +218,7 @@ class HuntCcxtStreams:
     _last_kline_open_ms_15m: dict[str, int] = field(default_factory=dict)
     kline_ws_enabled: bool = True
     mark_price_enabled: bool = True
-    _mark_state: dict[str, tuple[int, float, float, float, float]] = field(default_factory=dict)
+    _mark_state: dict[str, tuple[int, float, float, float]] = field(default_factory=dict)
     _last_msg_ms: int = 0
     # live book/ticker/funding data from new multiplexed streams
     _live_books: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -818,26 +818,31 @@ class HuntCcxtStreams:
     def closed_1m_kline_overlay(self, symbol: str) -> dict[str, Any] | None:
         return self.closed_kline_overlay(symbol, interval=_KLINE_INTERVAL)
 
-    def mark_snapshot(self, symbol: str, *, max_age_s: float = 10.0) -> dict[str, float] | None:
+    def mark_snapshot(self, symbol: str, *, max_age_s: float = 10.0) -> dict[str, float | None] | None:
+        """Age-gated mark/index/funding from the markPrice stream.
+
+        Units contract (pinned in tests/test_ws_rest_consistency.py):
+        funding_live is a FRACTION (like REST fundingRate), basis_bps_live is
+        BASIS POINTS. Missing index/funding must surface as None, never as a
+        fabricated 0.0 that would clobber a real REST value downstream (I-6).
+        """
         rec = self._mark_state.get(to_binance_symbol(symbol))
         if rec is None:
             return None
-        ts_ms, mark, index, funding, ap = rec
+        ts_ms, mark, index, funding = rec
         if time.time() * 1000 - ts_ms > max_age_s * 1000:
             return None
-        basis_bps = (mark - index) / index * 10_000 if index > 0 else 0.0
-        out: dict[str, float] = {
+        return {
             "mark_live": mark,
-            "index_live": index,
-            "funding_live": funding,
-            "basis_bps_live": round(basis_bps, 2),
+            "index_live": index if index > 0 else None,
+            # funding==0.0 here means "field absent in the raw message" (parsed via
+            # `or 0`); real funding is never exactly 0 at this precision — same
+            # convention as the `if funding != 0` guard in _watch_mark_prices.
+            "funding_live": funding if funding != 0 else None,
+            "basis_bps_live": (
+                round((mark - index) / index * 10_000, 2) if index > 0 else None
+            ),
         }
-        if ap > 0:
-            out["mark_ap_live"] = ap
-            out["mark_ap_spread_bps"] = round((mark - ap) / ap * 10_000, 2)
-            if index > 0:
-                out["basis_ap_bps"] = round((ap - index) / index * 10_000, 2)
-        return out
 
     def _touch(self) -> None:
         self._last_msg_ms = int(time.time() * 1000)
@@ -1101,12 +1106,11 @@ class HuntCcxtStreams:
                     mark = float(item.get("markPrice") or 0)
                     index = float(item.get("indexPrice") or 0)
                     funding = float(item.get("fundingRate") or 0)
-                    _info = item.get("info")
-                    info: dict[str, Any] = _info if isinstance(_info, dict) else {}
-                    ap_raw = info.get("ap")
-                    ap = float(ap_raw) if ap_raw is not None else 0.0
+                    # (removed: info["ap"] parsing — Binance markPriceUpdate carries
+                    # e/E/s/p/i/P/r/T only, so "ap" was always absent and the whole
+                    # mark_ap_live/basis_ap_bps branch downstream was dead, audit G.)
                     if mark > 0:
-                        self._mark_state[sym] = (now_ms, mark, index, funding, ap)
+                        self._mark_state[sym] = (now_ms, mark, index, funding)
                         prev = dict(self._live_funding.get(sym) or {})
                         prev["markPrice"] = mark
                         if index > 0:
