@@ -126,6 +126,21 @@ class SymbolFrameCache:
             return None
         return dict(snap.row)
 
+    def _frame_expired(self, symbol: str, tf: str) -> bool:
+        """True when this (symbol, tf) frame is past its per-TF freshness bound.
+
+        Single source of truth for expiry. It exists because the two accessors used to
+        disagree — get_kline_frame enforced the bound while kline_map ignored it — and
+        the caller that mattered (tick_assembly's restore path) used the one that
+        ignored it. That disagreement blacked out the whole pinned universe for hours;
+        see tests/test_stale_htf_cache_trap.py.
+        """
+        seed_at = (self._frame_ts.get(symbol.upper()) or {}).get(tf)
+        if seed_at is None:
+            return False  # legacy seeded without timestamp — allow
+        max_age = _KLINE_FRAME_MAX_AGE_S.get(tf, _DEFAULT_KLINE_FRAME_MAX_AGE_S)
+        return (time.monotonic() - seed_at) > max_age
+
     def get_kline_frame(self, symbol: str, interval: str) -> Any | None:
         """WS/bootstrap OHLCV fallback when REST fetch fails on hot path.
 
@@ -138,11 +153,7 @@ class SymbolFrameCache:
         frame = (self._frames.get(sym) or {}).get(tf)
         if frame is None:
             return None
-        seed_at = (self._frame_ts.get(sym) or {}).get(tf)
-        if seed_at is None:
-            return frame  # legacy seeded without timestamp — allow once
-        max_age = _KLINE_FRAME_MAX_AGE_S.get(tf, _DEFAULT_KLINE_FRAME_MAX_AGE_S)
-        if time.monotonic() - seed_at > max_age:
+        if self._frame_expired(sym, tf):
             return None
         return frame
 
@@ -293,7 +304,18 @@ class SymbolFrameCache:
         return snap.prepared
 
     def kline_map(self, symbol: str) -> dict[str, pl.DataFrame]:
-        return dict(self._frames.get(symbol.upper()) or {})
+        """Seeded frames for a symbol, EXCLUDING any past its per-TF freshness bound.
+
+        The age filter is not optional politeness: tick_assembly restores thin TFs from
+        this map and drops their fetch_errors, so an unguarded entry does not merely
+        supply old data — it reports a failed fetch as a successful one.
+        """
+        sym = symbol.upper()
+        return {
+            tf: df
+            for tf, df in (self._frames.get(sym) or {}).items()
+            if not self._frame_expired(sym, tf)
+        }
 
     def enrichment_pack(self, symbol: str) -> dict[str, Any] | None:
         snap = self._enrichment.get(symbol.upper())
@@ -302,6 +324,16 @@ class SymbolFrameCache:
         return dict(snap.pack)
 
     def is_ready(self, symbol: str) -> bool:
+        """Whether the hot path may run off the cache alone for this symbol.
+
+        Readiness must expire with the frames it vouches for. tick_assembly skips
+        ``repair_kline_map_gaps`` — the ONLY path that refetches real 1h/4h bars and so
+        the only cure for a frozen HTF frame — whenever this returns True. When it
+        answered on mere presence, a hot symbol whose 1h had frozen hours ago stayed
+        "ready" forever: the staleness guard rejected every tick, and the repair that
+        would have cleared it was gated off by this very flag. That deadlock took the
+        entire pinned universe dark for hours with errors=0.
+        """
         sym = symbol.upper()
         if sym not in self._bootstrapped:
             return False
@@ -309,6 +341,8 @@ class SymbolFrameCache:
         for tf, min_bars in _HOT_MIN_BARS.items():
             df = frames.get(tf)
             if df is None or df.is_empty() or df.height < min_bars:
+                return False
+            if self._frame_expired(sym, tf):
                 return False
         return True
 
