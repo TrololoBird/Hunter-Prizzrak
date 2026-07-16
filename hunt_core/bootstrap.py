@@ -1,4 +1,4 @@
-"""Add monorepo root + hunt/ to sys.path; verify Polars feature stack."""
+"""Add repo root + package parent to sys.path; verify Polars feature stack."""
 from __future__ import annotations
 
 import importlib
@@ -69,7 +69,7 @@ def require_feature_stack() -> None:
     if missing:
         raise ImportError(
             "Hunt requires Polars feature stack: "
-            f"{', '.join(missing)}. Install: pip install -e hunt/"
+            f"{', '.join(missing)}. Install: uv sync --all-extras"
         )
 
 

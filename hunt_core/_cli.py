@@ -1,7 +1,5 @@
-from __future__ import annotations
-
-#!/usr/bin/env python3
 """Hunter CLI — lock, signals, argparse (thin app shell)."""
+from __future__ import annotations
 
 
 import argparse

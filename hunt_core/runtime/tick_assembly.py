@@ -269,7 +269,6 @@ async def snapshot_symbol(
     intra_bar: Any | None = None,
     allow_low_liquidity: bool = False,
 ) -> dict[str, Any]:
-    readiness_result = None
     meta = exchange_by_sym.get(symbol)
     ticker = ticker_by_sym.get(symbol)
     if meta is None or ticker is None:
@@ -526,7 +525,6 @@ async def snapshot_symbol(
     )
     if not young_listing and not hot_tier:
         readiness = assess_symbol_data_readiness(prepared, settings, universe_item=item, snapshot_tier=tier)
-        readiness_result = readiness
         if not readiness.ready:
             reason = readiness.reason or "data.not_ready"
             return {
@@ -1094,11 +1092,6 @@ async def snapshot_symbol(
             and str(result.get("tick_path") or "") in {"hot_ws", "hot_delta", "hot_bootstrap"}
         ):
             cache.seed_carry_row(symbol, result)
-
-    if readiness_result is not None:
-        from hunt_core.data_readiness import readiness_dict_for_row
-
-        result["data_readiness"] = readiness_dict_for_row(readiness_result)
 
     return result
 

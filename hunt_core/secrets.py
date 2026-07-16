@@ -7,17 +7,17 @@ from __future__ import annotations
 
 
 import os
-from dataclasses import dataclass
 from pathlib import Path
 
 from dotenv import load_dotenv
+from pydantic import BaseModel, ConfigDict
 
 
-@dataclass(frozen=True)
-class Secrets:
+class Secrets(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     tg_token: str
     target_chat_id: str
-    lab_chat_id: str = ""
     operator_user_ids: tuple[int, ...] = ()
 
 
@@ -97,11 +97,9 @@ def load_secrets(base_dir: str | os.PathLike[str] | None = None) -> Secrets:
 
     tg_token = _first_configured_env("TELEGRAM_BOT_TOKEN", "TG_TOKEN")
     target_chat_id = _first_configured_env("TELEGRAM_CHAT_ID", "TARGET_CHAT_ID")
-    lab_chat_id = _first_configured_env("TELEGRAM_LAB_CHAT_ID", "HUNT_LAB_CHAT_ID")
     operator_raw = _first_configured_env("TELEGRAM_OPERATOR_USER_IDS", "OPERATOR_USER_IDS")
     return Secrets(
         tg_token=tg_token,
         target_chat_id=target_chat_id,
-        lab_chat_id=lab_chat_id,
         operator_user_ids=parse_operator_user_ids(operator_raw),
     )

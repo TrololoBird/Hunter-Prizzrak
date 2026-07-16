@@ -24,26 +24,23 @@ def main(argv: list[str] | None = None) -> int:
 
     watch_p = sub.add_parser("watch", help="Minute scanner loop + Telegram")
     watch_p.add_argument("--symbols", nargs="*", default=None)
-    watch_p.add_argument("--interval", type=int, default=30)
+    watch_p.add_argument("--interval", type=int, default=None)
     watch_p.add_argument("--once", action="store_true")
     watch_p.add_argument("--no-telegram", action="store_true")
 
     args, rest = parser.parse_known_args(argv)
 
-    if args.command == "watch":
-        watch_argv: list[str] = list(rest)
-        if args.symbols is not None:
-            watch_argv = ["--symbols", *args.symbols, *watch_argv]
-        if args.interval != 30:
-            watch_argv.extend(["--interval", str(args.interval)])
-        if args.once:
-            watch_argv.append("--once")
-        if args.no_telegram:
-            watch_argv.append("--no-telegram")
-        return _cmd_watch(watch_argv)
-
-    parser.print_help()
-    return 2
+    # required=True subparsers guarantee args.command == "watch" here.
+    watch_argv: list[str] = list(rest)
+    if args.symbols is not None:
+        watch_argv = ["--symbols", *args.symbols, *watch_argv]
+    if args.interval is not None:
+        watch_argv.extend(["--interval", str(args.interval)])
+    if args.once:
+        watch_argv.append("--once")
+    if args.no_telegram:
+        watch_argv.append("--no-telegram")
+    return _cmd_watch(watch_argv)
 
 
 if __name__ == "__main__":
