@@ -991,9 +991,26 @@ def merge_ws_kline_closed(
     if not isinstance(base, dict) or base.get("status") == "empty":
         tf[tf_key] = overlay
         return
-    # Guard: skip stale WS overlay whose timestamp is older than REST base
-    base_ts = base.get("open_time", 0)
-    overlay_ts = overlay.get("open_time", 0)
+    # Guard: skip a stale WS overlay whose bar is older than the REST base.
+    #
+    # This used to read "open_time" on BOTH sides — a key neither side has:
+    # tf_snapshot emits `close_time_ms`, the WS overlay emits `ws_open_ms`
+    # (streams._bar_overlay). Both `.get(…, 0)` returned 0, so the
+    # `if base_ts and overlay_ts` guard never fired and an OLDER WS bar could
+    # silently overwrite a FRESHER REST bar after a WS stall (e.g. a 40-min
+    # stream drop: REST advances 15m_closed, then the last pre-stall WS bar,
+    # still sitting in _kline_ready, clobbers it with a 3-bar-old close).
+    # Compare like with like: both sides in close_time ms.
+    from hunt_core.data.completeness import TF_MS  # noqa: PLC0415
+
+    base_ts = base.get("close_time_ms") or 0
+    ws_open_ms = overlay.get("ws_open_ms")
+    step_ms = TF_MS.get(interval) or 0
+    overlay_ts = (
+        int(ws_open_ms) + step_ms
+        if isinstance(ws_open_ms, (int, float)) and step_ms
+        else 0
+    )
     if base_ts and overlay_ts and overlay_ts < base_ts:
         LOG.debug(
             "skip stale WS overlay %s %s: overlay_ts=%s < base_ts=%s",
@@ -1028,10 +1045,16 @@ def _candle_shape(df: Any, *, idx: int = -1) -> dict[str, Any]:
 
 
 def _bar_close_time_ms(df: Any, *, closed: bool = False) -> int | None:
-    """Closed-bar close_time as epoch ms (for 15m/5m sync checks)."""
+    """Newest closed bar's close_time as epoch ms (for 15m/5m sync checks).
+
+    Frames are closed-bars-only (see ``tf_snapshot``), so -1 is the newest closed
+    bar and ``closed`` selects nothing. The old ``-2 if closed`` reported a
+    close_time one interval in the past — which is what the staleness/sync checks
+    were comparing against.
+    """
     if df is None or df.is_empty() or "close_time" not in df.columns:
         return None
-    idx = -2 if closed and df.height >= 2 else -1
+    idx = -1
     try:
         ts = df.item(idx, "close_time")
     except (TypeError, ValueError, IndexError):
@@ -1181,7 +1204,25 @@ def tf_snapshot(
 ) -> dict[str, Any]:
     if df is None or df.is_empty():
         return {"status": "empty"}
-    idx = -2 if closed and df.height >= 2 else -1
+    # Every frame reaching here is CLOSED-BARS-ONLY: finalize_kline_frame (=
+    # _drop_incomplete_ohlcv_tail) runs on the REST path (client.fetch_klines),
+    # the WS cache (frame_cache.update_ohlcv) and the resampler
+    # (resample_ohlcv_from_1m), and the WS overlay carries a _ClosedKlineBar.
+    # So row -1 IS the newest closed bar and `closed` selects nothing.
+    #
+    # The old `-2 if closed` is a leftover from when frames carried a forming
+    # bar — back then -1 WAS forming and -2 WAS the newest closed. Post-finalize
+    # it silently means the PREVIOUS closed bar: every require_closed consumer
+    # read data one full interval stale (up to 2h on 1h, 8h on 4h) while the
+    # fresh closed bar sat at -1 labelled `closed_bar: False` and was therefore
+    # rejected. Live proof (htf_1h, BTCUSDT, 17:44Z): -1 = 16:00 bar closed
+    # 0.75h ago; -2 = 15:00 bar closed 1.75h ago — both closed.
+    #
+    # `closed` is kept in the signature (callers build a "…_closed" twin) but no
+    # longer shifts the row; both variants now describe the same, newest, closed
+    # bar. A consumer that genuinely wants bar N-1 must index it explicitly
+    # rather than inherit a global off-by-one.
+    idx = -1
     if "rsi14" not in df.columns:
         out = tf_snapshot_lite(df, idx=idx)
         if out.get("rsi14") is None:
