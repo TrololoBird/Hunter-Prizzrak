@@ -29,6 +29,173 @@ LOG = structlog.get_logger("hunt_core.maps.liquidation")
 _DEFAULT_LEVERAGE_TIERS = (10, 25, 50, 100)
 LiqEvent = tuple[int, str, str, float, float]  # ts_ms, symbol, side, qty, price
 
+# ---------------------------------------------------------------------------
+# CCXT unified-liquidation parsing (shared by every venue feeder in
+# hunt_core.market.streams). These live here, next to the LiqEvent contract they
+# produce, so they can be unit-tested without a live WS connection.
+#
+# The unified Liquidation structure (ccxt.base.exchange.safe_liquidation) carries
+# `contracts` / `contractSize` / `price` / `baseValue` / `quoteValue` — there is NO
+# `amount` key. Reading `amount` yields None for EVERY venue, which is why the raw
+# Binance-only `info["q"]` fallback was the only thing keeping the primary tape
+# alive while bybit/okx silently produced qty=0 and got dropped.
+# ---------------------------------------------------------------------------
+
+# Raw per-venue quantity keys, in CONTRACT units, most-specific first:
+#   binance forceOrder `o`: {"q": original qty}   (linear USDⓈ-M contractSize=1)
+#   bybit allLiquidation:   {"v": size}           (compact 500ms tape)
+#   bybit liquidation:      {"size": size}        (snapshot shape)
+#   okx liquidation-orders: {"details": [{"sz": ...}]}
+# `item["contracts"]` is the unified fallback for any venue not listed above.
+#
+# Binance is deliberately resolved from raw `q` (original qty) and NOT from the
+# unified `contracts`, because ccxt maps binance `contracts` -> `l` (LAST FILLED
+# qty). Preferring `contracts` would silently switch the primary tape from `q` to
+# `l` and under-count partially-filled forceOrders. Binance behaviour must not
+# change here; this fix is about the secondary venues.
+_LIQ_RAW_QTY_KEYS: tuple[str, ...] = ("q", "v", "size")
+
+# Raw per-venue side keys. `info["S"]` covers binance ("SELL") and bybit
+# allLiquidation ("Sell"); `info["side"]` covers the bybit snapshot shape.
+_LIQ_RAW_SIDE_KEYS: tuple[str, ...] = ("S", "side")
+
+
+def _to_float(value: Any) -> float | None:
+    """Best-effort float parse that treats junk as unknown (never as zero)."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    if out != out or out in (float("inf"), float("-inf")):  # NaN / inf
+        return None
+    return out
+
+
+def _okx_detail(info: Any) -> dict[str, Any]:
+    """First entry of an OKX ``liquidation-orders`` ``details`` list, or ``{}``."""
+    if not isinstance(info, dict):
+        return {}
+    details = info.get("details")
+    if isinstance(details, list) and details and isinstance(details[0], dict):
+        return details[0]
+    return {}
+
+
+def normalize_liq_side(item: Any, info: Any) -> str | None:
+    """Resolve a liquidation event's side to ``"BUY"`` / ``"SELL"``.
+
+    Semantics (identical across Binance/Bybit/OKX): the side is the side of the
+    liquidation ORDER, so ``SELL`` closes a LONG position (a long-liquidation) and
+    ``BUY`` closes a SHORT position (a short-liquidation). Downstream buckets on
+    ``side == "BUY"`` -> short, else long.
+
+    The unified ``item["side"]`` is NOT trusted first: ccxt's bybit parser calls
+    ``safe_string_lower(liquidation, 'side', 'S')`` where ``'S'`` is a DEFAULT
+    VALUE, not a second key lookup — so the compact ``allLiquidation`` payload
+    (which carries the side under ``"S"``) yields the literal string ``"s"``. That
+    value is meaningless, and the old ``else -> long`` fallback silently booked
+    every bybit short-liquidation as a long-liquidation. Raw ``info`` keys are read
+    first, and anything that does not normalize cleanly returns ``None`` so the
+    caller can SKIP the event rather than fabricate a direction.
+
+    Args:
+        item: The CCXT unified liquidation dict.
+        info: The venue's raw payload (``item["info"]``).
+
+    Returns:
+        ``"BUY"``, ``"SELL"``, or ``None`` when the side cannot be determined.
+    """
+    candidates: list[Any] = []
+    if isinstance(info, dict):
+        candidates.extend(info.get(k) for k in _LIQ_RAW_SIDE_KEYS)
+        candidates.append(_okx_detail(info).get("side"))
+    if isinstance(item, dict):
+        # Unified value last: the poisoned bybit "s" simply fails to normalize.
+        candidates.append(item.get("side"))
+    for raw in candidates:
+        if raw is None:
+            continue
+        token = str(raw).strip().lower()
+        if token == "buy":
+            return "BUY"
+        if token == "sell":
+            return "SELL"
+    return None
+
+
+def liq_contract_units(item: Any, info: Any) -> float | None:
+    """Resolve a liquidation's size in CONTRACT units (pre-``contractSize``).
+
+    Args:
+        item: The CCXT unified liquidation dict.
+        info: The venue's raw payload (``item["info"]``).
+
+    Returns:
+        The size in contract units, or ``None`` when no source yields a positive
+        number (unknown size must never be coerced to 0.0 and booked as an event).
+    """
+    candidates: list[Any] = []
+    if isinstance(info, dict):
+        candidates.extend(info.get(k) for k in _LIQ_RAW_QTY_KEYS)
+        candidates.append(_okx_detail(info).get("sz"))
+    if isinstance(item, dict):
+        candidates.append(item.get("contracts"))
+    for raw in candidates:
+        qty = _to_float(raw)
+        if qty is not None and qty > 0.0:
+            return qty
+    return None
+
+
+def liq_contract_size(item: Any, market: Any = None) -> float:
+    """Resolve the contract multiplier used to convert contracts -> base units.
+
+    OKX swaps quote size in CONTRACTS (e.g. ``sz=13`` at ``contractSize=0.01``), so
+    the notional is wrong by orders of magnitude without this multiplier. Bybit
+    linear USDT and Binance USDⓈ-M both use ``contractSize=1``, making the multiply
+    a no-op there — so it is applied uniformly rather than per-venue.
+
+    Args:
+        item: The CCXT unified liquidation dict (ccxt stamps ``contractSize`` on it
+            whenever the venue market was resolvable).
+        market: The venue's CCXT market dict, used only when ``item`` lacks it.
+
+    Returns:
+        A positive multiplier; ``1.0`` when unknown or absent (never 0.0, which
+        would silently zero out every event on that venue).
+    """
+    for src in (item, market):
+        if isinstance(src, dict):
+            size = _to_float(src.get("contractSize"))
+            if size is not None and size > 0.0:
+                return size
+    return 1.0
+
+
+def liq_price(item: Any, info: Any) -> float | None:
+    """Resolve a liquidation's fill price.
+
+    Args:
+        item: The CCXT unified liquidation dict.
+        info: The venue's raw payload (``item["info"]``).
+
+    Returns:
+        The price, or ``None`` when no source yields a positive number.
+    """
+    candidates: list[Any] = []
+    if isinstance(item, dict):
+        candidates.append(item.get("price"))
+    if isinstance(info, dict):
+        # binance `p` (order price), bybit `p`, okx `bkPx` (bankruptcy price).
+        candidates.extend((info.get("p"), _okx_detail(info).get("bkPx")))
+    for raw in candidates:
+        px = _to_float(raw)
+        if px is not None and px > 0.0:
+            return px
+    return None
+
 
 @dataclass(frozen=True, slots=True)
 class LiquidationDensityZone:
@@ -848,6 +1015,69 @@ def heatmap_to_market_dict(
     if heatmap.realized_event_count == 0:
         out["liq_synthetic_only"] = True
     return out
+
+
+def liq_is_synthetic(market: Any) -> bool:
+    """Whether the row's liquidation magnets are a leverage-tier ESTIMATE.
+
+    Args:
+        market: The row's ``market`` dict.
+
+    Returns:
+        ``True`` when no realized liquidation events back the heatmap.
+    """
+    return bool(market.get("liq_synthetic_only")) if isinstance(market, dict) else False
+
+
+def realized_liq_magnet(market: Any, *, side: str) -> float | None:
+    """Nearest REALIZED liquidation magnet, or ``None`` when it is synthetic.
+
+    ``liq_heatmap_nearest_long`` / ``_short`` are published unconditionally, and
+    carry a forward-only / entry-anchored leverage-tier ESTIMATE whenever
+    ``liq_synthetic_only`` is set. Such a price is a directional hint, not an
+    observed level, and must not shift a score — the same rule ``build_liquidation_map``
+    already enforces for ``magnet_pull_*`` and the squeeze-fuel at-risk notional.
+
+    Any consumer whose output moves a score, a vote, a forecast or a target MUST
+    read the magnet through this accessor. Display-only consumers may read the raw
+    key directly, provided they label the value as an estimate («оценка»).
+
+    Args:
+        market: The row's ``market`` dict.
+        side: ``"long"`` for the long-liquidation magnet (below price) or
+            ``"short"`` for the short-squeeze magnet (above price).
+
+    Returns:
+        The magnet price, or ``None`` when absent, unusable or synthetic-only.
+
+    Raises:
+        ValueError: If ``side`` is neither ``"long"`` nor ``"short"``.
+    """
+    if side not in ("long", "short"):
+        raise ValueError(f"side must be 'long' or 'short', got {side!r}")
+    if not isinstance(market, dict) or liq_is_synthetic(market):
+        return None
+    px = _to_float(market.get(f"liq_heatmap_nearest_{side}"))
+    return px if px is not None and px > 0.0 else None
+
+
+def realized_liq_clusters(market: Any) -> list[dict[str, Any]]:
+    """Realized liquidation clusters, or ``[]`` when the heatmap is synthetic.
+
+    Companion to :func:`realized_liq_magnet` for ``liq_heatmap_clusters``, which is
+    likewise published unconditionally and carries synthetic bands when no realized
+    events exist.
+
+    Args:
+        market: The row's ``market`` dict.
+
+    Returns:
+        The cluster dicts, or ``[]`` when absent or synthetic-only.
+    """
+    if not isinstance(market, dict) or liq_is_synthetic(market):
+        return []
+    clusters = market.get("liq_heatmap_clusters")
+    return [c for c in clusters if isinstance(c, dict)] if isinstance(clusters, list) else []
 
 
 def merge_liquidation_buffers(

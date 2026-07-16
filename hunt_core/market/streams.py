@@ -860,12 +860,50 @@ class HuntCcxtStreams:
         self._last_msg_ms = int(time.time() * 1000)
 
     def _record_liquidation(self, item: dict[str, Any], *, exchange: Any, venue: str = "binance") -> None:
+        # CCXT's unified Liquidation structure has NO `amount` key (it carries
+        # `contracts`/`contractSize`/`baseValue` — see base/exchange.py
+        # safe_liquidation). The old `item["amount"] or info["q"]` chain therefore
+        # resolved via the Binance-RAW `q` only: bybit/okx yielded qty=0.0 and were
+        # dropped by the `qty > 0` guard below, so Bybit — the only FULL-fidelity
+        # tape (_VENUE_LIQ_COMPLETENESS) — never produced a single event.
+        # Size/side/price parsing lives in hunt_core.maps.liquidation (unit-tested
+        # without a WS); imported locally to match _record_liquidation's existing
+        # local-import style.
+        from hunt_core.maps.liquidation import (
+            liq_contract_size,
+            liq_contract_units,
+            liq_price,
+            normalize_liq_side,
+        )
+
         _raw_info = item.get("info")
         info: dict[str, Any] = _raw_info if isinstance(_raw_info, dict) else {}
-        sym = self._ws_binance_id(exchange, str(item.get("symbol") or info.get("s") or ""))
-        side = str(item.get("side") or info.get("S") or "").upper()
-        qty = float(item.get("amount") or info.get("q") or 0)
-        price = float(item.get("price") or info.get("p") or 0)
+        ccxt_sym = str(item.get("symbol") or info.get("s") or "")
+        sym = self._ws_binance_id(exchange, ccxt_sym)
+        # Unknown side => SKIP. Never default to long: ccxt's bybit parser emits the
+        # literal "s" (safe_string_lower(liq, 'side', 'S') treats 'S' as a DEFAULT
+        # VALUE, not a second key), which the old `else -> long` branch booked as a
+        # long-liquidation for every bybit SHORT liquidation.
+        side_norm = normalize_liq_side(item, info)
+        contracts = liq_contract_units(item, info)
+        price_val = liq_price(item, info)
+        if side_norm is None or contracts is None:
+            LOG.debug(
+                "liquidation_unparsed | venue=%s sym=%s side=%s contracts=%s",
+                venue, sym, side_norm, contracts,
+            )
+            return
+        # contracts -> base units. OKX quotes size in CONTRACTS (sz=13 @ 0.01);
+        # bybit linear / binance USDⓈ-M are contractSize=1, so this is a no-op there.
+        market: dict[str, Any] | None = None
+        if not isinstance(item.get("contractSize"), (int, float)) and ccxt_sym:
+            try:
+                market = exchange.market(ccxt_sym)
+            except Exception as mkt_exc:  # unknown/unloaded market -> multiplier 1.0
+                LOG.debug("liquidation_market_lookup_failed | sym=%s error=%s", ccxt_sym, mkt_exc)
+        side = side_norm
+        qty = contracts * liq_contract_size(item, market)
+        price = price_val if price_val is not None else 0.0
         ts_ms = int(item.get("timestamp") or info.get("T") or time.time() * 1000)
         if sym and qty > 0:
             ev = (ts_ms, sym, side, qty, price)

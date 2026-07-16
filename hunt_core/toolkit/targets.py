@@ -5,6 +5,8 @@ from typing import Any
 
 import structlog
 
+from hunt_core.maps.liquidation import realized_liq_magnet
+
 LOG = structlog.get_logger(__name__)
 def collect_upward_targets(row: dict[str, Any], price: float) -> tuple[list[float], list[str]]:
     market = row.get("market") if isinstance(row.get("market"), dict) else {}
@@ -12,16 +14,13 @@ def collect_upward_targets(row: dict[str, Any], price: float) -> tuple[list[floa
     targets: list[float] = []
     factors: list[str] = []
 
-    short_liq = market.get("liq_heatmap_nearest_short")
-    if short_liq is not None:
-        try:
-            sl = float(short_liq)
-            if sl > price:
-                targets.append(sl)
-                factors.append("short_liq_magnet")
-        except (TypeError, ValueError):
-            LOG.debug("short_liq float conversion failed", exc_info=True)
-            pass
+    # REALIZED magnets only — a synthetic leverage-tier estimate must not become a
+    # forecast target (see realized_liq_magnet). Note `liq_forward_zones` below is a
+    # DECLARED forward/synthetic surface and stays in play by design.
+    short_liq = realized_liq_magnet(market, side="short")
+    if short_liq is not None and short_liq > price:
+        targets.append(short_liq)
+        factors.append("short_liq_magnet")
 
     liq = maps.get("liquidation") if isinstance(maps.get("liquidation"), dict) else {}
     for z in liq.get("liq_forward_zones") or []:
@@ -98,16 +97,11 @@ def collect_downward_targets(row: dict[str, Any], price: float) -> tuple[list[fl
     targets: list[float] = []
     factors: list[str] = []
 
-    long_liq = market.get("liq_heatmap_nearest_long")
-    if long_liq is not None:
-        try:
-            ll = float(long_liq)
-            if ll < price:
-                targets.append(ll)
-                factors.append("long_liq_magnet")
-        except (TypeError, ValueError):
-            LOG.debug("long_liq float conversion failed", exc_info=True)
-            pass
+    # REALIZED magnets only — mirror of collect_upward_targets (see realized_liq_magnet).
+    long_liq = realized_liq_magnet(market, side="long")
+    if long_liq is not None and long_liq < price:
+        targets.append(long_liq)
+        factors.append("long_liq_magnet")
 
     liq = maps.get("liquidation") if isinstance(maps.get("liquidation"), dict) else {}
     for z in liq.get("liq_forward_zones") or []:

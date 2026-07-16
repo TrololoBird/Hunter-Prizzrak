@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from hunt_core.maps.liquidation import realized_liq_clusters, realized_liq_magnet
+
 _FUNDING_CROWDED_LONG = 0.0003   # positive funding → longs pay → crowded long
 _FUNDING_CROWDED_SHORT = -0.0001  # negative funding → shorts pay → crowded short
 
@@ -84,11 +86,13 @@ def score_zone_confluence(
         sources.append(("volume_profile", vp_hits))
 
     # Liquidation magnet on the zone's OWN side (long-liq below / short-squeeze above).
-    mag = market.get("liq_heatmap_nearest_long" if side == "long" else "liq_heatmap_nearest_short")
-    clusters = _prices(market.get("liq_heatmap_clusters"), "price")
+    # REALIZED events only — a synthetic leverage-tier estimate must not cast a
+    # confluence vote (see realized_liq_magnet).
+    mag = realized_liq_magnet(market, side=side)
+    clusters = _prices(realized_liq_clusters(market), "price")
     if price > 0:
         clusters = [c for c in clusters if (c <= price if side == "long" else c >= price)]
-    if (isinstance(mag, (int, float)) and _near(float(mag), lo, hi, price)) or any(
+    if (mag is not None and _near(mag, lo, hi, price)) or any(
         _near(c, lo, hi, price) for c in clusters
     ):
         sources.append(("liquidation", ["магнит ликв."]))

@@ -5,6 +5,7 @@ import html
 from typing import Any
 
 from hunt_core.deliver._labels import fmt_price, phase_human, rr_display, trigger_human
+from hunt_core.maps.liquidation import liq_is_synthetic
 
 _WALL_MIN_NOTIONAL_USD = 5_000.0
 _WALL_MAX_DIST_PCT = 2.0
@@ -113,9 +114,13 @@ def format_liq_magnet_line(row: dict[str, Any], *, direction: str, price: float)
     if px <= 0:
         return ""
     dist = abs(px - price) / price * 100.0
+    # Display-only consumer: it MAY show the synthetic leverage-tier estimate, but
+    # must say so — an unlabelled estimate reads as an observed level. Score-shifting
+    # consumers go through realized_liq_magnet() instead.
+    est = " · <i>оценка</i>" if liq_is_synthetic(market) else ""
     return (
         f"🧲 Liq magnet ({label}): <code>{fmt_price(px)}</code> "
-        f"({dist:.1f}% от цены)"
+        f"({dist:.1f}% от цены){est}"
     )
 
 

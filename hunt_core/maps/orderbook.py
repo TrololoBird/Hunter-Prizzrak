@@ -773,15 +773,25 @@ def derive_ob_accumulation_features(
     elif bid_abs >= 2 or sticky_bid >= 2:
         out["map_accum_bid_absorption"] = True
 
-    voids_above = [
-        v
-        for v in ob.liquidity_voids
-        if v.get("price_center") is not None and float(v["price_center"]) > current_price
-    ]
-    if voids_above:
-        nearest = min(voids_above, key=lambda v: float(v.get("distance_pct") or 99.0))
-        out["map_void_above"] = nearest.get("price_center")
-        out["map_void_above_pct"] = nearest.get("distance_pct")
+    # Voids BOTH sides: `map_void_below` was read by toolkit.targets
+    # (collect_downward_targets -> "void_path_down") but never produced by anyone, so
+    # downward void targets could never fire while upward ones could — a directional
+    # asymmetry, not a design choice. Emitting it here closes the phantom key.
+    for _side, _key in (("above", "map_void_above"), ("below", "map_void_below")):
+        voids = [
+            v
+            for v in ob.liquidity_voids
+            if v.get("price_center") is not None
+            and (
+                float(v["price_center"]) > current_price
+                if _side == "above"
+                else float(v["price_center"]) < current_price
+            )
+        ]
+        if voids:
+            nearest = min(voids, key=lambda v: float(v.get("distance_pct") or 99.0))
+            out[_key] = nearest.get("price_center")
+            out[f"{_key}_pct"] = nearest.get("distance_pct")
 
     imb = ob.zone_imbalance.get("imb_1pct") if ob.zone_imbalance else None
     bid_notional = sum(float(w.get("notional_usd") or 0) for w in ob.bid_walls[:4])

@@ -14,6 +14,7 @@ from typing import Any, Literal
 
 import structlog
 
+from hunt_core.maps.liquidation import realized_liq_magnet
 from hunt_core.maps.oi import OiRegime, oi_regime_from_row
 
 LOG = structlog.get_logger(__name__)
@@ -278,19 +279,17 @@ def evaluate_manipulation_fusion(row: dict[str, Any]) -> ManipulationAssessment:
     if _apply_check(checks, check_sources, "neg_funding", funding < -0.0001, "buildix"):
         ignition += 1.0
         factors.append(FactorHit("D8", "neg_funding", funding, 1.0, "buildix"))
-    short_liq = market.get("liq_heatmap_nearest_short")
-    if short_liq is not None and price > 0:
-        try:
-            sl = float(short_liq)
-            liq_above = sl > price
-        except (TypeError, ValueError):
-            LOG.debug("short_liq float conversion failed in evaluate_manipulation_fusion", exc_info=True)
-            liq_above = False
-    else:
-        liq_above = False
-    if _apply_check(checks, check_sources, "short_liq_above", liq_above, "leionion") and liq_above:
+    # Realized magnets only: a synthetic leverage-tier estimate must not add
+    # ignition weight (see realized_liq_magnet).
+    short_liq = realized_liq_magnet(market, side="short")
+    liq_above = short_liq is not None and price > 0 and short_liq > price
+    if (
+        _apply_check(checks, check_sources, "short_liq_above", liq_above, "leionion")
+        and liq_above
+        and short_liq is not None
+    ):
         ignition += 1.0
-        factors.append(FactorHit("D9", "short_liq_magnet", float(short_liq), 1.0, "leionion"))
+        factors.append(FactorHit("D9", "short_liq_magnet", short_liq, 1.0, "leionion"))
     if _apply_check(
         checks,
         check_sources,
