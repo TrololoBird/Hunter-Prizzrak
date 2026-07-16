@@ -206,9 +206,16 @@ async def path_backfill_loop(client: Any, *, interval_s: float = 900.0) -> None:
             # Roll the ledger BEFORE the pass: this loop is its only writer, so
             # rotating here cannot interleave with an append. Live it had grown
             # to 7.7 GB unbounded, and load_pending_backfill reads it whole.
+            #
+            # MUST run off the event loop: gzipping a multi-GB file is minutes of
+            # synchronous CPU. Calling it inline froze the whole bot — no ticks,
+            # no prizrak, no scanner — for as long as the compression ran (live:
+            # 13+ min at 99% CPU on the first 7.7 GB roll, caught by the health
+            # monitor). asyncio.to_thread keeps the loop responsive; the rename
+            # is still atomic, so a concurrent append cannot interleave.
             from hunt_core.track.candidate_ledger import rotate_ledger_if_large
 
-            rotate_ledger_if_large()
+            await asyncio.to_thread(rotate_ledger_if_large)
             n = await run_backfill_pass(client, now_ms=int(_time.time() * 1000))
             if n:
                 _LOG.info("path_backfill_loop_tick backfilled=%s", n)
