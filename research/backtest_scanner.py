@@ -156,7 +156,11 @@ def _simulate(fine, t0, direction, entry, stop, tp_levels, dobor_levels, deep, h
     under HUNT_ALLOW_FLIP (the user's hypothesis, NOT stated by the authors), a **переворот**
     — after the move exhausts at the deep pool, trade the round-trip back.
     Returns (outcome, total_R, worst_mae_R, n_legs)."""
-    seg = [r for r in fine if t0 < r[0] <= t0 + horizon_ms]
+    # Forward path = bars opening AT or after the decision time t0 (t0 is the close
+    # time of the bar that completed the setup, i.e. the OPEN time of the next bar).
+    # `t0 < r[0]` silently skipped that first forward bar — the first hour of price
+    # action after the signal never reached the stop/target simulation.
+    seg = [r for r in fine if t0 <= r[0] <= t0 + horizon_ms]
     if not seg or entry <= 0 or stop <= 0 or not (tp_levels and deep):
         return ("nodata", 0.0, 0.0, 0)
     outcome, total_r, mae_r, exit_idx = _run_leg(seg, direction, entry, stop,

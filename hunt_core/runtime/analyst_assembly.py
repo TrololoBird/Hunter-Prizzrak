@@ -198,6 +198,17 @@ async def assemble_analyst_tick(
                     LOG.warning("prizrak_ohlcv_fetch_failed", symbol=sym, tf=tf_name, error=repr(exc))
                     bars = None
                 if bars:
+                    # No-lookahead: the list path bypasses finalize_kline_frame's
+                    # incomplete-tail drop, so ccxt's in-progress candle would reach
+                    # the Prizrak detectors (detect_pereprior / confirmation_bodies /
+                    # BOS-CHoCH read bars[-1].close as a CLOSED body) and repaint —
+                    # a mid-bar break counts as a слом, then the bar closes back.
+                    from hunt_core.market.factory import drop_unclosed_ohlcv_tail
+
+                    bars = drop_unclosed_ohlcv_tail(
+                        list(bars), tf_name, exchange=client.exchange
+                    )
+                if bars:
                     prizrak_ohlcv_by_tf[tf_name] = bars
                 await asyncio.sleep(stagger_ms / 1000.0)
     except Exception:

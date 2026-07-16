@@ -485,6 +485,34 @@ def _drop_incomplete_ohlcv_tail(
     return df
 
 
+def drop_unclosed_ohlcv_tail(
+    rows: list[list[Any]],
+    timeframe: str,
+    *,
+    exchange: Any,
+    now_ms: int | None = None,
+) -> list[list[Any]]:
+    """Drop the still-forming last kline from a raw list-path OHLCV window.
+
+    The list path (``fetch_ohlcv_list`` / ``fetch_ohlcv_list_cached``) bypasses
+    ``finalize_kline_frame``'s incomplete-tail drop, so Binance's in-progress
+    candle reaches consumers and repaints (closed-bar discipline violation —
+    a mid-bar close beyond a level would count as a confirmed break, then the
+    bar can close back). Every detector-facing list consumer must pass its
+    window through this before analysis.
+
+    ``rows`` are ascending ``[open_ms, o, h, l, c, v, ...]``; a bar is closed
+    once ``open_ms + timeframe_duration <= now``.
+    """
+    if not rows:
+        return rows
+    step_ms = interval_to_seconds(timeframe, exchange) * 1000
+    now = int(clock.now_utc().timestamp() * 1000) if now_ms is None else int(now_ms)
+    if int(rows[-1][0]) + step_ms > now:
+        return rows[:-1]
+    return rows
+
+
 _RESAMPLE_FROM_1M_INTERVALS = frozenset({"5m", "15m", "1h", "4h", "1d"})
 
 
