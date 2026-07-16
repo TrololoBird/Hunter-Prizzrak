@@ -5,7 +5,7 @@ import asyncio
 import inspect
 import structlog
 import time
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any, Literal, TYPE_CHECKING
 
 import ccxt
@@ -18,11 +18,9 @@ LOG = structlog.get_logger("hunt_core.data.collect")
 from hunt_core.data.universe import PINNED_SYMBOLS
 from hunt_core.data_readiness import kline_fetch_limit
 from hunt_core.errors import DEFENSIVE_EXC, system_breakers
-from hunt_core.features.research_plugins import enrich_research_columns, research_snapshot_fields
 from hunt_core.market import HuntCcxtClient, HuntCcxtStreams
 from hunt_core.market.ccxt_guard import is_ccxt_rate_limited
 from hunt_core.market.ccxt_rest import RestBanSkip
-from hunt_core.market.client import depth_imbalance_from_book, microprice_bias_from_book
 
 def kline_limits(minimums: dict[str, int], symbol: str = "") -> dict[str, int]:
     """Hunt watch pulls deeper history than default bot warmup (max 1500 bars)."""
@@ -51,30 +49,6 @@ def probe_kline_limits(minimums: dict[str, int], symbol: str = "") -> dict[str, 
     limits["1m"] = min(limits["1m"], max(360, int(minimums.get("5m", 200)) * 2))
     limits.pop("1w", None)
     return limits
-
-
-def _kline_integrity_reject(
-    *,
-    symbol: str,
-    report: Any,
-    fetch_errors: dict[str, str] | None = None,
-) -> dict[str, Any]:
-    violations = list(report.violations)
-    primary = violations[0] if violations else "data.klines_incomplete"
-    return {
-        "ts": datetime.now(UTC).isoformat(),
-        "symbol": symbol,
-        "error": primary,
-        "no_signal_reason": primary,
-        "data_violations": violations[:16],
-        "fetch_errors": dict(fetch_errors or {}),
-        "data_integrity": {
-            "complete": False,
-            "violations": violations,
-            "details": dict(report.details),
-        },
-    }
-
 
 
 async def safe_fetch(
@@ -166,285 +140,6 @@ def _book_from_pack(pack: dict[str, Any]) -> dict[str, float | None]:
     return ticker if isinstance(ticker, dict) else {}
 
 
-
-
-def _apply_cross_exchange_flat(row: dict[str, Any]) -> None:
-    """Promote nested cross_exchange aggregates to top-level row fields."""
-    cx = row.get("cross_exchange")
-    if not isinstance(cx, dict):
-        return
-    row["cross_funding_spread"] = cx.get("funding_spread")
-    row["cross_funding_consensus"] = cx.get("funding_consensus")
-    row["cross_oi_total"] = cx.get("oi_total")
-    row["cross_price_divergence_pct"] = cx.get("price_divergence_pct")
-
-
-async def _attach_cross_market_fields(
-    market: dict[str, Any],
-    *,
-    client: HuntCcxtClient,
-    symbol: str,
-    ws_feed: HuntCcxtStreams | None,
-) -> None:
-    """Set cross_data_source on market: ws when cross WS live, else REST fallback."""
-    if ws_feed is not None and ws_feed.cross_ws_connected:
-        market["cross_data_source"] = "ws"
-        ws_cross = ws_feed.live_funding_cross(symbol)
-        if ws_cross:
-            market["cross_funding_secondary"] = {
-                ex: fields.get("fundingRate")
-                for ex, fields in ws_cross.items()
-                if isinstance(fields, dict)
-            }
-        return
-
-    try:
-        snap = await client.fetch_cross_exchange_snapshot(symbol)
-    except Exception as exc:
-        LOG.warning("cross_rest_fallback_failed | symbol=%s error=%s", symbol, exc)
-        market["cross_data_source"] = "unavailable"
-        return
-
-    funding_raw = snap.get("funding")
-    funding = funding_raw if isinstance(funding_raw, dict) else {}
-    oi_raw = snap.get("oi_usd")
-    oi_usd = oi_raw if isinstance(oi_raw, dict) else {}
-    secondary_funding = {
-        k: v for k, v in funding.items() if k != "binance" and v is not None
-    }
-    secondary_oi = {k: v for k, v in oi_usd.items() if v is not None}
-    if secondary_funding or secondary_oi:
-        market["cross_data_source"] = "rest"
-        if secondary_funding:
-            market["cross_funding_secondary"] = secondary_funding
-        if secondary_oi:
-            market["cross_oi_usd_secondary"] = secondary_oi
-        if snap.get("funding_spread") is not None:
-            market["cross_funding_spread"] = snap.get("funding_spread")
-        if snap.get("oi_total") is not None:
-            market["cross_oi_total"] = snap.get("oi_total")
-        if snap.get("funding_consensus") is not None:
-            market["cross_funding_consensus"] = snap.get("funding_consensus")
-    else:
-        market["cross_data_source"] = "unavailable"
-
-def _btc_corr_1h(sym_work_1h: Any, btc_work_1h: Any, *, lookback: int = 24) -> float | None:
-    if (
-        sym_work_1h is None
-        or btc_work_1h is None
-        or sym_work_1h.is_empty()
-        or btc_work_1h.is_empty()
-        or sym_work_1h.height < lookback + 2
-        or btc_work_1h.height < lookback + 2
-    ):
-        return None
-
-    sym_close = sym_work_1h["close"].tail(lookback + 1).cast(pl.Float64)
-    btc_close = btc_work_1h["close"].tail(lookback + 1).cast(pl.Float64)
-    sym_r = sym_close.pct_change().drop_nulls()
-    btc_r = btc_close.pct_change().drop_nulls()
-    n = min(sym_r.len(), btc_r.len())
-    if n < 8:
-        return None
-    corr_df = pl.DataFrame({"sym": sym_r.tail(n), "btc": btc_r.tail(n)})
-    corr_val = corr_df.select(pl.corr("sym", "btc")).item()
-    return round(float(corr_val), 4) if corr_val is not None else None
-
-
-def _btc_beta_1h(sym_work_1h: Any, btc_work_1h: Any, *, lookback: int = 48) -> float | None:
-    """Rolling OLS beta of symbol vs BTC 1h returns via polars_ols."""
-    try:
-        import polars as pl
-        import polars_ols  # noqa: PLC0415
-    except ImportError:
-        return None
-    if (
-        sym_work_1h is None
-        or btc_work_1h is None
-        or sym_work_1h.is_empty()
-        or btc_work_1h.is_empty()
-        or sym_work_1h.height < lookback + 2
-        or btc_work_1h.height < lookback + 2
-    ):
-        return None
-    sym_r = sym_work_1h["close"].tail(lookback + 1).cast(pl.Float64).pct_change().drop_nulls()
-    btc_r = btc_work_1h["close"].tail(lookback + 1).cast(pl.Float64).pct_change().drop_nulls()
-    n = min(sym_r.len(), btc_r.len())
-    if n < 8:
-        return None
-    tmp = pl.DataFrame({"y": sym_r.tail(n), "x": btc_r.tail(n)})
-    try:
-        result = polars_ols.compute_least_squares(tmp["y"], features=[tmp["x"]], add_intercept=True)
-        beta = float(result.get_column("x")[0])
-        return round(beta, 4)
-    except Exception:
-        return None
-
-
-
-
-def _enrich_work_research_frames(prepared: Any) -> None:
-    """Attach OLS trend + trading metrics to primary work frames (Phases 11A/11B)."""
-    for attr in ("work_15m", "work_1h"):
-        work = getattr(prepared, attr, None)
-        if work is None or getattr(work, "is_empty", lambda: True)():
-            continue
-        try:
-            enriched = enrich_research_columns(work)
-            setattr(prepared, attr, enriched)
-        except Exception:
-            LOG.debug("enrich_research_columns_failed attr=%s", attr, exc_info=True)
-            continue
-
-
-def _merge_research_tf_fields(out: dict[str, Any], df: Any) -> dict[str, Any]:
-    fields = research_snapshot_fields(df)
-    if fields:
-        out.update(fields)
-    return out
-
-
-def _attach_research_setup_fields(setup: dict[str, Any], *, tf: dict[str, Any], regime: dict[str, Any]) -> None:
-    block = tf.get("15m_closed") or tf.get("15m") or {}
-    if isinstance(block, dict):
-        for key in (
-            "trend_slope_20",
-            "residual_vol",
-            "sharpe_20",
-            "current_drawdown",
-            "return_entropy_50",
-        ):
-            if key in block and block[key] is not None:
-                setup[key] = block[key]
-    if regime.get("return_entropy_50") is not None:
-        setup["return_entropy_50"] = regime["return_entropy_50"]
-    if regime.get("volume_regime_break"):
-        setup["volume_regime_break"] = True
-
-
-def _apply_rest_enrichments(
-    prepared: Any,
-    *,
-    client: HuntCcxtClient,
-    symbol: str,
-    pack: dict[str, Any],
-    book: dict[str, float | None],
-    premium_row: dict[str, float] | None,
-    funding_info: dict[str, float | int] | None,
-    delta: float | None,
-) -> None:
-    prepared.oi_current = pack.get("oi") if pack.get("oi") is not None else client.get_cached_open_interest(symbol)
-    prepared.oi_change_pct = (
-        pack.get("oi_chg_1h")
-        if pack.get("oi_chg_1h") is not None
-        else client.get_cached_oi_change(symbol, "1h")
-    )
-    prepared.ls_ratio = (
-        pack.get("ls_1h") if pack.get("ls_1h") is not None else client.get_cached_ls_ratio(symbol, "1h")
-    )
-    prepared.top_account_ls_ratio = prepared.ls_ratio
-    prepared.top_position_ls_ratio = (
-        pack.get("top_ls_1h")
-        if pack.get("top_ls_1h") is not None
-        else client.get_cached_top_position_ls_ratio(symbol, "1h")
-    )
-    prepared.top_trader_position_ratio = prepared.top_position_ls_ratio
-    prepared.global_ls_ratio = (
-        pack.get("global_ls_1h")
-        if pack.get("global_ls_1h") is not None
-        else client.get_cached_global_ls_ratio(symbol, "1h")
-    )
-    prepared.global_account_ls_ratio = prepared.global_ls_ratio
-    if prepared.ls_ratio is not None and prepared.global_ls_ratio is not None:
-        prepared.top_vs_global_ls_gap = float(prepared.ls_ratio) - float(prepared.global_ls_ratio)
-    prepared.taker_ratio = (
-        pack.get("taker_1h")
-        if pack.get("taker_1h") is not None
-        else client.get_cached_taker_ratio(symbol, "1h")
-    )
-    prepared.funding_rate = (
-        pack.get("funding")
-        if pack.get("funding") is not None
-        else client.get_cached_funding_rate(symbol)
-    )
-    prepared.funding_trend = client.get_cached_funding_trend(symbol)
-    funding_z = client.get_cached_funding_rate_zscore(symbol)
-    if funding_z is not None:
-        prepared.funding_rate_zscore_48h = float(funding_z)
-    extreme = client.get_cached_funding_recent_extreme(symbol)
-    if extreme is not None:
-        prepared.funding_recent_extreme_rate = float(extreme[0])
-        prepared.funding_recent_extreme_age_hours = float(extreme[1])
-    basis_stats = client.get_cached_basis_stats(symbol, period="5m")
-    if basis_stats:
-        basis_pct = basis_stats.get("basis_pct")
-        if basis_pct is not None:
-            prepared.basis_pct = float(basis_pct)
-        prem_z = basis_stats.get("premium_zscore_5m")
-        if prem_z is not None:
-            prepared.premium_zscore_5m = float(prem_z)
-        prem_s = basis_stats.get("premium_slope_5m")
-        if prem_s is not None:
-            prepared.premium_slope_5m = float(prem_s)
-    basis_direct = pack.get("basis_5m")
-    if basis_direct is not None and prepared.basis_pct is None:
-        prepared.basis_pct = float(basis_direct)
-        prepared.mark_index_spread_bps = float(basis_direct) * 100.0
-    if premium_row:
-        from hunt_core.errors import finite_float_or_none
-
-        mark = finite_float_or_none(premium_row.get("mark_price"))
-        index = finite_float_or_none(premium_row.get("index_price"))
-        if mark is not None and mark > 0:
-            prepared.mark_price = mark
-        if prepared.funding_rate is None:
-            funding = finite_float_or_none(premium_row.get("funding_rate"))
-            if funding is not None:
-                prepared.funding_rate = funding
-        if mark is not None and index is not None and mark > 0 and index > 0:
-            basis = (mark / index - 1.0) * 100.0
-            prepared.basis_pct = basis
-            prepared.mark_index_spread_bps = basis * 100.0
-        if premium_row.get("estimated_settle_price"):
-            prepared.estimated_settle_price = float(premium_row["estimated_settle_price"])
-        if premium_row.get("interest_rate") is not None:
-            prepared.interest_rate = float(premium_row["interest_rate"])
-        if premium_row.get("next_funding_time_ms"):
-            prepared.next_funding_time_ms = int(premium_row["next_funding_time_ms"])
-    if funding_info:
-        if funding_info.get("funding_rate_cap") is not None:
-            prepared.funding_rate_cap = float(funding_info["funding_rate_cap"])
-        if funding_info.get("funding_rate_floor") is not None:
-            prepared.funding_rate_floor = float(funding_info["funding_rate_floor"])
-        if funding_info.get("funding_interval_hours") is not None:
-            prepared.funding_interval_hours = int(funding_info["funding_interval_hours"])
-    prepared.depth_imbalance = depth_imbalance_from_book(
-        bid_qty=book.get("bid_qty"),
-        ask_qty=book.get("ask_qty"),
-        delta_ratio=delta,
-    )
-    prepared.microprice_bias = microprice_bias_from_book(
-        bid=book.get("bid_price"),
-        ask=book.get("ask_price"),
-        bid_qty=book.get("bid_qty"),
-        ask_qty=book.get("ask_qty"),
-        delta_ratio=delta,
-    )
-    prepared.depth_imbalance_source = "rest_depth" if pack.get("book_depth") else "rest_ticker"
-    prepared.microprice_bias_source = prepared.depth_imbalance_source
-    agg = pack.get("agg_trades")
-    if agg is not None:
-        # The agg_trade_delta_* field is a buy-share in [0,1] (0.5 balanced) per the
-        # WS source + scoring/_orderflow_confirm thresholds (0.42/0.58). The REST
-        # snapshot exposes a SIGNED delta_ratio=(buy-sell)/total in [-1,1]; convert it
-        # to the same buy-share scale so the sell-side trigger (< 0.42) no longer fires
-        # on neutral/mild-buy flow (a systematic short bias).
-        rest_signed = getattr(agg, "delta_ratio", None)
-        prepared.agg_trade_delta_30s = (
-            (float(rest_signed) + 1.0) / 2.0 if rest_signed is not None else None
-        )
-        prepared.orderflow_source = "agg_trade_rest"
-    prepared.data_source_mix = "futures_rest_full"
 
 
 def _overlay_ws_market(prepared: Any, ws_snap: dict[str, Any] | None) -> None:
@@ -879,9 +574,6 @@ async def refresh_tick_batch_cache(
         cache.btc_at = now
 
 
-
-_fetch_rest_pack = fetch_rest_pack
-
 __all__ = [
     "SnapshotTier",
     "TickBatchCache",
@@ -896,7 +588,5 @@ __all__ = [
     "sort_symbols_for_tick",
     "refresh_tick_batch_cache",
     "_book_from_pack",
-    "_apply_rest_enrichments",
     "_overlay_ws_market",
-    "_kline_integrity_reject",
 ]

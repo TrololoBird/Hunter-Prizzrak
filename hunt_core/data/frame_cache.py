@@ -1,7 +1,6 @@
 """In-memory OHLCV + prepared + enrichment — WS-first hot tick plane."""
 from __future__ import annotations
 
-import asyncio
 import structlog
 import time
 from dataclasses import dataclass, field
@@ -97,9 +96,6 @@ class SymbolFrameCache:
         self._bootstrapped: set[str] = set()
         self._enrichment: dict[str, EnrichmentSnapshot] = {}
         self._prepared: dict[str, PreparedSnapshot] = {}
-        self._ws_at: dict[str, float] = {}
-        self._priority: dict[str, float] = {}
-        self._last_tick_path: dict[str, str] = {}
         self._carry: dict[str, RowCarrySnapshot] = {}
 
 
@@ -147,9 +143,6 @@ class SymbolFrameCache:
         if time.monotonic() - seed_at > max_age:
             return None
         return frame
-
-    def has_carry_ready(self, symbol: str) -> bool:
-        return self.has_delta_ready(symbol) and self.get_carry_row(symbol) is not None
 
     def seed_klines(self, symbol: str, kline_map: dict[str, Any]) -> None:
         sym = symbol.upper()
@@ -260,18 +253,6 @@ class SymbolFrameCache:
             return None
         return snap.prepared
 
-    def set_last_tick_path(self, symbol: str, path: str) -> None:
-        if path:
-            self._last_tick_path[symbol.upper()] = str(path)
-
-    def get_last_tick_path(self, symbol: str) -> str | None:
-        return self._last_tick_path.get(symbol.upper())
-
-    def mark_priority(self, symbol: str, score: float) -> None:
-        sym = symbol.upper()
-        prev = self._priority.get(sym, 0.0)
-        self._priority[sym] = max(prev, float(score))
-
     def kline_map(self, symbol: str) -> dict[str, pl.DataFrame]:
         return dict(self._frames.get(symbol.upper()) or {})
 
@@ -280,17 +261,6 @@ class SymbolFrameCache:
         if snap is None or not snap.fresh():
             return None
         return dict(snap.pack)
-
-    def enrichment_stale_symbols(self, symbols: list[str] | tuple[str, ...]) -> list[str]:
-        out: list[str] = []
-        for sym in symbols:
-            s = sym.upper()
-            if not self.is_ready(s):
-                continue
-            snap = self._enrichment.get(s)
-            if snap is None or not snap.fresh():
-                out.append(s)
-        return out
 
     def is_ready(self, symbol: str) -> bool:
         sym = symbol.upper()
@@ -359,42 +329,9 @@ class SymbolFrameCache:
                 LOG.debug("frame_cache_ohlcv_merge_failed | sym=%s tf=%s err=%s", sym, tf, exc)
         now = time.monotonic()
         self._frames.setdefault(sym, {})[tf] = df
-        self._ws_at[sym] = now
         # A WS update IS freshness: without this stamp get_kline_frame aged the
         # frame from its REST seed time and refused to serve it mid-outage.
         self._frame_ts.setdefault(sym, {})[tf] = now
-
-    async def refresh_enrichment_batch(
-        self,
-        client: Any,
-        symbols: list[str],
-        *,
-        ws_feed: Any | None = None,
-        limit: int = 6,
-    ) -> int:
-        """Background REST enrichment for hot symbols — never blocks kline trigger."""
-        from hunt_core.data.collect import fetch_rest_pack, safe_fetch
-
-        stale = self.enrichment_stale_symbols(symbols)[: max(0, int(limit))]
-        if not stale:
-            return 0
-        updated = 0
-        for sym in stale:
-            try:
-                pack = await safe_fetch(
-                    lambda s=sym: fetch_rest_pack(client, s, tier="fast", ws_feed=ws_feed),
-                    context=f"hot_enrich.{sym}",
-                    client=client,
-                )
-                if isinstance(pack, dict) and pack:
-                    self.seed_enrichment(sym, pack)
-                    updated += 1
-            except Exception as exc:
-                LOG.debug("hot_enrichment_refresh_failed | sym=%s err=%s", sym, exc)
-            await asyncio.sleep(0.05)
-        if updated:
-            LOG.debug("hot_enrichment_batch_refreshed symbols=%s stale=%s", updated, len(stale))
-        return updated
 
 
 _GLOBAL: SymbolFrameCache | None = None

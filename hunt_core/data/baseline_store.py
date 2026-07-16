@@ -1,6 +1,6 @@
 """Persistent per-symbol baseline history (P0-A).
 
-Rolling samples for volume / quote_volume / oi / funding / trade_count survive
+Rolling samples for quote_volume / oi / funding / trade_count survive
 restarts under ``data/baseline/{SYMBOL}.json``. Z-scores use ``shared.mathlib``.
 """
 from __future__ import annotations
@@ -39,7 +39,6 @@ def _safe_float(value: Any) -> float | None:
 class SymbolBaseline:
     symbol: str
     quote_volume: list[float] = field(default_factory=list)
-    volume: list[float] = field(default_factory=list)
     oi: list[float] = field(default_factory=list)
     funding: list[float] = field(default_factory=list)
     trade_count: list[float] = field(default_factory=list)
@@ -61,7 +60,6 @@ class SymbolBaseline:
         return cls(
             symbol=symbol.upper(),
             quote_volume=_series("quote_volume"),
-            volume=_series("volume"),
             oi=_series("oi"),
             funding=_series("funding"),
             trade_count=_series("trade_count"),
@@ -111,12 +109,10 @@ def update_baseline_from_ticker(
     sym = symbol.upper()
     base = load_baseline(sym) or SymbolBaseline(symbol=sym)
     qv = _safe_float(row.get("quote_volume") or row.get("quoteVolume"))
-    vol = _safe_float(row.get("volume") or row.get("baseVolume"))
     tc = _safe_float(row.get("trade_count") or row.get("count"))
     oi_v = oi if oi is not None else _safe_float(row.get("oi") or row.get("openInterest"))
     fund = funding if funding is not None else _safe_float(row.get("funding_rate"))
     base.quote_volume = _append(base.quote_volume, qv)
-    base.volume = _append(base.volume, vol)
     base.oi = _append(base.oi, oi_v)
     base.funding = _append(base.funding, fund)
     base.trade_count = _append(base.trade_count, tc)
@@ -148,15 +144,12 @@ def baseline_zscores(baseline: SymbolBaseline | None) -> dict[str, float | None]
         return {}
     qv_z = multi_tf_z(baseline.quote_volume)
     oi_z = multi_tf_z(baseline.oi)
-    fund_z = multi_tf_z(baseline.funding)
     trade_z = multi_tf_z(baseline.trade_count)
     return {
         "volume_z": qv_z.get("z_24h"),
         "volume_z_5m": qv_z.get("z_5m"),
-        "volume_z_1h": qv_z.get("z_1h"),
         "oi_z": oi_z.get("z_24h"),
         "oi_z_5m": oi_z.get("z_5m"),
-        "funding_z": fund_z.get("z_24h"),
         "trade_rate_z": trade_z.get("z_24h"),
     }
 

@@ -7,7 +7,6 @@ from __future__ import annotations
 
 
 import math
-import time
 from dataclasses import dataclass, field
 import structlog
 from typing import Any
@@ -879,7 +878,7 @@ _REST_CACHE_TO_MARKET: dict[str, str] = {
     "taker_5m": "taker_5m",
     "taker_15m": "taker_15m",
     "taker_1h": "taker_1h",
-    "funding": "funding",
+    "funding": "funding_rate",
     "basis_5m": "basis_5m",
 }
 
@@ -897,9 +896,7 @@ def stamp_market_freshness(
         return
 
     ws_age: float | None = None
-    ws_connected = False
     if isinstance(ws_snap, dict):
-        ws_connected = bool(ws_snap.get("ws_connected"))
         raw = ws_snap.get("ws_last_msg_age_s")
         if raw is not None:
             try:
@@ -919,14 +916,6 @@ def stamp_market_freshness(
                     ages[str(key)] = float(raw_age)
                 except (TypeError, ValueError):
                     continue
-        for key, fetched_at in pack.items():
-            if not key.endswith("_fetched_at"):
-                continue
-            base = key[: -len("_fetched_at")]
-            try:
-                ages[base] = max(0.0, time.monotonic() - float(fetched_at))
-            except (TypeError, ValueError):
-                continue
 
     if client is not None and symbol and hasattr(client, "snapshot_rest_cache_ages"):
         try:
@@ -941,15 +930,6 @@ def stamp_market_freshness(
             continue
         if _market_derivative_finite(market, delivery_key):
             market[f"{delivery_key}_age_seconds"] = round(age, 1)
-
-    if ws_age is not None and ws_connected:
-        of_src = str(market.get("orderflow_source") or "")
-        if ("ws" in of_src or "ccxt_watch" in of_src) and market.get("agg_trade_delta_30s") is not None:
-            market["agg_trade_delta_30s_age_seconds"] = ws_age
-        if str(market.get("depth_imbalance_source") or "") == "ws_book" and market.get(
-            "depth_imbalance"
-        ) is not None:
-            market["depth_imbalance_age_seconds"] = ws_age
 
 
 def series_z_strict(values: list[float], *, field: str) -> float:
