@@ -26,9 +26,9 @@ from hunt_core.market.ccxt_guard import (
     liquidation_ws_mode,
 )
 from hunt_core.market.symbols import (
-    from_ccxt_symbol,
     to_binance_symbol,
     to_ccxt_symbol,
+    try_binance_id_from_ccxt,
     try_resolve_linear_usdt_swap,
 )
 from hunt_core.params.store import orderflow_use_nq, ws_thresholds
@@ -318,10 +318,22 @@ class HuntCcxtStreams:
 
     @staticmethod
     def _ws_binance_id(ex: Any, raw: str) -> str | None:
+        """Map a WS payload symbol → Binance market id, or None when unmappable.
+
+        Best-effort by contract: every caller here iterates a BROADCAST payload
+        (``!markPrice@arr`` & co.) that carries contracts outside our loaded
+        market set, and every call site already guards on a falsy result. The
+        strict ``from_ccxt_symbol`` raised ``BadSymbol`` instead of returning
+        None, which aborted the whole batch loop mid-iteration: the USDⓈ-M
+        ``!markPrice@arr`` array ends with ~55 COIN-M contracts
+        (BTCUSD_PERP, …), so every batch raised at index ~683/738 and burned
+        the handler's 1 s backoff. The tracked symbols sort ahead of the bad
+        tail so no live data was lost — but nothing guaranteed that ordering.
+        """
         raw_sym = str(raw or "").strip()
         if not raw_sym:
             return None
-        return from_ccxt_symbol(raw_sym, exchange=ex)
+        return try_binance_id_from_ccxt(raw_sym, exchange=ex)
 
     def _ws_ex(self) -> Any:
         if self._pro_ex is None:

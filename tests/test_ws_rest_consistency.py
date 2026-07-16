@@ -23,6 +23,7 @@ import time
 from types import SimpleNamespace
 from typing import Any, cast
 
+import ccxt
 import pytest
 
 from hunt_core.data.collect import _overlay_ws_market as overlay_collect
@@ -264,3 +265,47 @@ def test_stamp_ws_does_not_override_rest_values() -> None:
     assert market["mark"] == 99.0
     assert market["funding_rate"] == pytest.approx(0.0007)
     assert market["funding_pct"] == pytest.approx(0.07)
+
+
+# ---------------------------------------------------------------------------
+# _ws_binance_id: best-effort on broadcast payloads (never aborts the batch)
+# ---------------------------------------------------------------------------
+
+
+class _FakeEx:
+    """Minimal ccxt-shaped exchange: only linear USDⓈ-M markets are loaded."""
+
+    id = "binance"
+    markets = {"BTC/USDT:USDT": {"id": "BTCUSDT"}}
+    markets_by_id = {"BTCUSDT": [{"id": "BTCUSDT"}]}
+
+    def market(self, symbol: str) -> dict[str, Any]:
+        try:
+            return self.markets[symbol]
+        except KeyError:
+            raise ccxt.BadSymbol(f"binance does not have market symbol {symbol}") from None
+
+
+def test_ws_binance_id_maps_known_symbol() -> None:
+    assert HuntCcxtStreams._ws_binance_id(_FakeEx(), "BTC/USDT:USDT") == "BTCUSDT"
+
+
+def test_ws_binance_id_returns_none_for_empty() -> None:
+    assert HuntCcxtStreams._ws_binance_id(_FakeEx(), "") is None
+
+
+def test_ws_binance_id_returns_none_for_unmappable_not_raise() -> None:
+    """The USDⓈ-M !markPrice@arr tail carries COIN-M contracts we never loaded.
+
+    Raising here aborted the caller's whole batch loop mid-iteration; every
+    call site is written to skip a falsy result instead.
+    """
+    assert HuntCcxtStreams._ws_binance_id(_FakeEx(), "BTCUSD_PERP") is None
+
+
+def test_broadcast_batch_survives_bad_tail() -> None:
+    """A bad symbol must not stop the entries that follow it."""
+    ex = _FakeEx()
+    batch = ["BTC/USDT:USDT", "BTCUSD_PERP", "ADAUSD_PERP", "BTC/USDT:USDT"]
+    seen = [HuntCcxtStreams._ws_binance_id(ex, s) for s in batch]
+    assert seen == ["BTCUSDT", None, None, "BTCUSDT"]
