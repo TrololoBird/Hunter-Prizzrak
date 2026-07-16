@@ -4,6 +4,7 @@ from __future__ import annotations
 # --- merged from data/prescan.py ---
 
 import math
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -576,76 +577,19 @@ def enrich_candidates_with_percentile_ranks(candidates: list["HuntCandidate"]) -
         out.append(c.model_copy(update={"flags": tuple(flags), "reasons": tuple(reasons)}))
     return out
 
-# P1.18 — 60d volume-baseline z-score overlay thresholds.
-VOL_BASELINE_DAYS = 60
-VOL_Z_HOT = 2.0
-VOL_Z_EXTREME = 3.5
-
-# P1.19 — multi-timeframe quote-volume tiers (USD); each tier crossed adds score.
-MTF_VOL_TIERS: tuple[tuple[str, float, float], ...] = (
-    # (timeframe field on row, min quote-vol USD, score bonus)
-    ("qvol_5m", 1_000_000.0, 4.0),
-    ("qvol_15m", 3_000_000.0, 4.0),
-    ("qvol_1h", 8_000_000.0, 5.0),
-)
-
-
-def volume_baseline_zscore(
-    current_qvol: float,
-    baseline: list[float] | None,
-) -> float | None:
-    """Z-score of current 24h quote-volume vs a rolling 60d daily baseline (P1.18).
-
-    ``baseline`` is a list of daily quote-volumes (USD). Needs >=10 finite points
-    and a positive stdev; otherwise None (insufficient history, not a silent 0).
-    """
-    if not baseline:
-        return None
-    vals = [v for v in (_safe_float(b) for b in baseline) if v is not None and v > 0.0]
-    if len(vals) < 10:
-        return None
-    n = float(len(vals))
-    mean = sum(vals) / n
-    var = sum((v - mean) ** 2 for v in vals) / n
-    std = math.sqrt(var)
-    if std <= 0.0:
-        return None
-    return (current_qvol - mean) / std
-
-
-def score_volume_baseline_z(
-    row: dict[str, Any],
-    *,
-    current_qvol: float,
-) -> tuple[float, list[str], list[str]]:
-    """Score bonus from the 60d volume-baseline z (P1.18). Soft: no data → (0, [], [])."""
-    baseline = row.get("qvol_baseline_60d") or row.get("volume_baseline_60d")
-    z = volume_baseline_zscore(current_qvol, baseline if isinstance(baseline, list) else None)
-    if z is None:
-        return 0.0, [], []
-    if z >= VOL_Z_EXTREME:
-        return 18.0, ["vol_z_extreme"], [f"vol_z60d={z:.1f}"]
-    if z >= VOL_Z_HOT:
-        return 10.0, ["vol_z_hot"], [f"vol_z60d={z:.1f}"]
-    return 0.0, [], []
-
-
-def score_mtf_volume_tiers(
-    row: dict[str, Any],
-) -> tuple[float, list[str], list[str]]:
-    """Score bonus for multi-timeframe volume tiers crossed (P1.19). Soft overlay."""
-    score = 0.0
-    flags: list[str] = []
-    reasons: list[str] = []
-    for field_name, min_qvol, bonus in MTF_VOL_TIERS:
-        qvol = _safe_float(row.get(field_name))
-        if qvol is None or qvol < min_qvol:
-            continue
-        score += bonus
-        tf = field_name.removeprefix("qvol_")
-        flags.append(f"vol_tier_{tf}")
-        reasons.append(f"{field_name}={qvol/1e6:.1f}M")
-    return score, flags, reasons
+# NOTE (audit): the P1.18 60d volume-baseline z overlay and the P1.19 multi-timeframe
+# volume tiers lived here and were deleted as unreachable. Both scored off row keys
+# (`qvol_baseline_60d` / `qvol_5m` / `qvol_15m` / `qvol_1h`) that NO producer ever
+# wrote: every row scored here comes from `client.fetch_ticker_24h`, which emits only
+# symbol / last_price / price_change_percent / quote_volume / trade_count /
+# underlying_type / high_price / low_price. Both scorers therefore returned a constant
+# (0.0, [], []) since the initial commit, so removing them is an identity on the score.
+#
+# They are not revivable at THIS layer, which is why they are gone rather than wired:
+# prescan is a universe-wide funnel over a single bulk fetch_tickers call, and these
+# keys need per-symbol klines (~700 symbols × 3 TFs, or 60 daily bars each) — the very
+# fan-out the funnel exists to avoid. A real volume-baseline lane belongs downstream of
+# the funnel, on the shortlist that already has klines.
 
 
 class HuntCandidate(BaseModel):
@@ -779,18 +723,6 @@ def score_hunt_row(
     if move >= 25.0 and quote_volume >= 50_000_000:
         score += 8.0
         flags.append("liquid_mover")
-
-    # P1.18: 60d volume-baseline z overlay.
-    vz_score, vz_flags, vz_reasons = score_volume_baseline_z(row, current_qvol=quote_volume)
-    score += vz_score
-    flags.extend(vz_flags)
-    reasons.extend(vz_reasons)
-
-    # P1.19: multi-timeframe volume tiers.
-    mtf_score, mtf_flags, mtf_reasons = score_mtf_volume_tiers(row)
-    score += mtf_score
-    flags.extend(mtf_flags)
-    reasons.extend(mtf_reasons)
 
     # Mid-dump radar (BLESS miss): 24h change can be modest while the 1h leg already
     # collapsed — wide range + price in lower half + red day is a dump in progress.
@@ -976,7 +908,14 @@ async def run_scan(
             "hot_funnel": [c.model_dump() for c in hot],
         }
         WATCHLIST.parent.mkdir(parents=True, exist_ok=True)
-        WATCHLIST.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        # Atomic publish: write_text truncates in place, so a crash (or a kill, or a
+        # full disk) mid-write left a half-written watchlist on disk that every reader
+        # then failed to parse — turning a scan interruption into an empty universe on
+        # the next start. tmp + os.replace makes readers see either the old file or the
+        # new one, never a partial.
+        tmp_path = WATCHLIST.with_suffix(WATCHLIST.suffix + ".tmp")
+        tmp_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        os.replace(tmp_path, WATCHLIST)
         LOG.info(
             "hunt_scan_done",
             candidates=len(candidates),

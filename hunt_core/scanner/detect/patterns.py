@@ -667,6 +667,17 @@ _B_MIN_PUMP_PCT = 0.40  # pump base→high must be ≥ 40% (a real manipulation,
 # на полное поглощение пампа … тейк чуть ниже лоя, поставленного импульсом — там всегда
 # сидит продавец / основные объёмы"). We target just inside that low, not a distant pool.
 _B_TP_INSIDE_FRAC = 0.02  # TP placed 2% above the pump-base low (course: "чуть ниже него")
+# The recent-peak window: the span that DEFINES both the "did the trend peak here"
+# context gate and `pump_high`, the peak stage 1's fade/rejection detectors anchor on.
+# Stage 0's sweep scan is bounded by it too — mirroring the A-side fix (`detect_sweep_low(
+# meso_df.tail(_BOKOVIK_WINDOW), …)`: "scanning the whole frame let an old pierce satisfy
+# the gate"). A is bound to 30 because that is the window detect_bokovik derives its low
+# from; B is bound to 20 because that is the window it derives pump_high from — each
+# window is tied to the definition of the level being swept, not copied across patterns.
+# Without this, a coin that swept its macro high months ago and has since drifted back
+# within 8% of it seeds stage 1 off the ANCIENT wick (the dist_pct/meso_top gates only
+# test the CURRENT price), and the emitted "sweep→fade" is two causally unrelated events.
+_B_PEAK_WINDOW = 20
 
 
 def _advance_pattern_b(
@@ -700,15 +711,19 @@ def _advance_pattern_b(
             return new_symbol_state(), None  # price nowhere near a trend high — not a Pattern B context
         # the recent meso top must be at/above the macro high (the trend really
         # peaked here), not a pullback high far below it
-        meso_top = _to_float(meso_df["high"].tail(20).max())
+        meso_top = _to_float(meso_df["high"].tail(_B_PEAK_WINDOW).max())
         if meso_top < macro_high * 0.98:
             return new_symbol_state(), None
         sweep_target = macro_high
 
-        sweep_ok, sweep_extreme, _ = detect_sweep_high(meso_df, sweep_target)
+        # Bound the sweep scan to the same recent window that defines pump_high, so
+        # the sweep and the peak stage 1 fades are the SAME event (see _B_PEAK_WINDOW).
+        sweep_ok, sweep_extreme, _ = detect_sweep_high(
+            meso_df.tail(_B_PEAK_WINDOW), sweep_target
+        )
         if not sweep_ok:
             return new_symbol_state(), None
-        pump_high = _to_float(meso_df["high"].tail(20).max())
+        pump_high = _to_float(meso_df["high"].tail(_B_PEAK_WINDOW).max())
         return {
             "pattern": "B", "stage": 1, "anchor_ts": now_ms, "first_ts": now_ms,
             "meso_tf": meso_tf,

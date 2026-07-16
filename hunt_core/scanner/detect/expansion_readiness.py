@@ -107,37 +107,34 @@ def compute_expansion_readiness(
     vol_z = zs.get("volume_z_5m") or zs.get("volume_z")
     oi_z = zs.get("oi_z_5m") or zs.get("oi_z")
     trade_z = zs.get("trade_rate_z")
-    squeeze = _safe_float(row.get("bb_width_pct") or row.get("bb_width"))
-    squeeze_score = 0.0
-    if squeeze is not None and squeeze > 0:
-        squeeze_score = _clamp01(1.0 - min(squeeze, 1.0)) * 15.0
-
     oi_accel = 0.0
     if oi_chg is not None and oi_chg > 0:
         oi_accel = _clamp01(oi_chg / 5.0) * 20.0
     elif oi_z is not None and oi_z > 0:
         oi_accel = _z_component(oi_z, weight=0.5)
 
-    # Accumulation lane: the energy above is momentum-dominated (vol/OI/trade
-    # SURGES = a coin already impulsing), so a quiet coiling "spring" — long tight
-    # range with a BB squeeze, the pre-manipulation накопление the methodology hunts —
-    # scored too low to be selected. Reward tightness × squeeze so springs get picked
-    # BEFORE the first move, not just coins that already moved. Additive: never
-    # removes an existing candidate, only lifts quiet coils into contention.
-    accumulation_score = 0.0
-    if high and low and low > 0:
-        range_pct_24h = (high / low - 1.0) * 100.0
-        if range_pct_24h <= 8.0 and squeeze is not None and squeeze > 0:
-            tightness = _clamp01(1.0 - range_pct_24h / 8.0)
-            sq_tight = _clamp01(1.0 - min(squeeze, 1.0))
-            accumulation_score = tightness * sq_tight * 30.0
-
+    # NOTE (audit): a BB-squeeze lane (15 pts) and an accumulation / "ловец пружин"
+    # lane (30 pts) sat here and were deleted as unreachable — together 45 of the 100
+    # energy points were structurally unable to score. Both keyed off
+    # `row["bb_width_pct"] or row["bb_width"]`, and this function only ever runs on
+    # `fetch_ticker_24h` rows, which carry no such key — so `squeeze` was always None
+    # and both lanes were pinned at 0.0. Deleting them is an identity on `energy`.
+    #
+    # They were dead a second time over, which is why reviving them here would not have
+    # worked either: the scoring math (`1.0 - min(squeeze, 1.0)`) reads squeeze as a
+    # RATIO, while the only bb_width this project computes (features/prepare_frame.py)
+    # is a PERCENT — so any real producer feeding this would still have scored 0 for
+    # every band wider than 1%.
+    #
+    # The methodology's BB-squeeze factor is NOT lost: it lives on the analyst path in
+    # prizrak/confluence.py (`_bb_width_pctile`, a unit-safe percentile) where klines
+    # are actually in hand. What IS a real product gap is a spring-catcher at the FUNNEL
+    # layer — selecting quiet coils before the first move. That gap is now visible
+    # instead of hidden behind code that looked like it worked.
     energy_parts = [
         _z_component(vol_z, weight=0.35),
         oi_accel,
         _z_component(trade_z, weight=0.20),
-        squeeze_score,
-        accumulation_score,
     ]
     energy = round(min(100.0, sum(energy_parts)), 1)
 

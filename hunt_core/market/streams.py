@@ -13,7 +13,7 @@ from typing import Any
 
 import ccxt
 
-from hunt_core.errors import defensive_exc_types
+from hunt_core.errors import defensive_exc_types, finite_float_or_none
 from hunt_core.market.factory import close_exchange_async, create_pro_secondary_swap
 from hunt_core.market.client import HuntCcxtClient
 from hunt_core.market.cross import configured_secondary_exchanges, funding_rest_poll_venues
@@ -45,6 +45,17 @@ _WS_WATCH_TIMEOUT_S: float = 120.0
 _KLINE_INTERVAL = "1m"
 _KLINE_5M_INTERVAL = "5m"
 _KLINE_15M_INTERVAL = "15m"
+# Staleness bound for the cross-venue funding OVERLAY (live_funding_cross).
+# Deliberately generous, for two opposite reasons:
+#   * too tight would be wrong — funding is a slow number (8 h period) and some venues
+#     push over WS only on change, so a legitimately quiet entry can be minutes old;
+#   * too loose would be wrong too — the overlay WINS over the REST cross snapshot, so
+#     a dead WS silently pins a rate across a funding reset.
+# 15 min clears the 60 s REST poll (HUNT_CROSS_FUNDING_REST_S) with wide margin while
+# still expiring inside one funding period. Dropping an entry is safe by construction:
+# the overlay sits on top of a freshly-fetched REST snapshot, so the gate degrades to
+# REST rather than to nothing.
+_CROSS_FUNDING_MAX_AGE_S: float = 900.0
 
 
 def _kline_ws_5m_enabled() -> bool:
@@ -218,7 +229,9 @@ class HuntCcxtStreams:
     _last_kline_open_ms_15m: dict[str, int] = field(default_factory=dict)
     kline_ws_enabled: bool = True
     mark_price_enabled: bool = True
-    _mark_state: dict[str, tuple[int, float, float, float]] = field(default_factory=dict)
+    # (ts_ms, mark, index, funding|None) — funding is Optional because "the message
+    # carried no fundingRate" and "funding is exactly 0.0" are different facts (I-6).
+    _mark_state: dict[str, tuple[int, float, float, float | None]] = field(default_factory=dict)
     _last_msg_ms: int = 0
     # live book/ticker/funding data from new multiplexed streams
     _live_books: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -611,14 +624,32 @@ class HuntCcxtStreams:
                 return None
         return entry
 
-    def live_funding_cross(self, symbol: str) -> dict[str, dict[str, float]]:
-        """Latest funding rates from secondary exchanges keyed by exchange name."""
+    def live_funding_cross(
+        self, symbol: str, *, max_age_s: float | None = _CROSS_FUNDING_MAX_AGE_S
+    ) -> dict[str, dict[str, float]]:
+        """Latest funding rates from secondary exchanges keyed by exchange name.
+
+        Age-gated like ``live_funding``: these entries overlay the REST cross snapshot
+        and win over it, so a stalled secondary WS (or a venue whose REST poll has
+        stopped) must not keep overwriting fresh REST funding with a dead rate for the
+        rest of the process's life. An entry with no ``ts_ms`` is treated as unknown
+        age and dropped rather than trusted.
+
+        Pass ``max_age_s=None`` to disable the gate (diagnostics only).
+        """
         sym = to_binance_symbol(symbol)
-        return {
-            ex: data[sym]
-            for ex, data in self._live_funding_by_exchange.items()
-            if sym in data
-        }
+        now_ms = time.time() * 1000
+        out: dict[str, dict[str, float]] = {}
+        for ex, data in self._live_funding_by_exchange.items():
+            entry = data.get(sym)
+            if not entry:
+                continue
+            if max_age_s is not None:
+                ts_ms = float(entry.get("ts_ms") or 0)
+                if ts_ms <= 0 or (now_ms - ts_ms) > max_age_s * 1000:
+                    continue
+            out[ex] = entry
+        return out
 
     def liquidation_buffers(self) -> dict[str, collections.deque[tuple[int, str, str, float, float]]]:
         """Per-venue liquidation ring buffers (binance + cross WS when enabled)."""
@@ -847,10 +878,10 @@ class HuntCcxtStreams:
         return {
             "mark_live": mark,
             "index_live": index if index > 0 else None,
-            # funding==0.0 here means "field absent in the raw message" (parsed via
-            # `or 0`); real funding is never exactly 0 at this precision — same
-            # convention as the `if funding != 0` guard in _watch_mark_prices.
-            "funding_live": funding if funding != 0 else None,
+            # `funding` is already None when the raw message carried no fundingRate,
+            # so a genuine 0.0 (flat funding) now reaches consumers as 0.0 instead of
+            # being laundered into None by the old `!= 0` convention.
+            "funding_live": funding,
             "basis_bps_live": (
                 round((mark - index) / index * 10_000, 2) if index > 0 else None
             ),
@@ -1155,18 +1186,22 @@ class HuntCcxtStreams:
                         continue
                     mark = float(item.get("markPrice") or 0)
                     index = float(item.get("indexPrice") or 0)
-                    funding = float(item.get("fundingRate") or 0)
+                    # A funding rate of exactly 0.0 is a REAL rate (flat funding), so it
+                    # must survive; an ABSENT field must not become 0.0. The old
+                    # `float(x or 0)` + `if funding != 0` did both wrong at once —
+                    # fabricating a 0 for a missing field, then discarding a genuine 0.
+                    funding_opt = finite_float_or_none(item.get("fundingRate"))
                     # (removed: info["ap"] parsing — Binance markPriceUpdate carries
                     # e/E/s/p/i/P/r/T only, so "ap" was always absent and the whole
                     # mark_ap_live/basis_ap_bps branch downstream was dead, audit G.)
                     if mark > 0:
-                        self._mark_state[sym] = (now_ms, mark, index, funding)
+                        self._mark_state[sym] = (now_ms, mark, index, funding_opt)
                         prev = dict(self._live_funding.get(sym) or {})
                         prev["markPrice"] = mark
                         if index > 0:
                             prev["indexPrice"] = index
-                        if funding != 0:
-                            prev["fundingRate"] = funding
+                        if funding_opt is not None:
+                            prev["fundingRate"] = funding_opt
                         prev["ts_ms"] = int(time.time() * 1000)  # age-gate stamp
                         self._live_funding[sym] = prev
                         self.client.update_basis_from_websocket(sym, mark, index if index > 0 else None)
@@ -1561,14 +1596,15 @@ class HuntCcxtStreams:
                         continue
                     mark = float(item.get("markPrice") or 0)
                     index = float(item.get("indexPrice") or 0)
-                    funding = float(item.get("fundingRate") or 0)
+                    # Absent field → None (skip); a real 0.0 rate is kept (I-6).
+                    funding_opt = finite_float_or_none(item.get("fundingRate"))
                     prev = dict(self._live_funding.get(sym) or {})
                     if mark > 0:
                         prev["markPrice"] = mark
                     if index > 0:
                         prev["indexPrice"] = index
-                    if funding != 0:
-                        prev["fundingRate"] = funding
+                    if funding_opt is not None:
+                        prev["fundingRate"] = funding_opt
                     if prev:
                         prev["ts_ms"] = int(time.time() * 1000)  # age-gate stamp
                         self._live_funding[sym] = prev
@@ -1646,10 +1682,23 @@ class HuntCcxtStreams:
                     sym = self._ws_binance_id(ex, str(item.get("symbol") or ""))
                     if not sym:
                         continue
-                    mark = float(item.get("markPrice") or 0)
-                    index = float(item.get("indexPrice") or 0)
-                    funding = float(item.get("fundingRate") or 0)
-                    bucket[sym] = {"markPrice": mark, "indexPrice": index, "fundingRate": funding}
+                    # Only report what the venue actually sent. `float(x or 0)` turned
+                    # an absent fundingRate into a hard 0.0, and downstream
+                    # merge_ws_cross_into_snapshot accepts any FINITE rate (unlike
+                    # markPrice, which it guards with `mp > 0`) — so the fabricated 0
+                    # entered funding_spread / funding_consensus and reached the card
+                    # as a rate this exchange never published.
+                    entry: dict[str, float] = {"ts_ms": float(int(time.time() * 1000))}
+                    mark_opt = finite_float_or_none(item.get("markPrice"))
+                    index_opt = finite_float_or_none(item.get("indexPrice"))
+                    funding_opt = finite_float_or_none(item.get("fundingRate"))
+                    if mark_opt is not None and mark_opt > 0:
+                        entry["markPrice"] = mark_opt
+                    if index_opt is not None and index_opt > 0:
+                        entry["indexPrice"] = index_opt
+                    if funding_opt is not None:
+                        entry["fundingRate"] = funding_opt
+                    bucket[sym] = entry
                 backoff_s = 5.0
             except asyncio.CancelledError:
                 return
@@ -1783,10 +1832,11 @@ class HuntCcxtStreams:
                         continue
                     if rate is None:
                         continue
+                    # No mark/index on this REST path — omit the keys rather than
+                    # writing 0.0 placeholders that claim a $0 mark price.
                     bucket[sym] = {
                         "fundingRate": float(rate),
-                        "markPrice": 0.0,
-                        "indexPrice": 0.0,
+                        "ts_ms": float(int(time.time() * 1000)),
                     }
             await asyncio.sleep(interval_s)
 

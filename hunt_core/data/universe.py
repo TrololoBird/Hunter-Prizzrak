@@ -69,14 +69,43 @@ def _bias_to_mode(bias: str) -> WatchMode:
 
 
 def load_watchlist_rows(path: Path = WATCHLIST_PATH) -> list[dict[str, Any]]:
+    """Watchlist rows from disk; [] when there is genuinely no watchlist.
+
+    Every failure mode here still degrades to an empty list — callers have no better
+    option than an empty universe — but a file that EXISTS and yields nothing is a
+    silent universe blackout, not a normal empty state, so it is logged loudly. The
+    old version swallowed a corrupt read, an unreadable file and a payload-shape change
+    into the same wordless `[]` as "no scan has run yet".
+    """
+    import structlog
+
+    log = structlog.get_logger("hunt_core.data.universe")
     if not path.exists():
         return []
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        raw = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        log.warning("watchlist_unreadable", path=str(path), error=str(exc))
+        return []
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        log.warning(
+            "watchlist_corrupt", path=str(path), bytes=len(raw), error=str(exc)
+        )
         return []
     rows = payload.get("watchlist") if isinstance(payload, dict) else None
-    return list(rows) if isinstance(rows, list) else []
+    if not isinstance(rows, list):
+        log.warning(
+            "watchlist_shape_unexpected",
+            path=str(path),
+            payload_type=type(payload).__name__,
+            watchlist_type=type(rows).__name__,
+        )
+        return []
+    if not rows and raw.strip():
+        log.warning("watchlist_empty_on_disk", path=str(path), bytes=len(raw))
+    return list(rows)
 
 
 def load_watchlist_symbols(path: Path = WATCHLIST_PATH) -> list[str]:

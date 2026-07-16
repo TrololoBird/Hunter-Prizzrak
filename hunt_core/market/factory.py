@@ -26,6 +26,25 @@ if TYPE_CHECKING:
 LOG = structlog.get_logger("hunt_core.market.factory")
 _PROBE_TIMEOUT_MS = 20_000
 
+# --- DNS: aiohttp's defaults are actively hostile to a long-lived bot -------------
+# CCXT builds its TCPConnector as `TCPConnector(ssl=..., loop=..., enable_cleanup_closed
+# =True)` and passes neither of these, so both aiohttp defaults apply:
+#
+#   * ttl_dns_cache=10 — every host is re-resolved every 10 SECONDS. Across the REST
+#     plane that is a continuous query stream, and it converts any brief resolver
+#     outage straight into request failures instead of riding it out on cache.
+#   * resolver=AsyncResolver — aiohttp picks this whenever `aiodns` is installed (it
+#     is, transitively). AsyncResolver talks to c-ares directly and reads
+#     /etc/resolv.conf, BYPASSING the OS resolver. On macOS the real DNS configuration
+#     lives in the system configuration database, which /etc/resolv.conf mirrors only
+#     partially — so under a VPN, c-ares can be querying a different (or dead) server
+#     than the rest of the machine. ThreadedResolver calls getaddrinfo, i.e. exactly
+#     what the OS does, VPN split-DNS included.
+#
+# 10 min matches Binance's own DNS TTL granularity closely enough while collapsing the
+# query rate ~60×; failover still works because aiohttp re-resolves on connect errors.
+_DNS_CACHE_TTL_S = 600
+
 BINANCE_EXCHANGE_ID = "binance"
 FUTURES_DEFAULT_TYPE = "future"
 SPOT_DEFAULT_TYPE = "spot"
@@ -100,13 +119,95 @@ def build_network_config(
     return config
 
 
+class _CachedDnsSessionMixin:
+    """Build CCXT's aiohttp session with a sane DNS cache and the OS resolver.
+
+    CCXT hardcodes its TCPConnector kwargs inside ``open()``, and offers no hook to
+    influence them. Passing a pre-built ``session`` through the constructor is not an
+    option either: CCXT reads ``own_session = 'session' not in config``, so supplying
+    one silently makes CCXT stop closing it and moves session teardown onto us.
+
+    So we seed ``self.session`` here and let ``super().open()`` skip its own creation
+    via its ``if self.own_session and self.session is None`` guard — ownership (and
+    therefore ``close()``) stays exactly where it was.
+
+    That guard is load-bearing and belongs to a third party, so it is pinned by a
+    canary test: if a CCXT upgrade ever drops it, CCXT would build a second, default
+    connector, overwrite ours, and the DNS fix would silently revert to the old
+    behaviour — the exact failure mode that is invisible in production.
+    """
+
+    # Provided by the CCXT Exchange this mixes into (which is untyped for mypy).
+    asyncio_loop: Any
+    ssl_context: Any
+    session: Any
+    tcp_connector: Any
+    throttler: Any
+    own_session: bool
+    cafile: Any
+    verify: Any
+    aiohttp_trust_env: bool
+
+    def open(self) -> None:
+        import ssl
+
+        import aiohttp
+
+        if self.own_session and self.session is None:
+            if self.asyncio_loop is None:
+                self.asyncio_loop = asyncio.get_running_loop()
+                self.throttler.loop = self.asyncio_loop
+            if self.ssl_context is None:
+                self.ssl_context = (
+                    ssl.create_default_context(cafile=self.cafile)
+                    if self.verify
+                    else self.verify
+                )
+            self.tcp_connector = aiohttp.TCPConnector(
+                ssl=self.ssl_context,
+                loop=self.asyncio_loop,
+                enable_cleanup_closed=True,
+                ttl_dns_cache=_DNS_CACHE_TTL_S,
+                resolver=aiohttp.ThreadedResolver(),
+            )
+            self.session = aiohttp.ClientSession(
+                loop=self.asyncio_loop,
+                connector=self.tcp_connector,
+                trust_env=self.aiohttp_trust_env,
+            )
+        super().open()  # type: ignore[misc]
+
+
+class HuntAsyncBinanceFutures(_CachedDnsSessionMixin, ccxt_async.binance):  # type: ignore[misc]
+    """ccxt.async_support binance with the DNS-cached session (see the mixin)."""
+
+
+class HuntAsyncBinanceSpot(_CachedDnsSessionMixin, ccxt_async.binance):  # type: ignore[misc]
+    """Spot-configured async binance with the DNS-cached session."""
+
+
+def dns_cached_class(base: type) -> type:
+    """Subclass ``base`` with the DNS-cached session mixin, memoised per base class.
+
+    Used for the secondary venues, whose CCXT class is resolved by id at runtime.
+    """
+    cached = _DNS_CACHED_CLASSES.get(base)
+    if cached is None:
+        cached = type(f"HuntDnsCached{base.__name__}", (_CachedDnsSessionMixin, base), {})
+        _DNS_CACHED_CLASSES[base] = cached
+    return cached
+
+
+_DNS_CACHED_CLASSES: dict[type, type] = {}
+
+
 def create_async_binance_future(
     *,
     proxy_url: str | None = None,
     trust_env: bool = True,
     timeout_ms: int = 45_000,
 ) -> ccxt_async.binance:
-    return ccxt_async.binance(
+    return HuntAsyncBinanceFutures(
         build_network_config(
             proxy_url=proxy_url,
             trust_env=trust_env,
@@ -141,8 +242,12 @@ def extend_parsed_ws_kline(stored_row: list[Any], kline: dict[str, Any]) -> None
         stored_row[6:11] = ext
 
 
-class HuntProBinanceFutures(ccxtpro.binance):  # type: ignore[misc]
-    """ccxt.pro binance that retains the kline fields the stock parser drops."""
+class HuntProBinanceFutures(_CachedDnsSessionMixin, ccxtpro.binance):  # type: ignore[misc]
+    """ccxt.pro binance that retains the kline fields the stock parser drops.
+
+    Also DNS-cached: ccxt.pro derives from the async Exchange and uses the same
+    aiohttp session for its REST half and for the WS handshake.
+    """
 
     def handle_ohlcv(self, client: Any, message: Any) -> None:
         super().handle_ohlcv(client, message)
@@ -200,7 +305,7 @@ def create_async_binance_spot(
     trust_env: bool = True,
     timeout_ms: int = 12_000,
 ) -> ccxt_async.binance:
-    return ccxt_async.binance(
+    return HuntAsyncBinanceSpot(
         build_network_config(
             proxy_url=proxy_url,
             trust_env=trust_env,
@@ -217,7 +322,7 @@ def create_async_secondary_swap(
     trust_env: bool = True,
     timeout_ms: int = 45_000,
 ) -> ccxt_async.Exchange:
-    cls = getattr(ccxt_async, exchange_id)
+    cls = dns_cached_class(getattr(ccxt_async, exchange_id))
     return cls(
         build_network_config(
             proxy_url=proxy_url,
@@ -235,7 +340,7 @@ def create_pro_secondary_swap(
     trust_env: bool = True,
     timeout_ms: int = 45_000,
 ) -> Any:
-    cls = getattr(ccxtpro, exchange_id)
+    cls = dns_cached_class(getattr(ccxtpro, exchange_id))
     config = build_network_config(
         proxy_url=proxy_url,
         trust_env=trust_env,

@@ -80,14 +80,71 @@ def test_mark_snapshot_units() -> None:
 def test_mark_snapshot_missing_index_and_funding_are_none_not_zero() -> None:
     ws = _streams()
     now_ms = int(time.time() * 1000)
-    # index/funding parsed via `or 0` from a message that lacked them
-    ws._mark_state["BTCUSDT"] = (now_ms, 100.5, 0.0, 0.0)
+    # A message that carried neither index nor funding. Index still uses the 0.0
+    # sentinel (a $0 index price is impossible, so 0.0 is unambiguous there);
+    # funding is None, because 0.0 is a rate a venue can genuinely publish.
+    ws._mark_state["BTCUSDT"] = (now_ms, 100.5, 0.0, None)
     snap = ws.mark_snapshot("BTCUSDT")
     assert snap is not None
     assert snap["mark_live"] == 100.5
     assert snap["index_live"] is None
     assert snap["funding_live"] is None
     assert snap["basis_bps_live"] is None
+
+
+def test_mark_snapshot_real_zero_funding_survives() -> None:
+    """A genuine 0.0 funding rate is DATA and must not be laundered into None.
+
+    This is the other half of I-6 and the one the old code got wrong: it stored the
+    funding slot with `float(x or 0)` and read it back through `funding if funding != 0
+    else None`, so "absent" and "flat funding" were the same value — and a real 0.0
+    rate was reported as "no funding data".
+    """
+    ws = _streams()
+    now_ms = int(time.time() * 1000)
+    ws._mark_state["BTCUSDT"] = (now_ms, 100.5, 100.0, 0.0)
+    snap = ws.mark_snapshot("BTCUSDT")
+    assert snap is not None
+    assert snap["funding_live"] == 0.0, "flat funding is a measurement, not a gap"
+
+
+# ---------------------------------------------------------------------------
+# live_funding_cross: age gate (the REST snapshot it overlays must win when stale)
+# ---------------------------------------------------------------------------
+
+
+def test_live_funding_cross_drops_stale_venue() -> None:
+    """A stalled secondary WS must stop overlaying the fresh REST cross snapshot.
+
+    merge_ws_cross_into_snapshot lets the overlay WIN over REST, so without an age
+    gate one dead venue pins its last rate for the life of the process — across
+    funding resets — and it still reaches funding_spread / funding_consensus.
+    """
+    ws = _streams()
+    now_ms = time.time() * 1000
+    ws._live_funding_by_exchange["okx"] = {
+        "BTCUSDT": {"fundingRate": 0.0005, "ts_ms": now_ms - 3_600_000}  # 1h old
+    }
+    ws._live_funding_by_exchange["bybit"] = {
+        "BTCUSDT": {"fundingRate": 0.0002, "ts_ms": now_ms - 30_000}  # 30s old
+    }
+    out = ws.live_funding_cross("BTCUSDT")
+    assert "okx" not in out, "stale venue must not overlay REST"
+    assert out["bybit"]["fundingRate"] == 0.0002
+
+
+def test_live_funding_cross_drops_entry_without_timestamp() -> None:
+    """Unknown age is unknown, not fresh (I-6)."""
+    ws = _streams()
+    ws._live_funding_by_exchange["okx"] = {"BTCUSDT": {"fundingRate": 0.0005}}
+    assert ws.live_funding_cross("BTCUSDT") == {}
+
+
+def test_live_funding_cross_gate_can_be_disabled() -> None:
+    ws = _streams()
+    ws._live_funding_by_exchange["okx"] = {"BTCUSDT": {"fundingRate": 0.0005}}
+    out = ws.live_funding_cross("BTCUSDT", max_age_s=None)
+    assert out["okx"]["fundingRate"] == 0.0005
 
 
 def test_mark_snapshot_age_gate() -> None:
