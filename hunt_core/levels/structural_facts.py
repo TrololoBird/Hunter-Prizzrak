@@ -32,11 +32,6 @@ class VolumeProfileFacts:
     poc_15m: float | None = None
 
 
-def _sub(row: dict[str, Any], key: str) -> dict[str, Any]:
-    v = row.get(key)
-    return v if isinstance(v, dict) else {}
-
-
 def resolve_volume_profile_from_parts(
     *,
     cross_micro: dict[str, Any] | None,
@@ -78,21 +73,7 @@ def resolve_volume_profile_from_parts(
     return VolumeProfileFacts(poc=poc, vah=vah, val=val, poc_15m=poc_15m)
 
 
-def resolve_volume_profile(row: dict[str, Any]) -> VolumeProfileFacts:
-    """One canonical POC/VAH/VAL for the whole system, extracted from a row.
-
-    Both ``build_liquidity_context`` (Scanner) and ``canonical_levels`` (Deep)
-    delegate here so they can never diverge on the same level again.
-    """
-    return resolve_volume_profile_from_parts(
-        cross_micro=_sub(row, "cross_microstructure"),
-        regime=_sub(row, "regime"),
-        market=_sub(row, "market"),
-    )
-
-
 __all__ = [
     "VolumeProfileFacts",
-    "resolve_volume_profile",
     "resolve_volume_profile_from_parts",
 ]

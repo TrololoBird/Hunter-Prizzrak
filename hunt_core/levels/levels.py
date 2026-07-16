@@ -1,6 +1,11 @@
 """Structural entry / SL / TP for hunt watch (swing + fib, not naive ATR-only).
 
 Canonical hunt_core port of hunt_watch.levels + level_calibration + tp_ladder.
+
+NOTE (audit R2, G-chunk-5): ``reanchor_setup_levels`` — the sole producer of the
+``levels_viable``/``levels_veto`` delivery-time veto — currently has zero callers,
+so the veto gate is inert; wiring it in changes signal emission and is deferred
+pending the backtest gate (see /backtest-gate).
 """
 from __future__ import annotations
 
@@ -141,30 +146,6 @@ def adaptive_level_params(
         use_local_pivot_only=False,
         ),
     )
-
-
-def calibrate_from_outcomes(closed: list[dict]) -> dict[str, float]:
-    """Suggest SL_MAX_PCT from closed signals with known pnl (offline calibration)."""
-    wins = [r for r in closed if r.get("close_reason") in {"tp1", "tp2"} and r.get("pnl_pct")]
-    losses = [r for r in closed if r.get("close_reason") == "stop_hit" and r.get("pnl_pct")]
-    if not losses:
-        return {"sl_max_pct_normal": 8.0, "sl_max_pct_parabolic": 14.0}
-    loss_pnls = [abs(float(r["pnl_pct"])) for r in losses]
-    med_loss = sorted(loss_pnls)[len(loss_pnls) // 2]
-    # Nominal cap slightly above median stop loss so viable setups pass when structure is tight.
-    normal_cap = round(min(10.0, max(7.5, med_loss * 1.35)), 1)
-    para_cap = round(min(15.0, normal_cap + 4.0), 1)
-    win_avg = (
-        sum(float(r["pnl_pct"]) for r in wins) / len(wins) if wins else 0.0
-    )
-    return {
-        "sl_max_pct_normal": normal_cap,
-        "sl_max_pct_parabolic": para_cap,
-        "median_stop_loss_pct": round(med_loss, 2),
-        "avg_win_pnl": round(win_avg, 2),
-        "n_wins": len(wins),
-        "n_stops": len(losses),
-    }
 
 
 # ── levels core ───────────────────────────────────────────────────────────────
@@ -997,7 +978,7 @@ def structural_short_levels(
         entry_lo = round(entry_hi - width_cap, 6)
     worst = entry_hi  # short fills at the top of the zone in the worst case
 
-    # Dump bottom: standard fib/liquidity ladder only (no mid-leg continuation_pct).
+    # Dump bottom: standard fib/liquidity ladder.
     tp1_label = ""
     tp2_label = ""
     tp_mode = "fib"
@@ -1061,22 +1042,8 @@ def structural_short_levels(
     elif tp1 >= entry_lo:
         veto.append("tp1_inside_entry_zone")
 
-    # Post-pump 1h ATR is stale-inflated at dump bottom — use 15m + tighter SL cap.
-    cont_sl_pct = 0.0
-    if tp_mode == "continuation_pct":
-        sl_atr = atr
-        sl_tp2_cap = max(sl_tp2_cap, 0.85)
-        cont_sl_pct = 4.5 if fall_from_high_pct >= 50.0 else 5.5
-        sl_max_pct = max(sl_max_pct, cont_sl_pct + 2.0)
-
     # --- SL: local pivot anchor + TP2-proportional ceiling, measured from worst edge ---
-    if tp_mode == "continuation_pct":
-        # Stale local_res from the pump leg can sit far above live price — ignore unless near.
-        near_res = local_resistance if 0 < local_resistance <= price * 1.05 else price
-        bounce_hi = max(price, near_res, entry_hi)
-        pivot = min(bounce_hi, worst * 1.012)
-    else:
-        pivot = local_resistance if 0 < local_resistance < ih else ih
+    pivot = local_resistance if 0 < local_resistance < ih else ih
     stop = max(pivot * 1.015, entry_hi + atr * 1.1)
     stop = min(stop, entry_hi + atr * sl_max_atr)
     floor_stop = entry_hi + sl_atr * SL_MIN_ATR
@@ -1086,20 +1053,14 @@ def structural_short_levels(
         # tight SL above recent spike is tradeable; 4% blocked every valid continuation setup.
         base_min_sl = max(base_min_sl, 2.0)
     abs_floor_stop = worst * (1.0 + base_min_sl / 100.0)
-    if tp_mode == "continuation_pct":
-        abs_floor_stop = worst * (1.0 + cont_sl_pct / 100.0)
     floor_stop = max(floor_stop, abs_floor_stop)
     tp2_dist = worst - tp2
     cap_stop = worst + tp2_dist * sl_tp2_cap if tp2_dist > 0 else floor_stop
-    if tp_mode == "continuation_pct":
-        # Continuation shorts: cap SL to bounce band + TP2-proportional ceiling; no floor veto.
-        stop = round(min(max(pivot * 1.008, entry_hi + atr * 0.5), cap_stop, abs_floor_stop), 6)
-    else:
-        if floor_stop > cap_stop:
-            # The minimum breathing room already breaks the R:R mandate — zone too noisy.
-            veto.append("sl_floor_exceeds_tp2_cap")
-        effective_cap = max(cap_stop, floor_stop)
-        stop = round(min(max(stop, floor_stop), effective_cap), 6)
+    if floor_stop > cap_stop:
+        # The minimum breathing room already breaks the R:R mandate — zone too noisy.
+        veto.append("sl_floor_exceeds_tp2_cap")
+    effective_cap = max(cap_stop, floor_stop)
+    stop = round(min(max(stop, floor_stop), effective_cap), 6)
 
     rr = _contract_rr(entry_lo, entry_hi, stop, tp1, direction="short")
     # Capture-the-move R:R: gate on the deepest available target (tp2), not tp1
@@ -1108,10 +1069,8 @@ def structural_short_levels(
     rr_deep = _contract_rr(entry_lo, entry_hi, stop, tp2, direction="short")
     rr_gate = max(rr, rr_deep)
     target_rr = _phase_min_rr_short(lifecycle_phase)
-    if tp_mode == "continuation_pct":
-        target_rr = min(target_rr, 0.85)
     risk = max(0.0, stop - worst)
-    if rr_gate < target_rr and risk > 0 and tp_mode != "continuation_pct":
+    if rr_gate < target_rr and risk > 0:
         veto.append("rr_below_min")
 
     sl_dist_pct = round((stop - worst) / worst * 100.0, 2)
