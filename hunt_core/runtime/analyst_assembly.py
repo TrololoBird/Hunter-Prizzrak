@@ -392,12 +392,14 @@ async def send_analyst_change_telegram(
         sym_label = str(row.get("symbol") or "").upper().replace("USDT", "-USDT")
         _summ2 = row.get("prizrak_summary")
         summary = _summ2 if isinstance(_summ2, dict) else {}
+        # rr_primary is None whenever geometry is incomplete (orchestrator.py:653),
+        # so an unguarded f-string put a literal «R:R (от входа) None» at the top of
+        # the most action-inducing message. Drop the clause instead.
         rr = summary.get("rr_primary")
-        rr_label = "R:R (от входа)"
-        blocks.append(
-            f"✅ <b>Активация</b> · {html.escape(sym_label)} · "
-            f"{html.escape(rr_label)} <code>{rr}</code>"
-        )
+        head = f"✅ <b>Активация</b> · {html.escape(sym_label)}"
+        if isinstance(rr, (int, float)):
+            head += f" · R:R (от входа) <code>{float(rr):.2f}</code>"
+        blocks.append(head)
     from hunt_core.prizrak.build import build_deep_report as _build_deep_report
     from hunt_core.prizrak.format_telegram import format_deep_analysis_telegram as _fmt_deep
 
@@ -412,6 +414,7 @@ async def send_analyst_change_telegram(
     from hunt_core.prizrak.engines.config import load_analyst_config
     from hunt_core.prizrak.engines.delivery_policy import format_cycle_peers_footer
     from hunt_core.prizrak.engines.signal_queue import format_queue_telegram
+    from hunt_core.runtime.query_service import format_row_freshness_footer
 
     v2cfg = load_analyst_config()
     if cycle_peers:
@@ -422,6 +425,11 @@ async def send_analyst_change_telegram(
         qblock = format_queue_telegram(row.get("signal_queue"))
         if qblock:
             blocks.extend(["", qblock])
+    # As-of stamp, last line. The broadcaster buffers on circuit-open and replays
+    # later, so a pinned card can land long after it was built — without this the
+    # reader has no way to tell. (The probe path appends its own footer via
+    # format_freshness_footer and never reaches this code, so no duplication.)
+    blocks.append(format_row_freshness_footer(row, source="analyst tick"))
     result = await broadcaster.send_html("\n".join(blocks))
     if result.status == "sent":
         LOG.info("analyst_pinned_tg_sent", symbol=sym, message_id=result.message_id, plane="deep")

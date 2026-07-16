@@ -238,19 +238,22 @@ def format_query_telegram(q: QueryResult, *, added_watch: bool = False) -> str:
 
     try:
         analysis = _build_deep_report(q.row, include_watch_appendix=False)
-        parts: list[str] = [_fmt_deep(analysis)]
     except Exception:
         # Fail-loud: surface the real traceback to logs instead of swallowing it.
-        # User still gets a graceful card.
+        # User still gets a graceful card. Every section below dereferences
+        # `analysis`, so the fallback MUST return here — falling through raised
+        # NameError on exactly the path this handler exists for (no message at all).
         import structlog
 
         structlog.get_logger("hunt_core.runtime.query_service").exception(
             "report_build_failed", symbol=q.symbol, from_store=q.from_store
         )
-        parts = [
+        return (
             f"🔬 <b>Глубокий анализ — {html.escape(q.symbol)}</b>\n"
             "<i>анализ временно недоступен · /signal SYM --live для REST</i>"
-        ]
+        )
+
+    parts: list[str] = [_fmt_deep(analysis)]
 
     from hunt_core.data.universe import is_pinned_symbol
 
@@ -319,9 +322,32 @@ def format_freshness_footer(q: QueryResult) -> str:
             f"\n<i>📊 из кэша ({age_txt}{as_of_txt}) · "
             f"/signal {q.symbol.replace('USDT', '')} --live для REST</i>"
         )
-    as_of = q.row.get("as_of")
+    return format_row_freshness_footer(q.row, source=q.source)
+
+
+def format_row_freshness_footer(row: dict[str, Any], *, source: str) -> str:
+    """Source/as-of stamp for a raw analyst row (no QueryResult in hand).
+
+    Used by the pinned push path, which has no ``QueryResult``. The stamp matters
+    there because ``TelegramBroadcaster`` buffers messages while its circuit is
+    open and replays them later — without an as-of line a stale card is
+    indistinguishable from a live one.
+
+    Args:
+        row: Analyst tick row (reads ``as_of`` / ``freshness.as_of`` / ``ts``).
+        source: Short provenance tag rendered after the satellite glyph.
+
+    Returns:
+        A leading-newline ``<i>…</i>`` footer line, appended last by the caller.
+    """
+    as_of = row.get("as_of")
+    if not as_of:
+        _fresh = row.get("freshness")
+        as_of = (_fresh or {}).get("as_of") if isinstance(_fresh, dict) else None
     tail = f" · {html.escape(str(as_of)[:19].replace('T', ' '))} UTC" if as_of else ""
-    return f"\n<i>🛰 {html.escape(q.source)}{tail}</i>"
+    age = row_age_seconds(row)
+    age_txt = f" · тик {age:.0f}s назад" if age is not None else ""
+    return f"\n<i>🛰 {html.escape(source)}{tail}{age_txt}</i>"
 
 
 def spawn_background_refresh(
@@ -365,6 +391,7 @@ __all__ = [
     "build_query_result",
     "format_freshness_footer",
     "format_query_telegram",
+    "format_row_freshness_footer",
     "resolve_query_row",
     "row_age_seconds",
     "spawn_background_refresh",

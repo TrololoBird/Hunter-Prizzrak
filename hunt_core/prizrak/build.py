@@ -8,6 +8,32 @@ from hunt_core.prizrak.forecast_panel import build_structural_forecast_panel
 import html
 
 
+def _touches_ru(n: int) -> str:
+    """Render a touch count with correct Russian pluralization.
+
+    The zone renderers used a hardcoded «касаний», which is wrong for the most
+    common values — the strength note fires at touches >= 4, so «4 касаний» was
+    the usual rendering.
+
+    Args:
+        n: Touch count (non-negative).
+
+    Returns:
+        e.g. ``"1 касание"``, ``"4 касания"``, ``"11 касаний"``.
+    """
+    tail_100 = abs(n) % 100
+    tail_10 = abs(n) % 10
+    if 11 <= tail_100 <= 14:
+        word = "касаний"
+    elif tail_10 == 1:
+        word = "касание"
+    elif 2 <= tail_10 <= 4:
+        word = "касания"
+    else:
+        word = "касаний"
+    return f"{n} {word}"
+
+
 @dataclass(frozen=True, slots=True)
 class AnalystReport:
     symbol: str
@@ -194,19 +220,29 @@ class AnalystReport:
         # dict form first (survives the WAIT tick) and fall back to the string.
         _raw_struct = self.row.get("prizrak_structure")
         struct = _raw_struct if isinstance(_raw_struct, dict) else {}
+        _raw_ps = self.row.get("prizrak_summary")
+        ps = _raw_ps if isinstance(_raw_ps, dict) else {}
         _struct_htf = struct.get("htf_bias")
         if isinstance(_struct_htf, dict):
             bias = str(_struct_htf.get("bias") or "").lower()
         else:
-            _raw_ps = self.row.get("prizrak_summary")
-            ps = _raw_ps if isinstance(_raw_ps, dict) else {}
             _summary_htf = ps.get("htf_bias")
             bias = str(_summary_htf or "").lower() if isinstance(_summary_htf, str) else ""
         lines = [f"🎯 <b>Зоны интереса</b> ({tf} · лимитки/доборы, вход по факту касания)"]
-        lines.append("<i>отложенные лимит-зоны WAIT-тика — не активный сигнал</i>")
+        # The caption used to hardcode the WAIT-tick wording, but this block also
+        # renders inside every DELIVERED long/short card (analyst_assembly only
+        # pushes on action ∈ {long, short}) — so an active signal carried a line
+        # claiming it was not an active signal. Key the caption off the action.
+        action = str(ps.get("action") or "wait").strip().lower()
+        if action in {"long", "short"}:
+            lines.append(
+                "<i>отложенные лимит-зоны для доборов — отдельно от основного сетапа выше</i>"
+            )
+        else:
+            lines.append("<i>отложенные лимит-зоны WAIT-тика — не активный сигнал</i>")
 
         def _zone_line(z: dict[str, Any]) -> str:
-            t = f" ({z['touches']} касаний)" if z.get("touches") else ""
+            t = f" ({_touches_ru(int(z['touches']))})" if z.get("touches") else ""
             return f"<code>{fmt_price(z['lo'])}–{fmt_price(z['hi'])}</code>{t}"
 
         def _confluence_line(single: Any, *, side: str) -> None:
@@ -258,7 +294,7 @@ class AnalystReport:
             # (touches ARE structural strength — the author reads an 8-touch zone as
             # strong — but it was shown and never surfaced as conviction).
             touches = int(single.get("touches") or 0) if isinstance(single, dict) else 0
-            strength = f" · структурно крепкая ({touches} касаний)" if touches >= 4 else ""
+            strength = f" · структурно крепкая ({_touches_ru(touches)})" if touches >= 4 else ""
             _is_co = (bias == "short" and side == "short") or (bias == "long" and side == "long")
             # A zone AGAINST the HTF bias is a counter-trend REACTION/добор — not a
             # standalone trend signal, but a valid play the way the author works it
@@ -391,16 +427,19 @@ class AnalystReport:
             neg = [d for d in drivers if d.get("delta", 0) < -0.005]
             driver_parts = []
             if pos:
-                driver_parts.append("✓ " + ", ".join(d["name"] for d in pos[:3]))
+                driver_parts.append("✓ " + ", ".join(html.escape(str(d["name"])) for d in pos[:3]))
             if neg:
-                driver_parts.append("✗ " + ", ".join(d["name"] for d in neg[:2]))
+                driver_parts.append("✗ " + ", ".join(html.escape(str(d["name"])) for d in neg[:2]))
             if driver_parts:
                 lines.append(f"<i>драйверы: {'; '.join(driver_parts)}</i>")
 
         # Invalidation conditions.
         invalidation = summary.get("invalidation")
         if isinstance(invalidation, list) and len(invalidation) >= 1:
-            inv_conditions = [ic["condition"] for ic in invalidation[:2]]
+            # invalidation.py emits raw `>` in conditions — escape at the render
+            # site (like gates_failed above) or one bad char degrades the whole
+            # multi-part HTML message to plain text.
+            inv_conditions = [html.escape(str(ic["condition"])) for ic in invalidation[:2]]
             if inv_conditions:
                 lines.append(f"<i>отмена: {'; '.join(inv_conditions)}</i>")
 

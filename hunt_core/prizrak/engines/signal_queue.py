@@ -319,13 +319,16 @@ def format_queue_telegram(queue: dict[str, Any] | None = None) -> str:
     if not top3:
         return ""
     _ACTION_RU = {"LONG": "ЛОНГ", "SHORT": "ШОРТ", "WAIT": "ЖДЁМ"}
+    # Keys are UPPERCASE because the lookup upper()s the raw value. They used to be
+    # mixed-case, so every lowercase phase key (pre_pump/accumulation/dump_active/…)
+    # was unreachable and the raw English enum leaked into the footer.
     _LIFE_RU = {
         "WAITING": "ожидание", "ACTIVE": "активен", "WATCHING": "наблюдение",
-        "pre_pump": "накопление", "pre_dump": "распределение",
-        "mid": "в движении", "neutral": "нейтрально",
-        "accumulation": "накопление", "distribution": "распределение",
-        "exhaustion_at_high": "истощение", "breakout_arming": "подготовка пробоя",
-        "recovery": "восстановление", "dump_active": "дамп",
+        "PRE_PUMP": "накопление", "PRE_DUMP": "распределение",
+        "MID": "в движении", "NEUTRAL": "нейтрально",
+        "ACCUMULATION": "накопление", "DISTRIBUTION": "распределение",
+        "EXHAUSTION_AT_HIGH": "истощение", "BREAKOUT_ARMING": "подготовка пробоя",
+        "RECOVERY": "восстановление", "DUMP_ACTIVE": "дамп",
     }
     _ACT_RU = {
         "in_entry_zone": "в зоне",
@@ -347,8 +350,8 @@ def format_queue_telegram(queue: dict[str, Any] | None = None) -> str:
         sym = html.escape(str(item.get("symbol") or "").replace("USDT", "-USDT"))
         action_raw = str(item.get("action") or "wait").upper()
         action_ru = _ACTION_RU.get(action_raw, action_raw)
-        life_raw = str(item.get("lifecycle") or "waiting").upper()
-        life_ru = _LIFE_RU.get(life_raw, life_raw.lower())
+        life_raw = str(item.get("lifecycle") or "waiting").strip()
+        life_ru = _LIFE_RU.get(life_raw.upper(), life_raw.replace("_", " ").lower())
         score = float(item.get("opportunity_score") or 0)
         path = html.escape(str(item.get("path") or "").replace("_", " "))
         act = str(item.get("activation") or "idle")

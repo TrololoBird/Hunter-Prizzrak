@@ -122,9 +122,21 @@ def format_followup_telegram(followup: Any, row: dict[str, Any]) -> str:
         duration = _duration_str(opened_raw)
         skipped = bool(payload.get("tp1_skipped"))
         extra = " (TP1 пролёт)" if skipped else ""
+        # Used to print the TP2 PRICE under a «PnL» label and never compute a PnL
+        # at all. Mirror the TP1 branch: real percent, price kept as the exit ref.
+        pnl_line = _format_pnl_pct(payload.get("pnl_pct"))
+        if not pnl_line:
+            est = _pnl_pct_from_prices(
+                direction=direction,
+                entry_lo=entry_lo,
+                entry_hi=entry_hi,
+                exit_price=payload.get("tp2"),
+            )
+            pnl_line = _format_pnl_pct(est)
+        pnl_meta = f"{pnl_line} · " if pnl_line else ""
         return (
             f"📋 <b>Закрыт {sym} {direction}{extra}</b>\n"
-            f"💰 PnL: TP2 <code>{tp2_lvl}</code> · Длит: {duration}\n"
+            f"{pnl_meta}Выход: TP2 <code>{tp2_lvl}</code> · Длит: {duration}\n"
             f"📌 Причина: Достигнут TP2\n"
             f"{entry_ref}\n"
             f"<i>Hunt follow-up · не auto-trade</i>"
