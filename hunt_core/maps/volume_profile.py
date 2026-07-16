@@ -108,7 +108,14 @@ def _volume_histogram(
         )
         .drop_nulls(["hi", "lo"])
         .filter(pl.col("vol") > 0)
-        .with_columns(_bucket("lo").alias("b_lo"), _bucket("hi").alias("b_hi"))
+        # Guard hi<lo (corrupt bar): the pre-rewrite loop (and features/volume_profile)
+        # bucket min/max horizontally; without it b_lo>b_hi divides by zero-or-negative
+        # bucket spans and smears volume into wrong buckets.
+        .with_columns(
+            pl.min_horizontal("lo", "hi").alias("p_lo"),
+            pl.max_horizontal("lo", "hi").alias("p_hi"),
+        )
+        .with_columns(_bucket("p_lo").alias("b_lo"), _bucket("p_hi").alias("b_hi"))
         .with_columns((pl.col("vol") / (pl.col("b_hi") - pl.col("b_lo") + 1)).alias("share"))
         .with_columns(pl.int_ranges(pl.col("b_lo"), pl.col("b_hi") + 1).alias("b"))
         .explode("b")
@@ -131,7 +138,10 @@ def _hvn_lvn_nodes(
 ) -> tuple[list[VolumeNode], list[VolumeNode]]:
     if not hist:
         return [], []
-    sorted_bins = sorted(hist.items(), key=lambda kv: kv[1], reverse=True)
+    # Secondary key on the bucket index: `hist` arrives in group_by hash order, so ties
+    # (equal-split shares of one bar are IDENTICAL floats) picked different top-N nodes
+    # between runs. Deterministic: volume desc, then lower bucket.
+    sorted_bins = sorted(hist.items(), key=lambda kv: (-kv[1], kv[0]))
     avg = sum(hist.values()) / len(hist)
     hvn = [
         VolumeNode(
@@ -148,7 +158,7 @@ def _hvn_lvn_nodes(
             volume=round(v, 2),
             node_type="lvn",
         )
-        for b, v in sorted(hist.items(), key=lambda kv: kv[1])[:top_n]
+        for b, v in sorted(hist.items(), key=lambda kv: (kv[1], kv[0]))[:top_n]
         if v < avg * lvn_ratio and v > 0
     ]
     return hvn, lvn

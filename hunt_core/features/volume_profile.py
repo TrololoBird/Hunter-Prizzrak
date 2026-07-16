@@ -48,7 +48,10 @@ def volume_profile_levels(
 
     price_min = _as_optional_float(tail["low"].cast(pl.Float64, strict=False).min())
     price_max = _as_optional_float(tail["high"].cast(pl.Float64, strict=False).max())
-    if price_min is None or price_max is None or price_max <= price_min:
+    if price_min is None or price_max is None or price_max < price_min:
+        return None, None, None
+    if price_max == price_min:
+        # Degenerate flat window: all volume at one price — POC/VAH/VAL collapse to it.
         return price_max, price_max, price_min
 
     bucket_count = max(1, int(buckets))
@@ -66,7 +69,9 @@ def volume_profile_levels(
         & (pl.col("lo") > 0)
     )
     if bars.is_empty():
-        return price_min, price_max, price_min
+        # No traded volume in the window — a POC fabricated at the range low is not a
+        # level anyone traded. Canonical VP is undefined without volume.
+        return None, None, None
 
     hist = (
         bars.with_columns(
@@ -104,14 +109,22 @@ def volume_profile_levels(
         .agg(pl.col("share").sum().alias("v"))
     )
     if hist.is_empty():
-        return price_min, price_max, price_min
+        return None, None, None
 
     total_volume = float(hist["v"].sum())
     if total_volume <= 0.0:
-        return price_min, price_max, price_min
+        return None, None, None
 
-    vol_by_bucket = dict(zip(hist["b"].to_list(), hist["v"].to_list(), strict=False))
-    poc_bucket = int(hist.sort("v", descending=True).head(1)["b"].item())
+    vol_by_bucket = dict(zip(hist["b"].to_list(), hist["v"].to_list(), strict=True))
+    # POC = max-volume bucket. Exact ties are COMMON here (one dominating bar equal-split
+    # across N buckets produces N identical values) and `sort().head(1)` resolved them by
+    # group_by hash order — the POC of the same bars flipped between runs. Canonical
+    # Market Profile tie rule: of the tied buckets, take the one closest to the centre of
+    # the range (lower bucket on a residual tie), deterministically.
+    max_v = max(vol_by_bucket.values())
+    tied = [b for b, v in vol_by_bucket.items() if v == max_v]
+    center = (bucket_count - 1) / 2.0
+    poc_bucket = min(tied, key=lambda b: (abs(b - center), b))
     poc = float(price_min + (poc_bucket + 0.5) * bucket_size)
 
     target_volume = total_volume * max(0.5, min(value_area_pct, 0.95))
