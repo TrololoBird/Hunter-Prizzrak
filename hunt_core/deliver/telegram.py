@@ -28,6 +28,10 @@ try:
     from aiogram.client.session.aiohttp import AiohttpSession
     from aiogram.types import BufferedInputFile
 
+    # One source of truth for the DNS cache TTL — the CCXT plane and the Telegram
+    # plane must not drift apart on the same setting.
+    from hunt_core.market.factory import _DNS_CACHE_TTL_S
+
     try:
         from aiogram.exceptions import TelegramAPIError as _AiogramAPIError
         from aiogram.exceptions import TelegramRetryAfter as _TelegramRetryAfter
@@ -173,6 +177,45 @@ def _telegram_retry() -> Callable[[Callable[P, Awaitable[R]]], Callable[P, Await
     return _simple_retry(3, (Exception,))
 
 
+if _HAS_AIogram:
+
+    class _DnsCachedAiohttpSession(AiohttpSession):  # type: ignore[misc]
+        """aiogram session with the same DNS discipline as the CCXT plane.
+
+        aiogram builds its OWN aiohttp connector, so the fix in market/factory.py did not
+        reach it. With aiodns installed aiohttp resolves through c-ares, which reads
+        /etc/resolv.conf and queries those nameservers itself rather than going through
+        the OS resolver — so it honours neither VPN split-DNS scoping nor the system
+        fallbacks. Live 2026-07-16 that surfaced as «telegram send failed … Could not
+        contact DNS servers» while getaddrinfo resolved the very same host fine from a
+        shell on that machine. A signal computed correctly and then lost on delivery.
+        ThreadedResolver is getaddrinfo, so it inherits the OS's view of DNS.
+
+        setdefault, not assignment, on both keys:
+
+        * ttl_dns_cache — aiogram already sets 3600 on the direct path (its own issue
+          #1500 workaround). That is better than our floor and must not be clobbered.
+          On the PROXY path, though, _setup_proxy_connector replaces _connector_init
+          wholesale with the proxy's host/port/credentials and drops aiogram's 3600 with
+          it, so there our floor is what stands between us and aiohttp's 10s default.
+        * resolver — never set by aiogram on either path; setdefault only so an explicit
+          caller override keeps winning.
+
+        The resolver is built HERE, not in __init__, because aiohttp.ThreadedResolver()
+        requires a running event loop at construction time and TelegramBroadcaster.__init__
+        is synchronous — constructing it there raises RuntimeError('no running event loop')
+        and takes the whole broadcaster down at startup. create_session() is async, so the
+        loop exists by the time this runs. (The CCXT mixin gets away with building it
+        inline only because its own hook, open(), is already async.)
+        """
+
+        async def create_session(self) -> Any:
+            if self._session is None or self._session.closed:
+                self._connector_init.setdefault("ttl_dns_cache", _DNS_CACHE_TTL_S)
+                self._connector_init.setdefault("resolver", aiohttp.ThreadedResolver())
+            return await super().create_session()
+
+
 class MessageBroadcaster(Protocol):
     async def preflight_check(self) -> None: ...
     async def send_html(
@@ -237,7 +280,14 @@ class TelegramBroadcaster:
 
         self.token = token
         self.target_chat_id = target_chat_id
-        session = AiohttpSession(proxy=proxy_url)
+        # aiogram builds its own aiohttp connector, so the market/factory.py DNS fix left
+        # this path uncovered: with aiodns installed aiohttp resolves via c-ares, which
+        # queries /etc/resolv.conf itself instead of going through the OS resolver — and
+        # so honours neither VPN split-DNS scoping nor the system fallbacks. Live, that
+        # surfaced as «telegram send failed … ClientConnectorDNSError … Could not contact
+        # DNS servers» while getaddrinfo resolved api.telegram.org fine on the same
+        # machine: a signal computed correctly and then lost on delivery.
+        session = _DnsCachedAiohttpSession(proxy=proxy_url)
         self.bot = Bot(token=token, session=session)
         self._send_lock = asyncio.Lock()
         self._failure_count = 0
