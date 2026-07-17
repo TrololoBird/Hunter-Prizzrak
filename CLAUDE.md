@@ -97,15 +97,15 @@ Stale, do not align to:
   both wrong (prizrak's dominance/marketcap доп-факторы DO use CoinGecko, OFF by default);
   it also cites `prizrak/pipeline/macro_data.py`, which does not exist.
 
-NOT stale, despite an earlier claim here: `.cursor/rules/000-hunt.mdc` contains neither
-"pip install" nor "CoinGecko" — it was tarred with README's sins. Treat it and
-`.github/copilot-instructions.md` as broadly accurate (the latter is CI-checked for drift by
-`scripts/check_prohibited_apis.py`), with two verified exceptions, so do not import them
-wholesale:
-- «`deliver/` has zero business logic — formatting only» is **false**:
-  `deliver/manipulation_delivery.py` owns `_geometry`/`_stop_buffer` — the production
-  entry/stop/target geometry the backtests import.
-- «Ruff ignores E402, E741, **F811, F821**» — only `E402, E741` are ignored (pyproject).
+## Agent instruction files — только два
+`CLAUDE.md` (Claude Code) и `AGENTS.md` (opencode). Больше на этом репозитории никто не
+работает. Оба ссылаются на канон `docs/ai/rules/prohibited-apis.md`, а не дублируют его.
+
+Удалено 2026-07-17: `.cursor/rules/` и `.github/copilot-instructions.md` + CI-гард дрейфа,
+который держал copilot-копию бан-листа в синхроне. Copilot не ходит по ссылкам — поэтому
+ему нужен был инлайн-дубль, и этот дубль надо было сопровождать. Читателя у него не было.
+**Не воскрешать**: правила для агента, который тут не работает, — это те же устаревшие
+артефакты, что и SPEC_v5.1, только они выглядят живыми, потому что их чинит CI.
 
 ## Config
 `config.defaults.toml` = truth; `config.toml` overlays. Trap: some documented keys are

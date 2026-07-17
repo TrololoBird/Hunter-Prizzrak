@@ -6,13 +6,16 @@ place orders or touch account state. ``ruff``'s ``banned-api`` (TID251) catches 
 *imports* but not *attribute calls* like ``ex.createOrder(...)``, so this scan closes
 that gap with a plain source grep (no third-party dependency).
 
-It also guards against instruction drift: ``.github/copilot-instructions.md`` carries an
-inline copy of the ban list (Copilot does not follow links), so this script verifies that
-copy still mentions every prohibited method in the canon.
+This script also used to run a drift guard, asserting that ``.github/copilot-instructions.md``
+still carried an inline copy of the ban list (Copilot does not follow links). Both that file
+and the guard were removed 2026-07-17: only Claude and opencode work on this repo, so the
+guard kept a file fresh for a tool nobody runs — upkeep with no reader. The live mirrors are
+``CLAUDE.md`` and ``AGENTS.md``; they follow links, so they cite this canon rather than
+duplicate it, and there is nothing left to drift.
 
 Canon: docs/ai/rules/prohibited-apis.md.
 Run:  uv run python scripts/check_prohibited_apis.py
-Exit: 0 = clean, 1 = a prohibited call was found or copilot-instructions drifted.
+Exit: 0 = clean, 1 = a prohibited call was found.
 """
 from __future__ import annotations
 
@@ -38,7 +41,6 @@ PROHIBITED_METHODS = (
 
 _ROOT = pathlib.Path(__file__).resolve().parent.parent
 _SCAN_DIR = _ROOT / "hunt_core"
-_COPILOT = _ROOT / ".github" / "copilot-instructions.md"
 # Match a method *call* on some object: ``.createOrder(`` — not a substring in a word.
 _PATTERN = re.compile(r"\.(" + "|".join(PROHIBITED_METHODS) + r")\s*\(")
 
@@ -54,21 +56,8 @@ def _scan_code() -> list[str]:
     return violations
 
 
-def _check_copilot_drift() -> list[str]:
-    """Every canon method must still appear inline in copilot-instructions.md."""
-    if not _COPILOT.exists():
-        return [f"{_COPILOT.relative_to(_ROOT)}: file missing"]
-    text = _COPILOT.read_text(encoding="utf-8")
-    return [
-        f"{_COPILOT.relative_to(_ROOT)}: missing prohibited method '{m}'"
-        for m in PROHIBITED_METHODS
-        if m not in text
-    ]
-
-
 def main() -> int:
     code_violations = _scan_code()
-    drift = _check_copilot_drift()
     if code_violations:
         print("Prohibited private CCXT method calls found:\n", file=sys.stderr)
         for v in code_violations:
@@ -77,17 +66,8 @@ def main() -> int:
             "\nHunt reads public market data only — see docs/ai/rules/prohibited-apis.md.",
             file=sys.stderr,
         )
-    if drift:
-        print("\ncopilot-instructions.md drifted from the canon ban list:\n", file=sys.stderr)
-        for d in drift:
-            print(f"  {d}", file=sys.stderr)
-        print(
-            "\nRe-sync .github/copilot-instructions.md with docs/ai/rules/prohibited-apis.md.",
-            file=sys.stderr,
-        )
-    if code_violations or drift:
         return 1
-    print(f"OK — no prohibited CCXT calls in {_SCAN_DIR.relative_to(_ROOT)}/; copilot list in sync")
+    print(f"OK — no prohibited CCXT calls in {_SCAN_DIR.relative_to(_ROOT)}/")
     return 0
 
 

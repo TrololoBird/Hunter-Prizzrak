@@ -16,7 +16,7 @@ repos:
         pass_filenames: false
         types: [python]
       - id: prohibited-apis
-        name: prohibited CCXT API + copilot-instructions drift
+        name: prohibited private CCXT API calls
         entry: uv run python scripts/check_prohibited_apis.py
         language: system
         pass_filenames: false

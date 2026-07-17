@@ -26,7 +26,7 @@ jobs:
       - name: Vulture (dead-code guard, conf 80 + whitelist)
         run: vulture
 
-      - name: Prohibited CCXT API scan + copilot-instructions drift guard
+      - name: Prohibited private CCXT API call scan
         run: python scripts/check_prohibited_apis.py
 
       - name: mypy (blocking — backlog cleared, 0 issues)
