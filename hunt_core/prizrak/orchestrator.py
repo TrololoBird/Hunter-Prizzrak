@@ -182,11 +182,22 @@ def compute_interest_zones(
     cfg: PrizrakConfig,
     tf: str = "4h",
 ) -> dict[str, Any]:
-    """Nearest actionable accumulation zones for PENDING limit orders, so a WAIT tick
-    still shows where to act — support box below → 🟢 long interest, resistance box
-    above → 🔴 short interest. This is the trader's «локальные трейды: уровни 4ч ТФ»
-    (e.g. LINK long 7.25–7.38 / short 7.85–8.00): limits sit at these zones while price
-    is between them. Reuses find_accumulation_zones; falls back 4h→1h→1d.
+    """Nearest actionable accumulation zones, so a WAIT tick still shows where to act —
+    support box below → 🟢 long interest, resistance box above → 🔴 short interest. This
+    is the trader's «локальные трейды: уровни 4ч ТФ» (e.g. LINK long 7.25–7.38 / short
+    7.85–8.00). Reuses find_accumulation_zones; falls back 4h→1h→1d.
+
+    Each zone (and each ladder rung) carries the course's own verdict on whether it may
+    be worked WITH LIMITS at all:
+
+    * ``worked`` — prior good reactions off the entry edge (стр.25/31). ≥1 ⇒ the level is
+      weaker and limits are off; entry only «по факту слома структуры на более мелких ТФ».
+    * ``saw`` — «пила» НА уровне (стр.28 сц.7) ⇒ wait for price to leave the saw.
+    * ``limit_ok`` — the conjunction: safe to state «вход по факту касания».
+
+    Callers MUST honour ``limit_ok`` before describing a zone as a limit/добор — the card
+    is the reason this exists, having advertised limits on exactly the levels стр.31
+    forbids them on.
     """
     lookback_map = _tf_lookback_map(cfg)
     for use_tf in (tf, "1h", "1d"):
@@ -212,14 +223,22 @@ def compute_interest_zones(
             return narrow or (sorted(side, key=lambda z: float(z.get("width_pct") or 0))[:1] if side else [])
         below = _tight([z for z in zones if z.get("hi", 0) < price])
         above = _tight([z for z in zones if z.get("lo", 0) > price])
-        # Pick the STRONGEST accumulation box by STRUCTURAL SIGNIFICANCE first (course
-        # стр.22: сила уровня = ТФ + объём + история/касания), volume as the reinforcing
-        # factor, nearest as final tie-break. The live Prizrak channel selects the KEY
-        # (most-touched) level, not the highest single-bar volume: verified head-to-head on
-        # 6 instruments — e.g. XRP author's 1.0484 sits in our 5-touch zone while pure
-        # volume ranking surfaced a nearer 4-touch box; ATOM author's 1.98 = our 9-touch
-        # box that volume ranking passed over for a 7-touch. So touches-primary matches the
-        # method's own selection; volume still breaks ties (honours «ТФ + объём»).
+        # Pick the STRONGEST accumulation box by touches first, volume as the reinforcing
+        # factor, nearest as final tie-break.
+        #
+        # SOURCE, precisely — because this deviates from the PDF and the previous comment
+        # here mis-cited it. PDF стр.22 says only «Сила уровня определяется ТФ и объемом»,
+        # and gives the opposite steer: a small 1h наторговка with more volume than a 4ч-1д
+        # base is the one to take. «история/касания» is NOT in стр.22 — it comes from the
+        # author's LIVE разборы (research/prizrak_corpus/prizrak_pol_matic.razbor.md), where
+        # he ranks «ТФ + объём (VRVP) + история/касания». That corpus also carries the
+        # head-to-head: XRP author's 1.0484 = our 5-touch zone while pure volume ranking
+        # surfaced a nearer 4-touch box; ATOM author's 1.98 = our 9-touch box volume ranking
+        # passed over. Touches-primary reproduces HIS selection, so it stays — but as a
+        # corpus-backed deviation from стр.22, not as стр.22 itself. Note the touches here
+        # are BOUNDARY PIVOTS (hi.touches + lo.touches) — the стр.22 «4+ точек границ»
+        # census of whether a base exists — NOT tests of the level after it formed. Those
+        # are what стр.25/31 kill a level for, and they are counted separately below.
         def _zone_rank(z: dict[str, Any], *, nearer: float) -> tuple[int, float, float]:
             return (int(z.get("touches") or 0), float(z.get("zone_volume") or 0), nearer)
         long_zone = max(below, key=lambda z: _zone_rank(z, nearer=z["hi"])) if below else None
@@ -232,7 +251,29 @@ def compute_interest_zones(
         # zone missed the rest. Return the nearest-first ladder (top-3 structural boxes per
         # side) so limits sit across the whole зона; ``long``/``short`` stay the strongest
         # for backward-compatible consumers.
-        def _ladder(zones_side: list[dict[str, Any]], *, nearer: Any) -> list[dict[str, Any]]:
+        # Курс стр.31 (текст + подпись на графике) и стр.25: «если цена ранее забирала зону
+        # и уже получила от нее хорошую реакцию — уровень ЛИМИТНЫМИ ОРДЕРАМИ больше не
+        # торгуем, т.к. уровень стал слабее… Позицию от уровня смотрим только по факту слома
+        # структуры на более мелких ТФ». Плюс стр.28 сц.7: «пила» НА уровне — ждём выхода.
+        #
+        # The signal path (_zone_candidate) has honoured both for a while — it hard-blocks on
+        # detect_level_saw and _level_already_worked. This card path never did, so the deep
+        # card kept advertising «лимитки/доборы, вход по факту касания» on levels the course
+        # says are exactly the ones NOT to put limits on — the more worked a level, the more
+        # the touches-primary rank above promoted it. Here we ANNOTATE instead of dropping:
+        # стр.31 keeps watching the level («смотрим только по факту слома»), it just forbids
+        # the limit. Hiding it would lose a level the trader still needs to see.
+        def _entry_edge(z: dict[str, Any], *, side: str) -> float:
+            # The edge price tests first: long → the box top, short → the box bottom.
+            return float(z["hi"] if side == "long" else z["lo"])
+
+        def _course_flags(z: dict[str, Any], *, side: str) -> dict[str, Any]:
+            edge = _entry_edge(z, side=side)
+            worked = _level_already_worked(bars, level=edge, direction=side)
+            saw = detect_level_saw(bars, level=edge)
+            return {"worked": worked, "saw": saw, "limit_ok": worked < 1 and not saw}
+
+        def _ladder(zones_side: list[dict[str, Any]], *, nearer: Any, side: str) -> list[dict[str, Any]]:
             ranked = sorted(zones_side, key=lambda z: _zone_rank(z, nearer=nearer(z)), reverse=True)[:3]
             # Nearest-to-price first — but "nearest" is side-dependent. Sorting by
             # z["hi"] desc is only right for LONG rungs (below price → highest hi is
@@ -240,7 +281,8 @@ def compute_interest_zones(
             # (Д1=farthest). Sort by the side-aware `nearer` function already passed
             # (higher = nearer on both sides), so Д1 is always the nearest limit.
             ranked.sort(key=lambda z: nearer(z), reverse=True)
-            return [{"lo": float(z["lo"]), "hi": float(z["hi"]), "touches": int(z.get("touches") or 0)}
+            return [{"lo": float(z["lo"]), "hi": float(z["hi"]), "touches": int(z.get("touches") or 0),
+                     **_course_flags(z, side=side)}
                     for z in ranked]
 
         # Ориентиры per side (course стр.19: «СТОП прятать с запасом за структуру»):
@@ -251,22 +293,24 @@ def compute_interest_zones(
         buffer_pct = float(getattr(cfg, "stop_buffer_pct", 0.02) or 0.02)
         out: dict[str, Any] = {"tf": use_tf}
         if long_zone:
-            long_ladder = _ladder(below, nearer=lambda z: z["hi"])
+            long_ladder = _ladder(below, nearer=lambda z: z["hi"], side="long")
             deepest_lo = min(z["lo"] for z in long_ladder)
             out["long"] = {"lo": float(long_zone["lo"]), "hi": float(long_zone["hi"]),
                            "touches": int(long_zone.get("touches") or 0),
-                           "invalidation": deepest_lo * (1.0 - buffer_pct)}
+                           "invalidation": deepest_lo * (1.0 - buffer_pct),
+                           **_course_flags(long_zone, side="long")}
             targets_up = [float(z["lo"]) for z in zones
                           if float(z.get("lo") or 0) > float(long_zone["hi"])]
             if targets_up:
                 out["long"]["first_target"] = min(targets_up)
             out["long_ladder"] = long_ladder
         if short_zone:
-            short_ladder = _ladder(above, nearer=lambda z: -z["lo"])
+            short_ladder = _ladder(above, nearer=lambda z: -z["lo"], side="short")
             highest_hi = max(z["hi"] for z in short_ladder)
             out["short"] = {"lo": float(short_zone["lo"]), "hi": float(short_zone["hi"]),
                             "touches": int(short_zone.get("touches") or 0),
-                            "invalidation": highest_hi * (1.0 + buffer_pct)}
+                            "invalidation": highest_hi * (1.0 + buffer_pct),
+                            **_course_flags(short_zone, side="short")}
             targets_down = [float(z["hi"]) for z in zones
                             if 0 < float(z.get("hi") or 0) < float(short_zone["lo"])]
             if targets_down:

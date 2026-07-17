@@ -44,7 +44,7 @@ def test_nearest_zone_picks_the_closer_side() -> None:
     """Short edge 64549.8 is ~1.0% away; long edge 62743.7 is ~1.8%. Short wins."""
     got = _nearest_zone(_row(), _PRICE)
     assert got is not None
-    side, edge, dist = got
+    side, edge, dist, _limit_ok = got
     assert side == "short"
     assert edge == 64549.8
     assert 1.0 <= dist <= 1.1
@@ -53,9 +53,71 @@ def test_nearest_zone_picks_the_closer_side() -> None:
 def test_price_inside_a_zone_reports_zero_distance() -> None:
     got = _nearest_zone(_row(), 62500.0)
     assert got is not None
-    side, _edge, dist = got
+    side, _edge, dist, _limit_ok = got
     assert side == "long"
     assert dist == 0.0
+
+
+def test_nearest_zone_treats_an_unknown_verdict_as_no_limit() -> None:
+    """I-6: a zone whose producer never ruled on limit_ok is not a licence to limit.
+
+    The gate lives in compute_interest_zones; any other producer (an old cached row, a
+    test fixture, a future caller) yields zones without the flag. Defaulting those to
+    "limit is fine" would reintroduce стр.31 through the back door on exactly the rows
+    we know least about.
+    """
+    got = _nearest_zone(_row(), _PRICE)  # fixture zones carry no limit_ok
+    assert got is not None
+    assert got[3] == "unknown"
+
+
+def test_a_sawn_level_gets_the_saw_remedy_not_the_worked_one() -> None:
+    """стр.28 сц.7 and стр.31 forbid the limit for DIFFERENT reasons, so they prescribe
+    different next steps: a sawn level is waited out, a worked one needs слом on МТФ.
+    Collapsing them to one bool printed «только по слому МТФ» over a пила."""
+    row = _row(
+        prizrak_interest_zones={
+            "tf": "1h",
+            "short": {"lo": 64549.8, "hi": 65037.8, "touches": 8, "worked": 0,
+                      "saw": True, "limit_ok": False},
+        }
+    )
+    out = _briefing_text(_Report(row), _PRICE)
+    assert out is not None
+    assert "пила" in out
+    assert "слому МТФ" not in out, "wrong remedy — that is the стр.31 rule, not стр.28"
+
+
+def test_wait_briefing_does_not_advertise_limits_on_a_worked_level() -> None:
+    """стр.31: «уровень лимитными ордерами больше не торгуем… только по факту слома».
+
+    The WAIT headline hardcoded «работают лимит-зоны», so the card advertised limits on
+    every level including the ones the course takes limits off — and the touches-primary
+    ranking means the zone shown is the MOST worked one available.
+    """
+    row = _row(
+        prizrak_interest_zones={
+            "tf": "1h",
+            "short": {"lo": 64549.8, "hi": 65037.8, "touches": 11, "worked": 2, "limit_ok": False},
+        }
+    )
+    out = _briefing_text(_Report(row), _PRICE)
+    assert out is not None
+    assert "работают лимит-зоны" not in out
+    assert "лимит НЕ ставим" in out
+
+
+def test_wait_briefing_still_advertises_limits_on_a_clean_level() -> None:
+    """The gate must not swallow the honest case — an untested base IS a limit zone."""
+    row = _row(
+        prizrak_interest_zones={
+            "tf": "1h",
+            "short": {"lo": 64549.8, "hi": 65037.8, "touches": 5, "worked": 0, "limit_ok": True},
+        }
+    )
+    out = _briefing_text(_Report(row), _PRICE)
+    assert out is not None
+    assert "работают лимит-зоны" in out
 
 
 def test_briefing_states_wait_regime_and_distance() -> None:
@@ -80,7 +142,9 @@ def test_briefing_leads_with_the_action_when_a_setup_is_live() -> None:
 def test_briefing_says_price_is_in_the_zone() -> None:
     out = _briefing_text(_Report(_row()), 62500.0)
     assert out is not None
-    assert "цена В ЛОНГ-ЗОНА" in out or "цена В" in out
+    # Prepositional case: «в зонЕ». The old assertion accepted «цена В ЛОНГ-ЗОНА» — and
+    # its `or "цена В" in out` escape hatch would have passed on any wording at all.
+    assert "цена В ЛОНГ-ЗОНЕ" in out
 
 
 def test_distribution_regime_is_named_distinctly() -> None:

@@ -62,12 +62,35 @@ def format_analyst_telegram(analysis: AnalystReport) -> str:
 _ACTION_RU = {"long": "🟢 ЛОНГ", "short": "🔴 ШОРТ"}
 
 
-def _nearest_zone(row: dict[str, Any], price: float) -> tuple[str, float, float] | None:
-    """(side, near_edge, distance_pct) for whichever interest zone price is closest to."""
+def _limit_block(zone: dict[str, Any]) -> str:
+    """Why the course takes the limit off this zone — "" when it does not.
+
+    The two reasons carry DIFFERENT remedies and must not be collapsed: стр.31 sends a
+    worked level to «слом структуры на МТФ», while стр.28 сц.7 says a sawn level is simply
+    waited out. Returning a bare bool made the briefing print the стр.31 remedy over a
+    пила, i.e. confidently the wrong instruction.
+    """
+    if zone.get("saw"):
+        return "saw"
+    worked = zone.get("worked")
+    if isinstance(worked, int) and worked >= 1:
+        return "worked"
+    # Unknown verdict ⇒ not a licence (invariant I-6), but we cannot name a reason either.
+    return "" if zone.get("limit_ok") is True else "unknown"
+
+
+def _nearest_zone(row: dict[str, Any], price: float) -> tuple[str, float, float, str] | None:
+    """(side, near_edge, distance_pct, limit_block) for the interest zone price is nearest.
+
+    ``limit_block`` is the course's per-zone ruling (see :func:`_limit_block` and
+    orchestrator.compute_interest_zones): "" means limits are on; anything else names why
+    they are off. A blocked zone is still worth WATCHING — стр.31 keeps looking at the
+    level — it just must not be sold as a limit.
+    """
     iz = row.get("prizrak_interest_zones")
     if not isinstance(iz, dict) or price <= 0:
         return None
-    best: tuple[str, float, float] | None = None
+    best: tuple[str, float, float, str] | None = None
     for side in ("long", "short"):
         z = iz.get(side)
         if not isinstance(z, dict):
@@ -87,7 +110,7 @@ def _nearest_zone(row: dict[str, Any], price: float) -> tuple[str, float, float]
             edge = hi_f if price > hi_f else lo_f
             dist = abs(price / edge - 1.0) * 100.0
         if best is None or dist < best[2]:
-            best = (side, edge, dist)
+            best = (side, edge, dist, _limit_block(z))
     return best
 
 
@@ -111,13 +134,20 @@ def _briefing_text(analysis: AnalystReport, price: float) -> str | None:
     regime = str(htf.get("regime") or "")
     bias = str(htf.get("bias") or "").lower()
 
+    near = _nearest_zone(row, price)
+
     lines: list[str] = []
     if action in ("long", "short"):
         lines.append(f"<b>{_ACTION_RU[action]}</b> — сетап активен, детали ниже")
-    else:
+    elif near is not None and not near[3]:
         # WAIT is the common case and it is NOT nothing: it means limits are placed and
         # the card exists to say where. Say that, rather than leaving "WAIT" implied.
         lines.append("<b>⏸ ЖДЁМ</b> — активного сигнала нет, работают лимит-зоны")
+    else:
+        # …but only when a limit is actually on. стр.31 takes limits OFF a level that has
+        # already reacted, and that is the majority case for a well-worked level, so the
+        # blanket «работают лимит-зоны» was advertising the one thing the course forbids.
+        lines.append("<b>⏸ ЖДЁМ</b> — активного сигнала нет, лимиты не выставляем")
 
     if regime == "accumulation":
         lines.append("режим: <b>накопление</b> (4h вверх против 1w/1d вниз) — шорт против набора")
@@ -152,14 +182,27 @@ def _briefing_text(analysis: AnalystReport, price: float) -> str | None:
                 )
         return "\n".join(lines) if lines else None
 
-    near = _nearest_zone(row, price)
     if near is not None:
-        side, edge, dist = near
+        side, edge, dist, block = near
         side_ru = "лонг-зона" if side == "long" else "шорт-зона"
+        # Prepositional case — «в зонЕ», not «в зонА». Upper-casing the nominative
+        # rendered «цена В ЛОНГ-ЗОНА».
+        side_ru_in = "ЛОНГ-ЗОНЕ" if side == "long" else "ШОРТ-ЗОНЕ"
+        # Each block carries its OWN remedy — see _limit_block. "" ⇒ the limit is live.
+        tail = {
+            "": " — вход по факту касания",
+            "worked": " — но лимит НЕ ставим: уровень отработан, только по слому МТФ",
+            "saw": " — но лимит НЕ ставим: пила на уровне, ждём выхода",
+            "unknown": " — но лимит НЕ ставим",
+        }[block]
         if dist == 0.0:
-            lines.append(f"<b>цена В {side_ru.upper()}</b> — вход по факту касания")
+            lines.append(f"<b>цена В {side_ru_in}</b>{tail}")
         else:
-            lines.append(f"ближайшая {side_ru}: <code>{fmt_price(edge)}</code> — {dist:.1f}% от цены")
+            # Away from the zone the entry wording is premature; only the block matters.
+            away = "" if not block else tail.replace(" — но лимит", " · лимит")
+            lines.append(
+                f"ближайшая {side_ru}: <code>{fmt_price(edge)}</code> — {dist:.1f}% от цены{away}"
+            )
     return "\n".join(lines) if lines else None
 
 

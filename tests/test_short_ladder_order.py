@@ -23,7 +23,15 @@ def _zone(lo: float, hi: float) -> dict[str, Any]:
 
 def _run(zones: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(orch, "find_accumulation_zones", lambda *a, **k: list(zones))
-    monkeypatch.setattr(orch, "bars_from_ohlcv", lambda raw: [{"t": 0}])  # non-empty
+    # Bars must be WELL-FORMED even though this test only cares about rung order: the
+    # zones now carry a стр.31 verdict, and computing it reads real OHLC. The old stub
+    # ([{"t": 0}]) modelled a bar shape bars_from_ohlcv never emits, so it only "worked"
+    # while nothing looked inside. Flat bars far from every zone ⇒ no reaction, no saw.
+    monkeypatch.setattr(
+        orch, "bars_from_ohlcv",
+        lambda raw: [{"open": _PRICE, "high": _PRICE, "low": _PRICE,
+                      "close": _PRICE, "volume": 1.0} for _ in raw],
+    )
     cfg = PrizrakConfig.load()
     ohlcv = {"4h": [[0, 1, 1, 1, 1, 1]] * 130}
     return orch.compute_interest_zones(ohlcv, price=_PRICE, cfg=cfg, tf="4h")

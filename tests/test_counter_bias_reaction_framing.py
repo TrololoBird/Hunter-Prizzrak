@@ -48,24 +48,28 @@ def test_counter_trend_also_shows_touch_count() -> None:
     assert "5 касаний" in txt
 
 
-def test_touch_count_is_not_sold_as_confirmation() -> None:
-    """Touches are CONSUMPTION in this method, not strength — the card must not invert it.
+def test_boundary_pivots_are_reported_without_a_verdict_either_way() -> None:
+    """The pivot count is a census, so the card must not read a verdict into it — either way.
 
-    The note used to read « · структурно крепкая (5 касаний)», and a test pinned that
-    exact wording as intended behaviour. The course is the only authority here, and it
-    says the opposite in as many words (стр.25): «Как только уровень был отработан на 1
-    касание … этот уровень становится больше не актуальным, т.е. мы этот уровень удаляем
-    и ищем новые НЕ отработанные уровни… можно рассматривать вход от 2 или 3 касания
-    ТОЛЬКО по факту слома структуры на младшем ТФ». «Касание» occurs four times in the
-    whole course and never denotes strength.
+    Two wordings have stood here, and both were wrong for the same reason:
 
-    Ranking zones BY touches is still fine and stays — it was verified head-to-head
-    against the author's own levels on 6 instruments, so it is a good selector. Selecting
-    a zone and licensing an entry into it are different claims; only the second one was
-    wrong, and it was the one printed to the user.
+      1. « · структурно крепкая (5 касаний)» — sold the count as confidence.
+      2. « · граница тестировалась 5 касаний — по курсу это НЕ подтверждение,
+         отработанный уровень удаляют» — the overcorrection, pinned by a test I wrote.
+         It fired at touches >= 4 and told the reader the level was already worked.
+
+    Both conflate two different counts. `touches` is hi.touches + lo.touches = BOUNDARY
+    PIVOTS — стр.22's «понятные 4 и более точек» census of whether a base exists at all.
+    That is an entry ticket, not a verdict: стр.18's own schema numbers TEN pivots inside
+    one healthy flat. What стр.25/31 retire a level for is a different event entirely —
+    a REACTION off it after price left the structure — which the orchestrator now measures
+    (`worked`) and _zone_line states per zone from the real count.
+
+    So on a 5-pivot base that has never been tested, the card must claim neither "strong"
+    nor "worked". This fixture is exactly that base.
     """
     for bias in ("long", "short"):
         txt = _report(bias).interest_zones_text()
-        assert "структурно крепк" not in txt, "must not present touches as confirmation"
-        assert "тестировалась" in txt, "should state what the count actually measures"
-        assert "по слому структуры на младшем ТФ" in txt, "must carry the course's rule"
+        assert "структурно крепк" not in txt, "must not present pivots as confirmation"
+        assert "уже отработан" not in txt, "must not call an untested base worked"
+        assert "5 касаний" in txt, "the census itself is still worth reporting"

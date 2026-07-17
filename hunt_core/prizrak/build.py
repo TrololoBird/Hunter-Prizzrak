@@ -8,15 +8,14 @@ from hunt_core.prizrak.forecast_panel import build_structural_forecast_panel
 import html
 
 
-def _touches_ru(n: int) -> str:
-    """Render a touch count with correct Russian pluralization.
-
-    The zone renderers used a hardcoded «касаний», which is wrong for the most
-    common values — the strength note fires at touches >= 4, so «4 касаний» was
-    the usual rendering.
+def _plural_ru(n: int, one: str, few: str, many: str) -> str:
+    """Render ``n`` with correct Russian pluralization.
 
     Args:
-        n: Touch count (non-negative).
+        n: The count (sign ignored).
+        one: Form for 1, 21, 31 … (e.g. «касание»).
+        few: Form for 2–4, 22–24 … (e.g. «касания»).
+        many: Form for 0, 5–20, 25–30 … (e.g. «касаний»).
 
     Returns:
         e.g. ``"1 касание"``, ``"4 касания"``, ``"11 касаний"``.
@@ -24,14 +23,35 @@ def _touches_ru(n: int) -> str:
     tail_100 = abs(n) % 100
     tail_10 = abs(n) % 10
     if 11 <= tail_100 <= 14:
-        word = "касаний"
+        word = many
     elif tail_10 == 1:
-        word = "касание"
+        word = one
     elif 2 <= tail_10 <= 4:
-        word = "касания"
+        word = few
     else:
-        word = "касаний"
+        word = many
     return f"{n} {word}"
+
+
+def _touches_ru(n: int) -> str:
+    """Render a touch count, e.g. ``"1 касание"`` / ``"4 касания"`` / ``"11 касаний"``.
+
+    The zone renderers used a hardcoded «касаний», which is wrong for the most
+    common values — the strength note fires at touches >= 4, so «4 касаний» was
+    the usual rendering.
+    """
+    return _plural_ru(n, "касание", "касания", "касаний")
+
+
+def _reactions_ru(n: int) -> str:
+    """Render a count of prior level reactions, e.g. ``"1 реакция"`` / ``"2 реакции"``.
+
+    Distinct from :func:`_touches_ru` on purpose. A touch is price arriving at the
+    boundary; a REACTION is a touch that then moved away favourably — the thing стр.31
+    kills the level for. Rendering reactions as «касания» would restate the very
+    conflation the зоны-интереса gate exists to undo.
+    """
+    return _plural_ru(n, "реакция", "реакции", "реакций")
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,22 +270,47 @@ class AnalystReport:
         else:
             _summary_htf = ps.get("htf_bias")
             bias = str(_summary_htf or "").lower() if isinstance(_summary_htf, str) else ""
-        lines = [f"🎯 <b>Зоны интереса</b> ({tf} · лимитки/доборы, вход по факту касания)"]
+        # The header must NOT promise «вход по факту касания» for the whole block: стр.31
+        # forbids limits on a level that has already given a good reaction, and the block
+        # routinely contains both kinds at once. The promise is per-zone now (_zone_line),
+        # so the header only names the object.
+        lines = [f"🎯 <b>Зоны интереса</b> ({tf} · уровни накопления)"]
         # The caption used to hardcode the WAIT-tick wording, but this block also
         # renders inside every DELIVERED long/short card (analyst_assembly only
         # pushes on action ∈ {long, short}) — so an active signal carried a line
         # claiming it was not an active signal. Key the caption off the action.
         action = str(ps.get("action") or "wait").strip().lower()
         if action in {"long", "short"}:
-            lines.append(
-                "<i>отложенные лимит-зоны для доборов — отдельно от основного сетапа выше</i>"
-            )
+            lines.append("<i>зоны для доборов — отдельно от основного сетапа выше</i>")
         else:
-            lines.append("<i>отложенные лимит-зоны WAIT-тика — не активный сигнал</i>")
+            lines.append("<i>зоны WAIT-тика — не активный сигнал</i>")
 
         def _zone_line(z: dict[str, Any]) -> str:
             t = f" ({_touches_ru(int(z['touches']))})" if z.get("touches") else ""
-            return f"<code>{fmt_price(z['lo'])}–{fmt_price(z['hi'])}</code>{t}"
+            return f"<code>{fmt_price(z['lo'])}–{fmt_price(z['hi'])}</code>{t}{_verdict(z)}"
+
+        def _verdict(z: dict[str, Any]) -> str:
+            """The course's own ruling on whether THIS zone may be limit-traded.
+
+            стр.31 (подпись на графике, дословно): «Если ранее цена забирала зону и
+            получила хорошую лонг реакцию, то лимитными ордерами от уровня позицию больше
+            не набираем. Смотрим только по факту слома на мтф, т.к. уровень стал слабее».
+            стр.28 сц.7: «пила» НА уровне ⇒ выйти в БУ, дождаться выхода из пилы.
+
+            Absent flags ⇒ say nothing rather than guess: a producer that did not compute
+            the verdict must not be rendered as «limits are fine» (invariant I-6).
+            """
+            if z.get("saw"):
+                return " — <b>пила на уровне</b>, ждём выхода из неё (стр.28)"
+            worked = z.get("worked")
+            if isinstance(worked, int) and worked >= 1:
+                return (
+                    f" — <b>уже отработан</b> ({_reactions_ru(worked)})"
+                    ", лимиткой НЕ берём (стр.31) · только по слому структуры на МТФ"
+                )
+            if z.get("limit_ok") is True:
+                return " — лимит, вход по факту касания"
+            return ""
 
         def _confluence_line(single: Any, *, side: str) -> None:
             # Fuse the already-computed maps at the zone — POC/liq-magnet/wall/funding
@@ -322,30 +367,22 @@ class AnalystReport:
             # got no matching confirmation, so an operator couldn't tell which side is
             # structurally firmer.
             #
-            # The touch-count note used to read « · структурно крепкая (11 касаний)»,
-            # asserting that more touches = a better zone. The course says the OPPOSITE,
-            # and it is the only authority here (стр.25, verbatim): «Как только уровень
-            # был отработан на 1 касание … этот уровень становится больше не актуальным,
-            # т.е. мы этот уровень удаляем и ищем новые НЕ отработанные уровни… можно
-            # рассматривать вход от 2 или 3 касания ТОЛЬКО по факту слома структуры на
-            # младшем ТФ». «Касание» appears four times in the whole course and never
-            # once as strength; it appears as CONSUMPTION.
+            # No touch-count verdict here any more, and that is a correction of TWO
+            # successive errors of my own:
             #
-            # A high touch count still earns the zone its place — ranking by touches was
-            # verified head-to-head against the author's own chosen levels on 6
-            # instruments (see orchestrator._zone_rank), so it is a good SELECTOR. It is
-            # not a licence to enter. So report the count as what it is — how many times
-            # the boundary has been tested — and carry the course's actual rule with it,
-            # instead of inverting the rule into a confidence badge.
-            touches = int(single.get("touches") or 0) if isinstance(single, dict) else 0
-            if touches >= 4:
-                strength = (
-                    f" · граница тестировалась {_touches_ru(touches)}"
-                    " — по курсу это НЕ подтверждение: отработанный уровень удаляют,"
-                    " вход от повторного касания — только по слому структуры на младшем ТФ"
-                )
-            else:
-                strength = ""
+            #   1. « · структурно крепкая (11 касаний)» — sold touches as confidence.
+            #   2. « · граница тестировалась 11 касаний — по курсу это НЕ подтверждение,
+            #      отработанный уровень удаляют» — the reflex overcorrection, which was
+            #      just as wrong: it fired on touches >= 4 and declared the level worked.
+            #
+            # Both conflated two different counts. `touches` = hi.touches + lo.touches =
+            # BOUNDARY PIVOTS, i.e. стр.22's «4+ точки границ» census of whether a base
+            # exists at all — a 6-pivot base is a well-DEFINED base, and the schema on
+            # стр.18 draws ten of them inside one healthy flat. What стр.25/31 kill a
+            # level for is something else entirely: REACTIONS off the level after price
+            # left the structure. The orchestrator now measures those (_level_already_worked)
+            # and _zone_line states the ruling per zone, from the real count. So a blanket
+            # note keyed off pivots would now contradict the precise verdict beside it.
             _is_co = (bias == "short" and side == "short") or (bias == "long" and side == "long")
             # A zone AGAINST the HTF bias is a counter-trend REACTION/добор — not a
             # standalone trend signal, but a valid play the way the author works it
@@ -359,10 +396,10 @@ class AnalystReport:
                 lines.append(
                     "   ⚠️ <i>против HTF-bias — не самостоятельный сигнал, а реакция/добор"
                     " от касания с подтверждением; стоп прячем за всю HTF-структуру"
-                    f" (шире зоны), доборы по сетке зон интереса{strength}</i>"
+                    " (шире зоны), доборы по сетке зон интереса</i>"
                 )
             elif _is_co:
-                lines.append(f"   ✓ <i>по HTF-bias — ко-тренд{strength or ' (структурная зона)'}</i>")
+                lines.append("   ✓ <i>по HTF-bias — ко-тренд (структурная зона)</i>")
 
         def _side(label: str, single: Any, ladder: Any, *, side: str) -> None:
             # Лесенка доборов (Д1/Д2/Д3) when present — the author works a GRID of levels,
