@@ -73,6 +73,11 @@ _INTEREST_ZONE_MAX_WIDTH_PCT = 4.0
 # own TF collapses it into a couple of candles and almost never fires (measured: 4% vs
 # 22% on the lower TF). This is the ТФ-1 step for the standard ladder.
 _LOWER_TF = {"15m": "5m", "1h": "15m", "4h": "1h", "1d": "4h", "1w": "1d"}
+# The course's own ladder, стр.17: «Мы используем основные ТФ (5м/15м/час/4ч/1Д/1Н)».
+# _UPPER_TF is its inverse — the ТФ+1 step. стр.24 permits exactly ONE rung up as a
+# target («либо уровень 1Д тф, если он ближайший» — 1Д is ТФ+1 for a 4ч setup), so this
+# is the CEILING on where a setup may look for its target, not merely a convenience.
+_UPPER_TF = {"5m": "15m", "15m": "1h", "1h": "4h", "4h": "1d", "1d": "1w"}
 _ENTRY_BAND_PCT = 0.002  # course: entries near POC ± a bit, not one exact tick
 _FORWARD_ZONE_MIN_DIST_PCT = 0.5  # below this, price is basically already there — reactive path owns it
 _FORWARD_ZONE_MAX_DIST_PCT = 20.0  # beyond this, targeting is too speculative to act on
@@ -430,37 +435,58 @@ def _structural_targets(
     min_gap: float = 0.0,
 ) -> list[float]:
     """Real targets ahead of ``entry`` in the trade direction — the next accumulation
-    zone(s), nearest first. Searched across the setup's own TF and HIGHER (``min_tf``):
-    a 4h/1d trade takes 4h/1d/1w liquidity, never a tiny 5m zone (TP/SL must live on the
-    setup's timeframe, not a finer one). When no target exists ahead within that scale
-    it falls back to the full multi-TF scan — a support bounce found on 1h can still
-    have to travel through a zone that only resolves coarser, and the trade must not
-    abstain for lack of a target that is right there (course example: REZ's 1h add-long
-    zone 0.003063-0.00307367 targeting the 0.0031-0.0034 box that resolves on 4h).
-    Course discipline: targets are structural (the next base/liquidity a move
-    actually has to travel through), never a generic R-multiple off the entry.
-    Returns an EMPTY list when no real zone exists ahead on ANY timeframe — callers
-    must abstain rather than fabricate a distance-based target.
+    zone(s), nearest first.
+
+    Scale discipline (course стр.24) — the search band is ``[ТФ-1 … ТФ+1]`` around the
+    setup's own TF (``min_tf``), and nothing outside it:
+
+    * own TF first — «в первую очередь другой сопоставимый уровень 4ч ТФ»;
+    * ТФ+1 when it is the nearest — «либо уровень 1Д тф, если он ближайший»;
+    * ТФ-1 only as a fallback for intermediate partial takes — «могут быть взяты как
+      промежуточные цели с небольшими тейками»;
+    * ТФ-2 and below never — «на старшем ТФ их вообще "нет"»; ТФ+2 and above never —
+      a 15m scalp cannot travel to a 1D level (стр.48), it gets stopped out en route.
+
+    Targets are structural (the next base a move actually has to travel through), never a
+    generic R-multiple off the entry. Returns an EMPTY list when no real zone exists ahead
+    inside the permitted band — callers must abstain rather than fabricate a target.
 
     If ``swing_levels`` are provided, a full TP ladder is built (intermediate swing
     levels + zone edges) so the caller gets an honest sequence of obstacles rather
     than skipping directly to a distant zone.
     """
     lookback_map = _tf_lookback_map(cfg)
-    # TF-consistency (user methodology): TP/SL are read on the setup's own TF and
-    # HIGHER, never a finer one — a 4h/1d trade must not take a tiny 5m zone as its
-    # target (that is what produced the 2%-stop-on-an-HTF-move / R:R 1.44 mismatch).
-    # min_rank filters out sub-setup TFs; if that leaves NO target ahead we fall back
-    # to the full scan (never abstain on a real HTF trade for lack of a target).
+    # TF-consistency (course стр.24, slide text AND the caption drawn on its chart —
+    # «ЦЕЛЬ / уровень того же тф»):
+    #
+    #   «Целью позиции от уровня 4ч ТФ — должен быть в первую очередь другой сопоставимый
+    #    уровень 4ч ТФ, либо уровень 1Д тф, ЕСЛИ ОН БЛИЖАЙШИЙ. Уровни ТФ-1 (т.е. 1ч ТФ для
+    #    4-часовика) могут быть взяты как промежуточные цели с небольшими тейками. Уровни
+    #    ТФ-2 (15м и ниже) обычно не берутся в расчет, т.к. на старшем ТФ их вообще "нет".»
+    #
+    # So the permitted band is [ТФ-1 … ТФ+1] and nothing else. The floor was already
+    # honoured; the CEILING was not — _collect(min_rank) admitted every TF at or above the
+    # setup's, with no upper bound, so a 15m setup's pool contained 1D and 1W zones and
+    # _edges would hand one back as TP1. Live 2026-07-16 that emitted «🔴 ШОРТ · 15m» at
+    # ~75.7 with a 2.7% stop and TP1 64.0 (−15%): a 1D-scale target glued to a scalp, whose
+    # R:R therefore looked excellent and was fiction. стр.48 is why it cannot be reached —
+    # «чтобы выйти из трейда 15м-1ч ТФ, обычно нужно что-то предпринять в течение
+    # нескольких часов или 1 часа (для 15м)», while «любое крупное движение… идет чаще
+    # всего по 4ч-1Д уровням». A 15m trade does not live long enough to travel to a 1D
+    # level; it gets stopped out on the way, which стр.48 also says outright.
     min_rank = _tf_rank(min_tf) if min_tf else 0
+    upper_tf = _UPPER_TF.get(str(min_tf).lower()) if min_tf else None
+    max_rank = _tf_rank(upper_tf) if upper_tf else 0  # 0 ⇒ no ceiling (min_tf unset/1w)
 
-    def _collect(rank_floor: int) -> list[dict[str, Any]]:
+    def _collect(rank_floor: int, rank_ceil: int = 0) -> list[dict[str, Any]]:
         pool: list[dict[str, Any]] = []
         claimed: list[tuple[float, float]] = []
         for tf, raw in ohlcv_by_tf.items():
             lookback = lookback_map.get(tf)
             if lookback is None or not raw or _tf_rank(tf) < rank_floor:
                 continue
+            if rank_ceil and _tf_rank(tf) > rank_ceil:
+                continue  # ТФ+2 and above — «на старшем ТФ их вообще нет» in reverse
             bars = bars_from_ohlcv(raw[-lookback:])
             for z in find_accumulation_zones(bars, tf=tf, cfg=cfg, max_zones=6):
                 if any(z["lo"] <= hi and lo <= z["hi"] for lo, hi in claimed):
@@ -474,7 +500,7 @@ def _structural_targets(
             return sorted(z["lo"] for z in pool if z["lo"] > entry)
         return sorted((z["hi"] for z in pool if z["hi"] < entry), reverse=True)
 
-    pool = _collect(min_rank)
+    pool = _collect(min_rank, max_rank)
     if min_rank > 0 and not _edges(pool):
         # Fallback widens DOWN by one TF only (ТФ-1), never to ТФ-2 and below. Course
         # (стр.24): "Уровни ТФ-1 ... могут быть взяты как промежуточные цели", but "ТФ-2
@@ -482,10 +508,11 @@ def _structural_targets(
         # Widening to all TFs (the old _collect(0)) made a 4h/1d trade take a tiny 15m/5m
         # zone as TP1 on ~70% of live setups — a course-forbidden, fake-tight target.
         # When even ТФ-1 has nothing ahead, there is no structural target and the caller
-        # abstains rather than fabricate one.
+        # abstains rather than fabricate one. The ТФ+1 ceiling still applies: widening the
+        # floor must not smuggle back the far targets the ceiling exists to exclude.
         lower_tf = _LOWER_TF.get(str(min_tf))
         floor = _tf_rank(lower_tf) if lower_tf else min_rank
-        pool = _collect(floor)
+        pool = _collect(floor, max_rank)
 
     zone_edges = _edges(pool)
 
