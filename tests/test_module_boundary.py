@@ -40,6 +40,13 @@ def _backtests() -> list[Path]:
     return sorted(_RESEARCH.glob("backtest_*.py"))
 
 
+def _prizrak_harnesses() -> list[Path]:
+    """The mirror-image family: research files that drive the PRIZRAK path. Named
+    `prizrak_*.py` precisely so they stay OUT of the `backtest_*.py` glob — the two prefixes
+    partition research/ by strategy, and that partition is what keeps the modules unmixed."""
+    return sorted(_RESEARCH.glob("prizrak_*.py"))
+
+
 def _imports_module(path: Path, dotted: str) -> bool:
     """True if `path` imports `dotted` — matched on import statements, not any mention.
 
@@ -56,6 +63,12 @@ def test_there_are_backtests_to_check() -> None:
     """Guard the guard: if the glob silently matches nothing, every test below passes
     vacuously and the boundary is unprotected while looking green."""
     assert _backtests(), "no research/backtest_*.py found — this file is testing nothing"
+
+
+def test_there_are_prizrak_harnesses_to_check() -> None:
+    """Same guard for the mirror family: an empty glob would pass the prizrak-harness
+    parametrized test vacuously and leave that direction of the boundary unprotected."""
+    assert _prizrak_harnesses(), "no research/prizrak_*.py found — the mirror guard tests nothing"
 
 
 @pytest.mark.parametrize("path", _backtests(), ids=lambda p: p.name)
@@ -77,6 +90,28 @@ def test_every_backtest_is_a_manipulations_harness(path: Path) -> None:
     assert any(m in src for m in _MANIP_MARKERS), (
         f"{path.name} references none of {_MANIP_MARKERS} — is it still a manipulations "
         "harness? CLAUDE.md claims every backtest_*.py is one."
+    )
+
+
+@pytest.mark.parametrize("path", _prizrak_harnesses(), ids=lambda p: p.name)
+def test_prizrak_harness_does_not_import_the_manipulations_path(path: Path) -> None:
+    """The mirror of ``test_every_backtest_is_a_manipulations_harness``. A prizrak replay
+    (``research/prizrak_replay.py``) measures прizrak; if it reached into the manipulations
+    detector/delivery it would be measuring a blend of the two strategies — exactly the
+    mixing the whole file exists to forbid.
+
+    Import-based, NOT substring: this file's own docstring names ``manipulation_delivery``
+    (contrasting itself with the scanner harness), and a bare substring check would flag
+    that prose — the very false positive `_imports_module`'s docstring warns about. A
+    manipulations function can only be *reached* by importing its module, so importing is
+    the thing to forbid."""
+    assert not _imports_module(path, "hunt_core.scanner"), (
+        f"{path.name} imports hunt_core.scanner — a prizrak harness must not touch the scanner "
+        "(that is where advance_manipulation_scales lives)."
+    )
+    assert not _imports_module(path, "hunt_core.deliver.manipulation_delivery"), (
+        f"{path.name} imports manipulation_delivery — a prizrak harness must not reach into "
+        "the manipulations delivery path (CLAUDE.md § Два модуля)."
     )
 
 
