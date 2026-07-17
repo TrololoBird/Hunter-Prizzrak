@@ -14,7 +14,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from hunt_core.prizrak.figures import _head_and_shoulders, _narrowing, _wedge, tag_figure
+from hunt_core.prizrak.figures import (
+    FIGURE_WINDOW,
+    _head_and_shoulders,
+    _narrowing,
+    _wedge,
+    tag_figure,
+)
 from hunt_core.prizrak.structure import bars_from_ohlcv
 
 
@@ -151,3 +157,58 @@ def test_pennant_6touch_entry_never_fires_on_a_wedge() -> None:
         tier_name="meso", cfg=PrizrakConfig.load(), htf_bias={"bias": "long"},
     )
     assert sig is None
+
+
+def _hs_with_break(vals: list[float], neck: float, tail: list[float]) -> list[dict[str, float]]:
+    """ГиП + пивоты пробоя/ретеста шеи ПОСЛЕ правого плеча — так фигура и выглядит,
+    когда её можно торговать (стр.61: «Пробой уровня, закрепление, тест»)."""
+    rows: list[list[float]] = []
+    for v in vals:
+        for o in (8, 6, 4):
+            rows.append(_bar(v - o, v - o + 1, v - o - 1, v - o))
+        rows.append(_bar(v - 1, v, v - 2, v - 1))          # плечо/голова
+        rows.append(_bar(neck + 1, neck + 2, neck, neck + 1))  # линия шеи
+    # NB: лой шеи должен быть СТРОГО ниже соседей — `_pivots` требует `<`, и ничья
+    # с лоем следующего бара молча лишает шею статуса пивота.
+    for v in tail:  # пробой шеи и ретест — новые пивоты ПОСЛЕ правого плеча
+        for o in (2, 4):
+            rows.append(_bar(v + o, v + o + 1, v + o - 1, v + o))
+        rows.append(_bar(v + 1, v + 2, v, v + 1))
+    return bars_from_ohlcv(rows)
+
+
+def test_head_and_shoulders_survives_pivots_after_the_right_shoulder() -> None:
+    """Регрессия: детектор смотрел ТОЛЬКО последние три пивота, поэтому пробой шеи —
+    момент, когда ГиП и становится торгуемым, — молча убивал ярлык."""
+    assert _head_and_shoulders(_hs_with_break([100.0, 112.0, 101.0], neck=90.0, tail=[80.0, 84.0]), "short") is True
+
+
+def test_head_and_shoulders_requires_a_level_neckline() -> None:
+    """«Голова между двух плеч» без ровной шеи — ещё не фигура (стр.61)."""
+    rows: list[list[float]] = []
+    for v, nk in ((100.0, 92.0), (112.0, 70.0), (101.0, 91.0)):  # шея скачет 92 → 70
+        for o in (8, 6, 4):
+            rows.append(_bar(v - o, v - o + 1, v - o - 1, v - o))
+        rows.append(_bar(v - 1, v, v - 2, v - 1))
+        rows.append(_bar(nk + 1, nk + 2, nk, nk + 1))
+    assert _head_and_shoulders(bars_from_ohlcv(rows), "short") is False
+
+
+def test_card_label_and_pennant_gate_share_one_window() -> None:
+    """Ярлык теперь виден трейдеру, поэтому карточка не может сказать «вымпел» там, где
+    гейт `_figure_pennant_candidate` решил «клин» — окно у них обязано быть одно."""
+    from hunt_core.prizrak import orchestrator as orch
+
+    assert orch._PENNANT_WINDOW is FIGURE_WINDOW
+
+
+def test_head_must_actually_protrude_above_the_shoulders() -> None:
+    """Голова на волос выше плеч — это не ГиП, а три почти равных экстремума.
+
+    Замер: без порога выступа ярлык «ГиП» доставался 53.6% всех подтверждённых ПП —
+    для характерной фигуры это пустой ярлык. С выступом — 4.6%.
+    """
+    # 100 / 100.5 / 100.2 — «голова» выше плеч на 0.5%, плечи почти равны.
+    assert _head_and_shoulders(_peaks([100.0, 100.5, 100.2]), "short") is False
+    # 100 / 112 / 101 — голова выступает на 10.9%.
+    assert _head_and_shoulders(_peaks([100.0, 112.0, 101.0]), "short") is True

@@ -36,11 +36,28 @@ from hunt_core.prizrak.structure import bars_from_ohlcv
 # при пороге 2% цены клином объявлялись 41% сужений на 15м и 95% на 1Д — ровно по росту
 # среднего размаха фигуры с 10% до 73%, а не по наклону).
 _WEDGE_MID_DRIFT = 0.25
-# ГиП: насколько плечи могут разойтись по высоте и всё ещё быть «плечами» (стр.61).
-_SHOULDER_TOL = 0.15
+# ГиП (стр.61). Курс чисел не даёт — фигура описана рисунком, поэтому пороги подобраны
+# по избирательности на живых данных (research/dataset_v10, 830 подтверждённых ПП):
+# ГиП — фигура ХАРАКТЕРНАЯ, значит должна метить малую долю сломов, иначе ярлык пустой.
+# Замер доли ГиП от всех подтверждённых ПП:
+#   плечи .15 / шея .10 / выступ 0    -> 53.6%   (голова могла быть выше плеч на 0.1%)
+#   плечи .08 / шея .05 / выступ .03  ->  4.6%   <- выбрано
+#   плечи .06 / шея .04 / выступ .05  ->  1.4%
+# Выступ головы — решающий: без него «три экстремума подряд» проходили как фигура.
+_SHOULDER_TOL = 0.08      # разброс плеч по высоте
+_NECKLINE_TOL = 0.05      # неровность линии шеи
+_HEAD_PROMINENCE = 0.03   # насколько голова обязана превосходить ВЫСШЕЕ плечо
+_HS_SCAN_PIVOTS = 6       # после правого плеча всегда есть пивоты пробоя/ретеста шеи
 
 
-def _narrowing(ohlcv: list[list[float]], *, window: int = 40) -> bool:
+# Одно окно на ВСЮ семью сужений. Ярлык на карточке («вымпел» / «клин») и гейт
+# `orchestrator._figure_pennant_candidate`, решающий, давать ли вымпельное «6-е касание»
+# (стр.57-58) или отказать клину (стр.60), обязаны смотреть в одно и то же окно —
+# иначе карточка скажет «вымпел» там, где кандидат решил «клин».
+FIGURE_WINDOW = 40
+
+
+def _narrowing(ohlcv: list[list[float]], *, window: int = FIGURE_WINDOW) -> bool:
     """Range in the second half of the window is materially tighter than the first
     (вымпел/клин/треугольник — сужение)."""
     tail = ohlcv[-window:]
@@ -58,7 +75,7 @@ def _narrowing(ohlcv: list[list[float]], *, window: int = 40) -> bool:
     return first > 0 and second <= first * 0.6
 
 
-def _wedge(ohlcv: list[list[float]], *, window: int = 40) -> bool:
+def _wedge(ohlcv: list[list[float]], *, window: int = FIGURE_WINDOW) -> bool:
     """A narrowing range whose MIDLINE also travels — клин (стр.60: «Клин — выглядит как
     флаг, только в сужение»), as opposed to a вымпел/треугольник, which narrows around a
     roughly level mid (стр.57-58, incl. «с поджатием» and «с равными границами»).
@@ -86,23 +103,46 @@ def _wedge(ohlcv: list[list[float]], *, window: int = 40) -> bool:
 def _head_and_shoulders(bars: list[dict[str, float]], direction: str) -> bool:
     """True head-and-shoulders geometry (стр.61), not merely "a ПП happened".
 
-    Short: three highs where the middle (head) tops both shoulders and the shoulders sit
-    at a comparable height. Long: the mirror on lows (перевёрнутый ГиП). The course calls
-    ГиП «фактически частный случай "Переприора"» — a SUBSET of ПП — so tagging every
-    confirmed ПП «гип» inverted the implication and named a shape nothing had checked.
+    Short: a left shoulder, a head topping both, and a right shoulder back near the left
+    one, with the two intervening lows (the neckline) at a comparable level. Long: the
+    mirror (перевёрнутый ГиП). The course calls ГиП «фактически частный случай
+    "Переприора"» — a SUBSET of ПП — so tagging every confirmed ПП «гип» inverted the
+    implication and named a shape nothing had checked.
+
+    Scans the recent pivots for ANY qualifying triple rather than only the last three:
+    a ГиП is confirmed by breaking the neckline, so by the time we look there are always
+    pivots AFTER the right shoulder. Anchoring on the last three would ask the break's own
+    pivot to be a shoulder and silently drop the tag exactly when the figure completes.
     """
     pivots = _pivots(bars)
     kind = "high" if direction == "short" else "low"
-    pts = [p[2] for p in pivots if p[1] == kind]
-    if len(pts) < 3:
+    same = [p for p in pivots if p[1] == kind]
+    opposite = [p for p in pivots if p[1] != kind]
+    if len(same) < 3:
         return False
-    left, head, right = pts[-3], pts[-2], pts[-1]
-    if left <= 0 or right <= 0:
-        return False
-    beats = (head > left and head > right) if direction == "short" else (head < left and head < right)
-    if not beats:
-        return False
-    return abs(right - left) / left <= _SHOULDER_TOL
+    for i in range(max(0, len(same) - _HS_SCAN_PIVOTS), len(same) - 2):
+        left, head, right = same[i], same[i + 1], same[i + 2]
+        if left[2] <= 0 or right[2] <= 0:
+            return False
+        # Голова обязана ВЫСТУПАТЬ, а не просто быть на волос выше плеч.
+        if direction == "short":
+            worst = max(left[2], right[2])
+            if head[2] <= worst or (head[2] - worst) / worst < _HEAD_PROMINENCE:
+                continue
+        else:
+            best = min(left[2], right[2])
+            if head[2] >= best or (best - head[2]) / head[2] < _HEAD_PROMINENCE:
+                continue
+        if abs(right[2] - left[2]) / left[2] > _SHOULDER_TOL:
+            continue  # плечи разъехались по высоте — это не ГиП, а три экстремума
+        # Линия шеи (стр.61: «Пробой уровня, закрепление, тест») — два встречных пивота
+        # между плечами. Без неё «голова между двух плеч» это ещё не фигура.
+        neck = [p[2] for p in opposite if left[0] < p[0] < right[0] and p[2] > 0]
+        if len(neck) < 2:
+            continue
+        if abs(max(neck) - min(neck)) / min(neck) <= _NECKLINE_TOL:
+            return True
+    return False
 
 
 def _flag(ohlcv: list[list[float]], *, impulse_window: int = 8, pullback_window: int = 8) -> bool:

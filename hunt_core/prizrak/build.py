@@ -472,6 +472,13 @@ class AnalystReport:
             if isinstance(entry_orders, list) and len(entry_orders) >= 2:
                 orders_str = " · ".join(fmt_price(float(o)) for o in entry_orders)
                 lines.append(f"↳ Ордера (зона+ПОК): <code>{orders_str}</code>")
+            # Course глава «Фигуры» (стр.56-62): каждая фигура — частный случай уже
+            # торгуемого примитива, и её имя говорит трейдеру, какое правило курса
+            # применимо (дно/вершина → закуп от теста ПП + от границы, стр.62; клин →
+            # вход на тесте уровня/слома, стр.60). Ярлык — доп-фактор, не гейт.
+            pattern = summary.get("pattern")
+            if isinstance(pattern, str) and pattern:
+                lines.append(f"↳ Фигура: {pattern}")
             if stop is not None:
                 lines.append(f"🛑 Стоп: <code>{fmt_price(float(stop))}</code>")
 

@@ -37,7 +37,7 @@ from hunt_core.prizrak.dominance import compute_dominance_factor
 from hunt_core.prizrak.liq_reconcile import compute_liquidation_factor
 from hunt_core.prizrak.figures import tag_squeeze_pattern
 from hunt_core.prizrak.marketcap import compute_marketcap_factor
-from hunt_core.prizrak.figures import _narrowing, _wedge
+from hunt_core.prizrak.figures import FIGURE_WINDOW, _narrowing, _wedge
 from hunt_core.prizrak.pp import _pivots, detect_pereprior
 from hunt_core.prizrak.poc import zone_poc
 from hunt_core.prizrak.stop_volume import find_stop_volume
@@ -1985,7 +1985,11 @@ def _stop_volume_pre_exit_candidate(
 # Ф6 (курс стр.57): вымпел/треугольник по тренду — «не успели взять от уровня, то ждем
 # 6 касание... + оставляем на доливку на случай, если цена решит расширить структуру»;
 # стоп за всю структуру с запасом 1-3% (стр.58).
-_PENNANT_WINDOW = 40  # same window _narrowing reads
+# Одно окно с `figures` — ярлык карточки и этот гейт обязаны совпадать (см.
+# figures.FIGURE_WINDOW). Раньше здесь стояла своя 40 с комментарием «same window
+# _narrowing reads», а tag_figure звал _narrowing на ДЕФОЛТНОМ окне — совпадало
+# по значению, но не по определению.
+_PENNANT_WINDOW = FIGURE_WINDOW
 _PENNANT_MIN_TOUCHES = 6
 # «Цена у трендовой границы» = within this of the MOST RECENT swing touch of that
 # boundary (a converging trendline is best proxied by its latest touch, not the
