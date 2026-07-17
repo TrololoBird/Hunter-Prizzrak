@@ -13,8 +13,19 @@ from __future__ import annotations
 from typing import Any
 
 from hunt_core.prizrak.config import PrizrakConfig
+from hunt_core.prizrak.poc import _MIN_STRUCTURE_BARS
 
+# Width of the sub-window scanned for a стоповый объём. find_stop_volume stamps the winner's
+# span as structure_lo_idx/structure_hi_idx (width = _SUB_WINDOW), which poc._structure_bars
+# then profiles — but only if the span has >= _MIN_STRUCTURE_BARS bars, else it silently falls
+# back to the whole window and returns the PARENT's ПОК (the exact bug str.35's own-ПОК fix
+# closed). The two constants live in different files; this assert makes the coupling machine-
+# checked at import, ahead of the test that also pins it (test_stop_volume_poc_is_its_own_*).
 _SUB_WINDOW = 6
+assert _SUB_WINDOW >= _MIN_STRUCTURE_BARS, (
+    f"_SUB_WINDOW ({_SUB_WINDOW}) < poc._MIN_STRUCTURE_BARS ({_MIN_STRUCTURE_BARS}): a стоповый's "
+    "span would be too short to profile, and zone_poc would return the parent's ПОК"
+)
 
 
 def find_stop_volume(

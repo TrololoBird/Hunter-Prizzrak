@@ -10,10 +10,20 @@ LOOKBACK_HH_LL = 20
 def _swing_pivots(
     bars: list[dict[str, float]], *, n: int
 ) -> tuple[list[tuple[int, float]], list[tuple[int, float]]]:
-    """Confirmed swing highs/lows via an n-bar fractal (bars on both sides must be
-    lower/higher) — the same convention ``prizrak/pp.py::_pivots`` and
-    ``accumulation.py`` already use for level detection. Returns
-    ``([(idx, price), ...], [(idx, price), ...])`` for highs, lows, in time order."""
+    """Confirmed swing highs/lows via a SYMMETRIC n-bar fractal — ``n`` bars on BOTH sides
+    must be lower/higher. Returns ``([(idx, price), ...], [(idx, price), ...])`` for highs,
+    lows, in time order.
+
+    This is a DIFFERENT convention from ``prizrak/pp.py::_pivots`` (used by накопление/ПП/
+    фигуры/стоп-анкер), and the difference is deliberate — do not "unify" them:
+      * pp._pivots is 3-left / 1-right (``_SWING_N=3``), ASYMMETRIC — a pivot confirms on the
+        very next bar, minimising confirmation lag (invariant I-5), at the cost of noisier
+        pivots. It feeds detectors that must react to the freshest closed bar.
+      * this one is n-left / n-right (n=``structure_lookback_pivot``=5), SYMMETRIC — cleaner,
+        more significant swings (Williams' 5-bar standard), at the cost of n bars of lag. It
+        feeds ``all_swing_highs``/``all_swing_lows`` → the TP-ladder rungs and deep zones,
+        where a slower, higher-quality pivot is the right trade-off.
+    Two conventions, two jobs. A single one would either lag the detectors or noise the ladder."""
     highs_out: list[tuple[int, float]] = []
     lows_out: list[tuple[int, float]] = []
     highs = [b["high"] for b in bars]
@@ -62,9 +72,10 @@ def _detect_structure(
     # higher high" for that one bar, so 3-4 quietly-drifting-up prior candles plus
     # one pump candle reads as "confirmed bullish HH+HL structure" even though the
     # candle that supposedly confirmed it already reversed intrabar and closed well
-    # off its high). Compare CONFIRMED SWING PIVOTS instead (bars with real
-    # structure on both sides, same 3-bar-fractal convention used everywhere else
-    # in prizrak/) — a wick that reverses within the same bar can't fake a pivot.
+    # off its high). Compare CONFIRMED SWING PIVOTS instead (bars with real structure on
+    # both sides — the symmetric n=5 fractal above, NOT pp.py's asymmetric 3/1; see its
+    # docstring for why the two conventions differ) — a wick that reverses within the same
+    # bar can't fake a pivot.
     swing_highs, swing_lows = _swing_pivots(bars, n=lookback_pivot)
     hh = swing_highs[-1][1] > swing_highs[-2][1] if len(swing_highs) >= 2 else None
     lh = swing_highs[-1][1] < swing_highs[-2][1] if len(swing_highs) >= 2 else None

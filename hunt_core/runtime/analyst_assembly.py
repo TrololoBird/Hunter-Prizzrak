@@ -190,10 +190,14 @@ async def assemble_analyst_tick(
         LOG.warning("deep_microstructure_pack_failed", symbol=sym, error=repr(exc))
 
     prizrak_ohlcv_by_tf: dict[str, list[list[float]]] = {}
-    try:
-        from hunt_core.prizrak.config import PrizrakConfig
+    # PrizrakConfig.load() is HOISTED OUT of the try below: a config ValidationError (e.g. a
+    # bad ТФ now rejected by the LadderTF Literal) is not an "ohlcv prep" failure and must not
+    # be swallowed under that log name once per symbol — it should surface loudly. The load is
+    # cached (_instance), so this costs nothing after the first symbol.
+    from hunt_core.prizrak.config import PrizrakConfig
 
-        pcfg = PrizrakConfig.load()
+    pcfg = PrizrakConfig.load()
+    try:
         for tier in (pcfg.intraday, pcfg.meso, pcfg.macro):
             for tf_name in tier.timeframes:
                 if tf_name in prizrak_ohlcv_by_tf:
