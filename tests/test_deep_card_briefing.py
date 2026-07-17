@@ -103,3 +103,37 @@ def test_briefing_survives_a_row_with_no_zones_or_regime() -> None:
 def test_no_zone_line_when_zone_prices_are_junk() -> None:
     row = _row(prizrak_interest_zones={"long": {"lo": 0, "hi": 0}, "short": None})
     assert _nearest_zone(row, _PRICE) is None
+
+
+def test_live_setup_shows_the_SETUP_entry_not_a_pending_limit_zone() -> None:
+    """The briefing must not contradict the card one line below it.
+
+    Live: «🔴 ШОРТ — сетап активен» followed by «ближайшая шорт-зона: 81.2800 — 7.4% от
+    цены», while the setup's actual entry sat at 75.19–75.49. Two different objects, the
+    same word ("short"), contradictory numbers, one line apart — read as a single
+    thought. The briefing exists so the reader does not have to reconcile the card
+    against itself, so when a setup is live it must speak about THAT setup's entry.
+    """
+    row = _row(
+        prizrak_summary={"action": "short", "entry_lo": 75.1893, "entry_hi": 75.4907},
+        prizrak_interest_zones={"short": {"lo": 81.28, "hi": 82.0, "touches": 4}},
+    )
+    out = _briefing_text(_Report(row), 75.70)
+    assert out is not None
+    assert "81.28" not in out, "must not advertise a pending limit zone as the setup"
+    assert "75.4907" in out or "75.49" in out
+    assert "вход:" in out
+
+
+def test_live_setup_says_when_price_is_inside_the_entry_band() -> None:
+    row = _row(prizrak_summary={"action": "long", "entry_lo": 75.0, "entry_hi": 75.5})
+    out = _briefing_text(_Report(row), 75.2)
+    assert out is not None
+    assert "цена В ЗОНЕ ВХОДА" in out
+
+
+def test_live_setup_without_an_entry_band_still_renders() -> None:
+    row = _row(prizrak_summary={"action": "short"})
+    out = _briefing_text(_Report(row), 75.70)
+    assert out is not None
+    assert "ШОРТ" in out

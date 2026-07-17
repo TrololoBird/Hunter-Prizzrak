@@ -128,6 +128,30 @@ def _briefing_text(analysis: AnalystReport, price: float) -> str | None:
     elif bias in ("short", "bear"):
         lines.append("режим: старшие ТФ <b>вниз</b>")
 
+    # When a setup is LIVE, the reader's "where do I act" is the SETUP's entry — not a
+    # pending limit zone. Printing the zone under a «🔴 ШОРТ — сетап активен» headline
+    # put two different prices one line apart and let them read as one thought: live it
+    # said «ближайшая шорт-зона: 81.2800 — 7.4% от цены» directly above a setup whose
+    # entry was 75.19–75.49. Same word ("short"), different objects, contradictory
+    # numbers — and the briefing exists precisely so the reader does not have to
+    # reconcile the card against itself.
+    if action in ("long", "short"):
+        lo, hi = ps.get("entry_lo"), ps.get("entry_hi")
+        try:
+            lo_f, hi_f = float(lo), float(hi)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            lo_f = hi_f = 0.0
+        if lo_f > 0 and hi_f > 0 and price > 0:
+            if lo_f <= price <= hi_f:
+                lines.append("<b>цена В ЗОНЕ ВХОДА</b> — детали и стоп ниже")
+            else:
+                edge = hi_f if price > hi_f else lo_f
+                d = abs(price / edge - 1.0) * 100.0
+                lines.append(
+                    f"вход: <code>{fmt_price(lo_f)}–{fmt_price(hi_f)}</code> — {d:.1f}% от цены"
+                )
+        return "\n".join(lines) if lines else None
+
     near = _nearest_zone(row, price)
     if near is not None:
         side, edge, dist = near
