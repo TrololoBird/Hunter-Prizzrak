@@ -40,7 +40,7 @@ import argparse
 import glob
 import os
 import statistics as st
-from collections import Counter, defaultdict
+from collections import defaultdict
 from typing import Any
 
 import polars as pl
@@ -162,7 +162,7 @@ def replay(ds: str, stems: list[str], *, step: int = 8) -> dict[str, Any]:
                 if out is None:
                     continue
                 outcome, r = out
-                results.append((outcome, r, tf, str(sig.get("setup_kind") or "?")))
+                results.append((outcome, r, tf, str(sig.get("setup_kind") or "?"), direction))
                 episodes.add((stem, t // TF_MS["1w"]))
     return {"results": results, "episodes": len(episodes)}
 
@@ -185,18 +185,24 @@ def _report(res: dict[str, Any]) -> None:
     if rs:
         se = (st.pstdev(rs) / (len(rs) ** 0.5)) if len(rs) > 1 else float("nan")
         print(f"stderr(R): ±{se:.3f}  |  n<100 → выводы не делать, n<30 → шум")
-    by = defaultdict(lambda: [0, 0, []])
-    for outcome, r, tf, _kind in rows:
-        if outcome in ("win", "loss"):
-            by[tf][0 if outcome == "win" else 1] += 1
-            by[tf][2].append(r)
+    resolved = [r for r in rows if r[0] in ("win", "loss")]
+
+    def _slice(dim_idx: int, order: list[str] | None = None) -> None:
+        agg: dict[str, list[float]] = defaultdict(list)
+        for row in resolved:
+            agg[row[dim_idx]].append(row[1])
+        keys = [k for k in (order or []) if k in agg] or sorted(agg, key=lambda k: -len(agg[k]))
+        for k in keys:
+            rr = agg[k]
+            w = sum(1 for x in rr if x > 0)
+            print(f"    {k:>18}: n={len(rr):<4} WR {w / len(rr) * 100:4.0f}%  R {st.mean(rr):+.2f}")
+
     print("\n  по ТФ:")
-    for tf in USE_TF:
-        if tf in by:
-            w, l, rr = by[tf]
-            m = w + l
-            print(f"    {tf:>3}: n={m:<4} WR {w/m*100:4.0f}%  R {st.mean(rr):+.2f}" if m else "")
-    print("\n  по типу сетапа:", dict(Counter(r[3] for r in rows if r[0] != "timeout").most_common()))
+    _slice(2, USE_TF)
+    print("\n  по направлению (лонг-эдж / шорт-слив — воспроизводит вывод сканера):")
+    _slice(4, ["long", "short"])
+    print("\n  по типу сетапа:")
+    _slice(3)
 
 
 def main() -> None:
