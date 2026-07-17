@@ -22,9 +22,25 @@ TP1 64.0 (−15%) — a 1D-scale target on a scalp, making R:R look excellent an
 from __future__ import annotations
 
 from hunt_core.prizrak.config import PrizrakConfig
-from hunt_core.prizrak.orchestrator import _LOWER_TF, _UPPER_TF, _structural_targets, _tf_rank
+from hunt_core.prizrak.orchestrator import (
+    _LOWER_TF,
+    _UPPER_TF,
+    _extract_swing_levels,
+    _structural_targets,
+    _tf_rank,
+)
 
 _CFG = PrizrakConfig.load()
+
+# Shaped like the real producer: structure._tier_structure returns the FIRST configured
+# timeframe of the tier that had data and stamps it at s["tf"] (structure.py:74). A tier
+# is therefore ONE timeframe, not its whole candidate list — filtering on the config list
+# instead admits a tier by 15m and then serves its 5m swings.
+_STRUCT_BY_TIER = {
+    "intraday": {"tf": "5m", "all_swing_highs": [101.0], "all_swing_lows": [99.0]},
+    "meso": {"tf": "1h", "all_swing_highs": [104.0], "all_swing_lows": [96.0]},
+    "macro": {"tf": "1d", "all_swing_highs": [115.0], "all_swing_lows": [85.0]},
+}
 
 
 def _flat(*, lo: float, hi: float, cycles: int) -> list[list[float]]:
@@ -110,3 +126,74 @@ def test_tf_rank_orders_the_course_ladder() -> None:
     ladder = ["5m", "15m", "1h", "4h", "1d", "1w"]
     ranks = [_tf_rank(tf) for tf in ladder]
     assert ranks == sorted(ranks) and len(set(ranks)) == len(ranks)
+
+
+# --------------------------------------------- ТФ-полоса действует и на swing-ступени
+# Потолок 229b1f7 закрыл ТОЛЬКО пул зон (_collect). Лестница TP строится из зон И из
+# swing-уровней (_extract_swing_levels), а те тянулись из всех трёх тиров при любом ТФ
+# сетапа — вторая дверь в тот же дефект. Сверка 2026-07-17.
+
+def test_swing_levels_exclude_macro_tier_for_a_15m_setup() -> None:
+    """15м-сетап не берёт swing-уровни 1Д/1Н тира (стр.24: ТФ-2+ «вообще нет»; стр.48:
+    15м-трейд живёт ~час). До фикса 115.0 (macro) приходил ступенью на скальп."""
+    levels = _extract_swing_levels(
+        _STRUCT_BY_TIER, direction="long", entry=100.0, tf="15m",
+    )
+    assert 115.0 not in levels  # macro тир (tf=1d) — ТФ+3 для 15м
+    assert levels == [101.0, 104.0]  # intraday (5m=ТФ-1) + meso (1h=ТФ+1)
+
+
+def test_swing_levels_keep_the_1d_tier_for_a_4h_setup() -> None:
+    """Зеркало: 4ч-сетап ВПРАВЕ взять 1Д (ТФ+1, стр.24 «либо уровень 1Д тф, если он
+    ближайший»), но не 5м/15м (ТФ-2 и ниже)."""
+    levels = _extract_swing_levels(
+        _STRUCT_BY_TIER, direction="long", entry=100.0, tf="4h",
+    )
+    assert 115.0 in levels  # macro тир: 1d = ТФ+1
+    assert 101.0 not in levels  # intraday тир: 15m = ТФ-2
+
+
+def test_swing_levels_respect_the_band_on_the_short_side() -> None:
+    levels = _extract_swing_levels(
+        _STRUCT_BY_TIER, direction="short", entry=100.0, tf="15m",
+    )
+    assert 85.0 not in levels  # macro (tf=1d)
+    assert levels == [99.0, 96.0]
+
+
+def test_no_zones_and_only_out_of_band_swings_yields_no_target() -> None:
+    """Контракт докстринга _structural_targets: «Returns an EMPTY list when no real zone
+    exists ahead inside the permitted band — callers must abstain rather than fabricate a
+    target». Раньше swing-ступени его обходили: при НУЛЕ зон лестница всё равно
+    возвращала цели, и от TP1 считался RR-гейт (_geometry_from_zone)."""
+    macro_only = {"macro": {"tf": "1d", "all_swing_highs": [115.0]}}
+    swings = _extract_swing_levels(
+        macro_only, direction="long", entry=100.0, tf="15m",
+    )
+    assert swings == []
+    assert _structural_targets(
+        {}, cfg=_CFG, direction="long", entry=100.0, swing_levels=swings, min_tf="15m",
+    ) == []
+
+
+def test_swing_tier_is_filtered_by_its_actual_tf_not_its_configured_list() -> None:
+    """Тир — это ОДИН ТФ (`s["tf"]`, structure.py:74), а не список кандидатов из конфига.
+
+    Регрессия на первую редакцию фикса: она допускала тир, если ЛЮБОЙ его настроенный ТФ
+    попадал в полосу. Для 1ч-сетапа полоса [15м…4ч] впускала intraday-тир по кандидату
+    15m — а структура у него 5m, т.е. ТФ-2, который стр.24 запрещает («на старшем ТФ их
+    вообще "нет"»). Ступень near-entry вдобавок ЗАНИЖАЕТ RR (fake-tight target).
+    """
+    levels = _extract_swing_levels(_STRUCT_BY_TIER, direction="long", entry=100.0, tf="1h")
+    assert 101.0 not in levels, "5m-структура попала в лестницу 1ч-сетапа (ТФ-2)"
+    # Полоса 1ч = [15м … 4ч]: intraday отдаёт 5m (ТФ-2, вне), macro — 1d (ТФ+2, вне).
+    # Остаётся только meso, чей ТФ и есть 1h. Оба края режутся по СВОЕМУ ТФ структуры.
+    assert levels == [104.0]
+
+
+def test_swing_tier_without_tf_stamp_is_skipped_not_assumed() -> None:
+    """I-6: нет атрибуции → полосу доказать нельзя → воздерживаемся. Иначе _tf_rank(None)
+    молча вернул бы дефолт 15 и приписал структуре 15m."""
+    assert _extract_swing_levels(
+        {"macro": {"all_swing_highs": [115.0]}}, direction="long", entry=100.0, tf="4h",
+    ) == []

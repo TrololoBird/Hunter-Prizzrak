@@ -48,8 +48,8 @@ def _cluster(points: list[tuple[int, float]], *, tol: float) -> list[dict[str, A
             # Wick extremes of the cluster's own touches. Pivot prices ARE bar
             # highs/lows (pp._pivots), so min/max here = the deepest прокол ever
             # made at this boundary — what the course anchors the stop behind when
-            # a boundary with 3+ touches has been wicked (стр.19: «если на 3+
-            # касаниях были проколы за границы — стоп ВСЕГДА за прокол»).
+            # a boundary with 3+ touches has been wicked (стр.18: «если на 3++
+            # точках были проколы за границы — стоп всегда ставится за этот прокол»).
             "px_min": min(p for _, p in c),
             "px_max": max(p for _, p in c),
         }
@@ -72,7 +72,7 @@ def _zone_from_clusters(hi: dict[str, Any], lo: dict[str, Any], *, tf: str, bar_
         # Wick extremes of the boundary clusters (deepest прокол per side): the zone's
         # lo/hi are cluster AVERAGES, so a stop anchored at lo can sit INSIDE the range
         # price has already wicked through. _structural_stop anchors behind these when
-        # the boundary has 3+ touches (курс стр.19).
+        # the boundary has 3+ touches (курс стр.18).
         "ext_lo": round(lo["px_min"], 8),
         "ext_hi": round(hi["px_max"], 8),
         "width_pct": round((hi["price"] - lo["price"]) / lo["price"] * 100, 4),
@@ -109,8 +109,9 @@ def find_accumulation_zones(
     max_zones: int = 4,
 ) -> list[dict[str, Any]]:
     """Every distinct boundary pair (resistance cluster above a support cluster) with
-    combined touches >= cfg.accumulation_min_touches, ranked strongest-first (most
-    touches, then narrowest — a tighter base is a more decisive zone). Non-overlapping
+    combined touches >= cfg.accumulation_min_touches, ranked strongest-first by traded
+    VOLUME, ties broken to the narrower box (see the sort below — touches are the
+    structure GATE, not the strength scale: стр.22). Non-overlapping
     only — a weaker zone that shares price range with a stronger one is dropped rather
     than double-counting the same base. This is what forward zone-targeting ranks
     against (course: price travels toward the next strong, untouched base, not just

@@ -103,16 +103,24 @@ def _management_plan(direction: Literal["long", "short"]) -> list[str]:
     management (the generator is stateless and does not track an open position).
 
     Course стр.19: reaction from the level → stop to break-even; take 50% (not 100%) at
-    the first target because the trend has priority; on a return to the level without
-    reversal factors → re-add the same 50% (стр.16 доливка). Course стр.10-11: a hedge is
-    only opened under an ALREADY-profitable position, never a losing one.
+    the opposite boundary because the trend has priority; on a return to the level without
+    reversal factors → re-add the same 50%. Course стр.10-11: a hedge is only opened under
+    an ALREADY-profitable position, never a losing one, and «обычна такого же объема».
+
+    Scope caveat: стр.19's take-50 is anchored to the base's OPPOSITE BOUNDARY, whereas
+    TP1 here is the nearest structural target from ``_structural_targets`` — the same
+    thing only for a flat traded edge-to-edge. This plan is attached to every setup_kind
+    (``_base_summary``), including pp_break/trap_flip/figure_pennant_6touch, where стр.19
+    (a флет rule) does not literally apply. No code branches on these strings, but they
+    ARE rendered into the Telegram card (build.py:502-505) — they are advice a human
+    acts on, so a wrong one misinforms rather than sits inert.
     """
     back = "нижней границе" if direction == "long" else "верхней границе"
     return [
         "Реакция от уровня → перенести стоп в БУ (стр.19)",
         "На TP1: фиксировать 50%, не 100% — приоритет по тренду (стр.19)",
-        f"Возврат к {back} без факторов разворота → добор те же 50% (стр.16/19)",
-        "Хедж только под уже прибыльную позицию, ½ объёма (стр.10-11)",
+        f"Возврат к {back} без факторов разворота → добор те же 50% (стр.19)",
+        "Хедж только под уже прибыльную позицию, объём обычно такой же (стр.10)",
         "Пила на уровне (тела с двух сторон) → выйти в БУ, ждать выхода из пилы, вход на тесте нового накопления (стр.28 сц.7)",
     ]
 
@@ -330,17 +338,44 @@ def _extract_swing_levels(
     *,
     direction: str,
     entry: float,
+    tf: str,
     max_levels: int = 6,
 ) -> list[float]:
-    """Extract intermediate swing highs/lows from structure analysis, filtered to
-    those ahead of entry in the trade direction. Used to build the TP ladder."""
+    """Intermediate swing highs/lows ahead of ``entry``, restricted to the setup's own
+    TF band. Used to build the TP ladder.
+
+    Scale discipline (course стр.24): a tier contributes only when the timeframe its
+    structure was actually built on sits inside ``[ТФ-1 … ТФ+1]`` around ``tf``. Without
+    this the ladder was a second door into the defect 229b1f7 closed on the zone pool:
+    a 15m scalp took macro (1d/1w) swings as rungs — the ТФ-2+ target стр.24 forbids and
+    стр.48 rules out on time («для 15м — в течение 1 часа»). It also defeated
+    ``_structural_targets``'s own contract ("Returns an EMPTY list when no real zone
+    exists ahead inside the permitted band — callers must abstain"): with zero zones the
+    ladder still returned rungs. And since TP1 feeds the RR gate
+    (``_geometry_from_zone``), an out-of-band rung inflated RR too.
+
+    Filter on ``tier["tf"]``, never on the tier's configured timeframes: a ScaleTier
+    lists CANDIDATE timeframes (meso = 1h+4h), but ``structure._tier_structure`` returns
+    the first one that had data and stamps the winner at ``s["tf"]`` (structure.py:74).
+    Those differ — for a 1h setup the intraday tier is in band via its 15m candidate
+    while its structure is 5m, i.e. ТФ-2. No stamp → the band cannot be proven → the
+    tier is skipped (I-6: abstain, never assume).
+    """
     if not struct_by_tier:
         return []
+    own = str(tf).lower()
+    floor_rank = _tf_rank(_LOWER_TF.get(own, own))
+    ceil_rank = _tf_rank(_UPPER_TF.get(own, own))
     all_levels: list[float] = []
     for tier_key in ("macro", "meso", "intraday"):
         tier = struct_by_tier.get(tier_key)
         if not isinstance(tier, dict):
             continue
+        tier_tf = tier.get("tf")
+        if not isinstance(tier_tf, str):
+            continue  # unattributed structure — cannot place it on the ladder (стр.24)
+        if not floor_rank <= _tf_rank(tier_tf) <= ceil_rank:
+            continue  # outside [ТФ-1 … ТФ+1] — стр.24
         if direction == "long":
             for level in tier.get("all_swing_highs") or []:
                 if isinstance(level, (int, float)) and level > entry:
@@ -1276,7 +1311,7 @@ def _zone_edge_candidate(
 
     poc_info = zone_poc(ohlcv, zone=zone, cfg=cfg)
     setup_kind = _TIER_SETUP_KIND[tier_name]
-    swing_levels = _extract_swing_levels(struct_by_tier, direction=direction, entry=catalyst)
+    swing_levels = _extract_swing_levels(struct_by_tier, direction=direction, entry=catalyst, tf=tf)
     summary = _base_summary(
         direction=direction, entry=catalyst, zone=zone, setup_kind=setup_kind,
         tf_tier=tier_name, tf=tf, catalyst_level=catalyst, poc_info=poc_info,
@@ -1391,7 +1426,7 @@ def _zone_candidate(
     if _level_already_worked(bars, level=catalyst, direction=direction) >= 1:
         return None
 
-    swing_levels = _extract_swing_levels(struct_by_tier, direction=direction, entry=catalyst)
+    swing_levels = _extract_swing_levels(struct_by_tier, direction=direction, entry=catalyst, tf=tf)
     summary = _base_summary(
         direction=direction, entry=catalyst, zone=zone, setup_kind=setup_kind,
         tf_tier=tier_name, tf=tf, catalyst_level=catalyst, poc_info=poc_info,
@@ -1503,7 +1538,7 @@ def _forward_zone_candidate(
     # it resolves inside the box (61% of live zones); otherwise the profile peaked outside
     # the cluster-mean bounds and the edge is the safer anchor.
     catalyst = _poc_entry(edge, zone=zone, poc_info=poc_info)
-    swing_levels = _extract_swing_levels(struct_by_tier, direction=direction, entry=catalyst)
+    swing_levels = _extract_swing_levels(struct_by_tier, direction=direction, entry=catalyst, tf=tf)
     summary = _base_summary(
         direction=direction, entry=catalyst, zone=zone, setup_kind="zone_target_forward",
         tf_tier=tier_name, tf=tf, catalyst_level=catalyst, poc_info=poc_info,
@@ -1623,7 +1658,7 @@ def _forward_deep_candidate(
     catalyst = best_zone["hi"]
     dist_pct = (price - catalyst) / price * 100.0
     poc_info: dict[str, Any] = {}
-    swing_levels = _extract_swing_levels(struct_by_tier, direction=direction, entry=catalyst)
+    swing_levels = _extract_swing_levels(struct_by_tier, direction=direction, entry=catalyst, tf=tf)
     summary = _base_summary(
         direction=direction, entry=catalyst, zone=best_zone, setup_kind="zone_target_deep",
         tf_tier=tier_name, tf=tf, catalyst_level=catalyst, poc_info=poc_info,
@@ -1703,7 +1738,7 @@ def _pp_candidate(
             return None
         entry = float(z_lo) if z_lo is not None else level
         band = (float(z_lo), float(z_hi)) if (z_lo and z_hi) else None
-        long_swing = _extract_swing_levels(struct_by_tier, direction="long", entry=entry)
+        long_swing = _extract_swing_levels(struct_by_tier, direction="long", entry=entry, tf=tf)
         summary = _base_summary(
             direction="long", entry=entry, zone={"hi": zone["hi"], "lo": min(zone["lo"], entry)},
             setup_kind="pp_break", tf_tier=tier_name, tf=tf, catalyst_level=level, poc_info={},
@@ -1742,7 +1777,7 @@ def _pp_candidate(
             return None
         entry = float(z_hi) if z_hi is not None else level
         band = (float(z_lo), float(z_hi)) if (z_lo and z_hi) else None
-        short_swing = _extract_swing_levels(struct_by_tier, direction="short", entry=entry)
+        short_swing = _extract_swing_levels(struct_by_tier, direction="short", entry=entry, tf=tf)
         summary = _base_summary(
             direction="short", entry=entry, zone={"hi": max(zone["hi"], entry), "lo": zone["lo"]},
             setup_kind="pp_break", tf_tier=tier_name, tf=tf, catalyst_level=level, poc_info={},
@@ -1799,7 +1834,7 @@ def _trap_flip_candidate(
     if up.get("kind") == "proboy" and hi * (1 - _RETEST_TOL) <= price <= hi * (1 + _RETEST_TOL):
         direction: Literal["long", "short"] = "long"
         entry = hi
-        swing = _extract_swing_levels(struct_by_tier, direction=direction, entry=entry)
+        swing = _extract_swing_levels(struct_by_tier, direction=direction, entry=entry, tf=tf)
         summary = _base_summary(
             direction=direction, entry=entry, zone=zone, setup_kind="trap_flip",
             tf_tier=tier_name, tf=tf, catalyst_level=entry, poc_info={},
@@ -1825,7 +1860,7 @@ def _trap_flip_candidate(
     if down.get("kind") == "proboy" and lo * (1 - _RETEST_TOL) <= price <= lo * (1 + _RETEST_TOL):
         direction = "short"
         entry = lo
-        swing = _extract_swing_levels(struct_by_tier, direction=direction, entry=entry)
+        swing = _extract_swing_levels(struct_by_tier, direction=direction, entry=entry, tf=tf)
         summary = _base_summary(
             direction=direction, entry=entry, zone=zone, setup_kind="trap_flip",
             tf_tier=tier_name, tf=tf, catalyst_level=entry, poc_info={},
@@ -1885,7 +1920,7 @@ def _stop_volume_pre_exit_candidate(
         direction = "short"
     else:
         return None  # no trend, or price not at the trend-side boundary — retest leg owns it
-    swing_levels = _extract_swing_levels(struct_by_tier, direction=direction, entry=price)
+    swing_levels = _extract_swing_levels(struct_by_tier, direction=direction, entry=price, tf=tf)
     summary = _base_summary(
         direction=direction, entry=price, zone=sv, setup_kind="level_intraday_scalp",
         tf_tier=tier_name, tf=tf, catalyst_level=price, poc_info={},
@@ -1915,8 +1950,9 @@ def _stop_volume_pre_exit_candidate(
     return result
 
 
-# Ф6 (курс стр.60): вымпел/треугольник по тренду — «не успели войти от уровня → вход
-# на 6-м касании + доливка на случай расширения; стоп за всю структуру 1-3%».
+# Ф6 (курс стр.57): вымпел/треугольник по тренду — «не успели взять от уровня, то ждем
+# 6 касание... + оставляем на доливку на случай, если цена решит расширить структуру»;
+# стоп за всю структуру с запасом 1-3% (стр.58).
 _PENNANT_WINDOW = 40  # same window _narrowing reads
 _PENNANT_MIN_TOUCHES = 6
 # «Цена у трендовой границы» = within this of the MOST RECENT swing touch of that
@@ -1937,13 +1973,14 @@ def _figure_pennant_candidate(
     htf_bias: dict[str, Any] | None = None,
     struct_by_tier: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
-    """Вымпел 6-е касание (курс стр.60) — the ONE deliberate exception to «фигуры =
+    """Вымпел 6-е касание (курс стр.57) — the ONE deliberate exception to «фигуры =
     только контекст» (figures.py), overridden by explicit user decision 2026-07-15.
 
     Fires when a ``_narrowing`` figure has accumulated >= 6 boundary touches (swing
     pivots inside the figure window) AND price sits at the TREND-side boundary of the
     current (narrowed) range. Entry at the boundary, stop behind the WHOLE structure
-    × stop_buffer (стр.60: «стоп за всю структуру 1-3%»), targets structural via the
+    × stop_buffer (стр.58: «Стоп всегда прячем за всю структуру с запасом 1-3%»),
+    targets structural via the
     shared ``_structural_targets`` path, plus a доливка-on-expansion annotation.
     """
     bias = (htf_bias or {}).get("bias")
@@ -1977,7 +2014,7 @@ def _figure_pennant_candidate(
         return None
     if not (boundary * (1 - _PENNANT_EDGE_TOL) <= price <= boundary * (1 + _PENNANT_EDGE_TOL)):
         return None  # not at the trend boundary (or already broken out/down) — no 6-touch entry
-    # Stop structure = the WHOLE figure (стр.60), not the narrowed half.
+    # Stop structure = the WHOLE figure (стр.58), not the narrowed half.
     zone: dict[str, Any] = {
         "tf": tf,
         "lo": round(struct_lo, 8),
@@ -1985,7 +2022,7 @@ def _figure_pennant_candidate(
         "touches": touches,
         "width_pct": round((struct_hi - struct_lo) / struct_lo * 100, 4),
     }
-    swing_levels = _extract_swing_levels(struct_by_tier, direction=direction, entry=price)
+    swing_levels = _extract_swing_levels(struct_by_tier, direction=direction, entry=price, tf=tf)
     summary = _base_summary(
         direction=direction, entry=price, zone=zone, setup_kind="figure_pennant_6touch",
         tf_tier=tier_name, tf=tf, catalyst_level=price, poc_info={},
@@ -2003,7 +2040,7 @@ def _figure_pennant_candidate(
     result["pattern"] = "вымпел_6е_касание"
     result["pattern_touches"] = touches
     result["management_plan"] = list(result.get("management_plan") or []) + [
-        "Доливка на случай расширения структуры вымпела (стр.60)",
+        "Доливка на случай расширения структуры вымпела (стр.57)",
     ]
     result["invalidation"] = build_invalidation(
         direction=direction, entry_lo=result.get("entry_lo", price * 0.998),
@@ -2234,7 +2271,7 @@ def _scan_tier_timeframe(
     if flip_sig:
         out.append(flip_sig)
 
-    # Вымпел 6-е касание (курс стр.60) — the deliberate exception to «фигуры = только
+    # Вымпел 6-е касание (курс стр.57) — the deliberate exception to «фигуры = только
     # контекст»; see _figure_pennant_candidate.
     pennant_sig = _figure_pennant_candidate(
         ohlcv=ohlcv, ohlcv_by_tf=ohlcv_by_tf, price=price, tf=tf, tier_name=tier_name, cfg=cfg,
@@ -2260,7 +2297,7 @@ def _scan_tier_timeframe(
         elif sv:
             direction: Literal["long", "short"] = "long" if price > sv["hi"] else "short"
             catalyst = sv["hi"] if direction == "long" else sv["lo"]
-            swing_levels = _extract_swing_levels(struct_by_tier, direction=direction, entry=catalyst)
+            swing_levels = _extract_swing_levels(struct_by_tier, direction=direction, entry=catalyst, tf=tf)
             summary = _base_summary(
                 direction=direction, entry=catalyst, zone=sv, setup_kind="level_intraday_scalp",
                 tf_tier=tier_name, tf=tf, catalyst_level=catalyst, poc_info={}, ohlcv_by_tf=ohlcv_by_tf, cfg=cfg,

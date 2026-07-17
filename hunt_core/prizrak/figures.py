@@ -15,8 +15,8 @@ tags an existing candidate's ``summary["pattern"]`` (course: фигуры это
 richer figure is recognized.
 
 ONE deliberate exception (explicit user decision, 2026-07-15): the вымпел 6-е
-касание entry (course стр.60: «не успели войти от уровня → вход на 6-м касании
-+ доливка на случай расширения; стоп за всю структуру 1-3%») IS a candidate —
+касание entry (course стр.57: «не успели взять от уровня, то ждем 6 касание»
++ доливка на расширение; стоп за всю структуру с запасом 1-3%, стр.58) IS a candidate —
 implemented as ``orchestrator._figure_pennant_candidate``, which reuses this
 module's ``_narrowing`` detector. Everything else here remains tag-only.
 """
