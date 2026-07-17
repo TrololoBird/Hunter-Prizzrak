@@ -60,6 +60,25 @@ def find_stop_volume(
                 "width_pct": round(width_pct, 4), "width_ratio_to_zone": round(ratio, 3),
                 "volume_density": round(density, 2),
                 "bar_start_ts": window[0][0], "bar_end_ts": window[-1][0],
+                # Bar span of the стоповый's own sub-window, so poc.zone_poc can pull a
+                # fixed-range profile over exactly these bars: стр.35 gives the стоповый
+                # its OWN ПОК, and стр.26 requires the profile cover the structure's own
+                # candles — without a span zone_poc profiles the whole ТФ-1 lookback and
+                # returns a level that is not this стоповый's ПОК at all.
+                #
+                # Deliberately NOT named first_touch_idx/last_touch_idx like an
+                # accumulation zone's span (accumulation._zone_from_clusters). Those names
+                # promise boundary-touch pivots, which a стоповый has none of (it is found
+                # by density+narrowness), and two OTHER readers of that pair would then
+                # duck-type an sv as a zone: _stop_volume_bars indexes it into the NATIVE-TF
+                # ohlcv while these indices are ТФ-1-relative, and accumulation._zone_volume
+                # assumes touch semantics. Distinct names keep both refusals honest.
+                #
+                # Must stay >= poc._MIN_STRUCTURE_BARS, or _structure_bars silently falls
+                # back to the whole window and hands back the PARENT's ПОК — the exact bug
+                # this span exists to prevent. Pinned by
+                # test_stop_volume_poc_is_its_own_not_the_parent_window.
+                "structure_lo_idx": i, "structure_hi_idx": i + _SUB_WINDOW - 1,
             }
     return best
 

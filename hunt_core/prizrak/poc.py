@@ -32,10 +32,18 @@ _MIN_STRUCTURE_BARS = 5
 def _structure_bars(
     ohlcv: list[list[float]], zone: dict[str, Any] | None
 ) -> list[list[float]]:
-    """Bars spanned by the zone's own structure, or the full window if it can't be located."""
+    """Bars spanned by the structure, or the full window if it can't be located.
+
+    Two producers, two key names, one meaning — "the bars this structure occupies":
+    an accumulation zone marks its span with ``first_touch_idx``/``last_touch_idx``
+    (boundary-touch pivots, accumulation._zone_from_clusters), a стоповый объём with
+    ``structure_lo_idx``/``structure_hi_idx`` (a dense sub-window; it has no touches
+    to count — stop_volume.find_stop_volume).
+    """
     if not zone:
         return ohlcv
-    first, last = zone.get("first_touch_idx"), zone.get("last_touch_idx")
+    first = zone.get("structure_lo_idx", zone.get("first_touch_idx"))
+    last = zone.get("structure_hi_idx", zone.get("last_touch_idx"))
     if first is None or last is None:
         return ohlcv
     lo_i, hi_i = int(first), int(last) + 1

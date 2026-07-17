@@ -244,7 +244,7 @@ def _pre_exit(price: float, bias: str) -> dict[str, Any] | None:
     return _stop_volume_pre_exit_candidate(
         sv=dict(SV), ohlcv=_FLAT_1H, ohlcv_by_tf={"1h": _FLAT_1H, "4h": _SV_TARGET_4H},
         price=price, tf="1h", tier_name="intraday", cfg=CFG,
-        htf_bias={"bias": bias}, struct_by_tier={},
+        htf_bias={"bias": bias}, struct_by_tier={}, poc_info={},
     )
 
 
@@ -318,3 +318,60 @@ def test_pennant_abstains_without_trend_or_narrowing() -> None:
         price=flat[-1][4], tf="1h", tier_name="meso", cfg=CFG,
         htf_bias={"bias": "long"}, struct_by_tier={},
     ) is None
+
+
+# ------------------------------------------ Ф7: у стопового объёма СВОЙ ПОК (стр.35)
+
+def test_stop_volume_poc_is_its_own_not_the_parent_window() -> None:
+    """Курс стр.35: «После выхода из стопового вверх, у нас также появляется уровень в
+    лонг… Также снизу у нас есть уровень лонговый всего накопления, он также актуален» —
+    у стопового СВОЙ ПОК, отдельный от ПОКа всей базы.
+
+    Дифференциальный пиннинг: профиль обязан быть натянут на бары САМОГО стопового
+    (стр.26), а не на всё окно ТФ-1. Без span'а `poc._structure_bars` молча возвращает
+    весь ohlcv, и ПОК получается чужой — тест сравнивает оба исхода, поэтому падает,
+    если span потеряется (в т.ч. если `_SUB_WINDOW` опустится ниже `_MIN_STRUCTURE_BARS`).
+    """
+    from hunt_core.prizrak.poc import zone_poc
+    from hunt_core.prizrak.stop_volume import find_stop_volume
+
+    # Большая база 100-110 с объёмным центром внизу, и узкий плотный стоповый у 104-105.
+    rows: list[list[float]] = []
+    for i in range(30):
+        px = 100.0 + (i % 10)
+        rows.append([i * _STEP, px, px + 1.0, px - 1.0, px, 50.0])
+    for j in range(30, 40):
+        rows.append([j * _STEP, 104.5, 105.0, 104.0, 104.5, 400.0])
+    zone = {"lo": 100.0, "hi": 110.0, "width_pct": 10.0}
+
+    sv = find_stop_volume(rows, zone=zone, cfg=CFG)
+    assert sv, "стоповый должен детектиться"
+    assert "structure_lo_idx" in sv and "structure_hi_idx" in sv, "span стопового обязателен"
+
+    sv_poc = zone_poc(rows, zone=sv, cfg=CFG)["poc"]
+    # Со span'ом ПОК лежит внутри собственных границ стопового…
+    assert sv["lo"] <= sv_poc <= sv["hi"]
+
+    # …и ОТЛИЧАЕТСЯ от того, что вернул бы тот же вызов без span'а (регрессия: пока
+    # find_stop_volume не отдавал span, здесь профилировалось всё окно ТФ-1).
+    no_span = {k: v for k, v in sv.items() if not k.startswith("structure_")}
+    parent_poc = zone_poc(rows, zone=no_span, cfg=CFG)["poc"]
+    assert sv_poc != pytest.approx(parent_poc, abs=0.05), (
+        f"ПОК со span'ом ({sv_poc}) совпал с ПОКом всего окна ({parent_poc}) — "
+        "профиль натянут не на структуру стопового"
+    )
+
+
+def test_zone_span_keys_stay_distinct_from_stop_volume_span_keys() -> None:
+    """Имена span'а у зоны и у стопового РАЗНЫЕ намеренно: `*_touch_idx` обещает пивоты
+    касаний границ, которых у стопового нет, а два других читателя этой пары
+    (`_stop_volume_bars`, `accumulation._zone_volume`) трактовали бы стоповый как зону —
+    причём первый индексирует их в бары РОДНОГО ТФ, а у стопового они от ТФ-1."""
+    from hunt_core.prizrak.stop_volume import find_stop_volume
+
+    rows = [[i * _STEP, 104.5, 105.0, 104.0, 104.5, 400.0] for i in range(20)]
+    sv = find_stop_volume(rows, zone={"lo": 100.0, "hi": 110.0, "width_pct": 10.0}, cfg=CFG)
+    assert sv
+    assert "first_touch_idx" not in sv and "last_touch_idx" not in sv
+    zone = find_accumulation_zone(bars_from_ohlcv(_box(104.0, 100.0, 8)), tf="1h", cfg=CFG)
+    assert "first_touch_idx" in zone and "structure_lo_idx" not in zone

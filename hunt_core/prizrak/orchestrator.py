@@ -1898,6 +1898,7 @@ def _stop_volume_pre_exit_candidate(
     tf: str,
     tier_name: str,
     cfg: PrizrakConfig,
+    poc_info: dict[str, Any],
     htf_bias: dict[str, Any] | None = None,
     struct_by_tier: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
@@ -1923,7 +1924,7 @@ def _stop_volume_pre_exit_candidate(
     swing_levels = _extract_swing_levels(struct_by_tier, direction=direction, entry=price, tf=tf)
     summary = _base_summary(
         direction=direction, entry=price, zone=sv, setup_kind="level_intraday_scalp",
-        tf_tier=tier_name, tf=tf, catalyst_level=price, poc_info={},
+        tf_tier=tier_name, tf=tf, catalyst_level=price, poc_info=poc_info,
         ohlcv_by_tf=ohlcv_by_tf, cfg=cfg, swing_levels=swing_levels,
     )
     if summary is None:
@@ -2285,12 +2286,17 @@ def _scan_tier_timeframe(
     if zone:
         sv_bars = _stop_volume_bars(zone, tf=tf, ohlcv=ohlcv, ohlcv_by_tf=ohlcv_by_tf)
         sv = find_stop_volume(sv_bars, zone=zone, cfg=cfg)
+        # Курс стр.35: у стопового СВОЙ ПОК — «после выхода из стопового вверх у нас также
+        # появляется уровень в лонг», отдельный от уровня всей базы. Fitted to the
+        # стоповый's own bars (стр.26), which is why find_stop_volume carries its span.
+        sv_poc = zone_poc(sv_bars, zone=sv, cfg=cfg) if sv else {}
         if sv and (sv["lo"] <= price <= sv["hi"]):
             # Ф5 (курс стр.35): price still INSIDE the стоповый at its trend-side
             # boundary — the pre-exit leg. The retest leg below stays the repeat entry.
             pre_sig = _stop_volume_pre_exit_candidate(
                 sv=sv, ohlcv=ohlcv, ohlcv_by_tf=ohlcv_by_tf, price=price, tf=tf,
                 tier_name=tier_name, cfg=cfg, htf_bias=htf_bias, struct_by_tier=struct_by_tier,
+                poc_info=sv_poc,
             )
             if pre_sig:
                 out.append(pre_sig)
@@ -2300,7 +2306,7 @@ def _scan_tier_timeframe(
             swing_levels = _extract_swing_levels(struct_by_tier, direction=direction, entry=catalyst, tf=tf)
             summary = _base_summary(
                 direction=direction, entry=catalyst, zone=sv, setup_kind="level_intraday_scalp",
-                tf_tier=tier_name, tf=tf, catalyst_level=catalyst, poc_info={}, ohlcv_by_tf=ohlcv_by_tf, cfg=cfg,
+                tf_tier=tier_name, tf=tf, catalyst_level=catalyst, poc_info=sv_poc, ohlcv_by_tf=ohlcv_by_tf, cfg=cfg,
                 swing_levels=swing_levels,
             )
             if summary is not None:
