@@ -102,6 +102,31 @@ def test_neighbor_beyond_5pct_is_ignored() -> None:
     assert stop == pytest.approx(100.0 * (1 - BUF))
 
 
+def test_stop_hides_behind_same_tf_low_in_2_5pct_band() -> None:
+    """Курс стр.18: «...или Лой ТОГО ЖЕ ТФ или ТФ-1» — свой ТФ тоже легитимный анкер.
+
+    Пиннинг сверки 2026-07-17 (PRIZRAK_METHODOLOGY §6 п.2): раньше пул кандидатов
+    ограничивался ТФ-1 и лой собственного ТФ игнорировался.
+    """
+    zone = {"lo": 100.0, "hi": 104.0}
+    stop = _structural_stop(
+        "long", entry=102.0, zone=zone, buffer_pct=BUF,
+        ohlcv_by_tf={"4h": _flat_with_dip(97.0)}, tf="4h", cfg=CFG,  # ТФ-1 фрейма нет
+    )
+    assert stop == pytest.approx(97.0 * (1 - BUF))  # за лой того же ТФ
+
+
+def test_neighbor_nearest_candidate_wins_across_tfs() -> None:
+    """Кандидаты на обоих ТФ → прячемся за БЛИЖАЙШИЙ к границе (не самый глубокий)."""
+    zone = {"lo": 100.0, "hi": 104.0}
+    stop = _structural_stop(
+        "long", entry=102.0, zone=zone, buffer_pct=BUF,
+        ohlcv_by_tf={"4h": _flat_with_dip(96.0), "1h": _flat_with_dip(97.5)},
+        tf="4h", cfg=CFG,
+    )
+    assert stop == pytest.approx(97.5 * (1 - BUF))  # ближайший (ТФ-1), не глубокий 4ч
+
+
 def test_neighbor_short_side_mirrors() -> None:
     zone = {"lo": 100.0, "hi": 104.0}
     rows = [[i * _STEP, 104.0, 104.0, 103.5, 104.0, 50.0] for i in range(40)]

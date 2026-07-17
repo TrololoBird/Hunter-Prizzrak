@@ -542,11 +542,12 @@ def _poc_entry(edge: float, *, zone: dict[str, Any], poc_info: dict[str, Any]) -
     return float(poc) if lo <= float(poc) <= hi else edge
 
 
-# Ф1 (курс стр.19): a boundary with 3+ touches that has been wicked (прокол) anchors
+# Ф1 (курс стр.18): a boundary with 3+ touches that has been wicked (прокол) anchors
 # the stop behind the WICK extreme, not the cluster-averaged boundary.
 _WICK_STOP_MIN_TOUCHES = 3
-# Ф2 (курс стр.19): «если в 2–5% от границы есть стоповый объём / база мелкого ТФ /
-# лой ТФ-1 — прятать стоп за них». Beyond 5% the structure is too far — ignored.
+# Ф2 (курс стр.18): «Если в диапазоне 2-5% от границы есть стоповый объем – база мелкого
+# ТФ - или Лой того же ТФ или ТФ-1 - идеально стоп прятать за них». Beyond 5% the
+# structure is too far — ignored.
 _NEIGHBOR_STOP_MIN_PCT = 0.02
 _NEIGHBOR_STOP_MAX_PCT = 0.05
 
@@ -560,32 +561,36 @@ def _neighbor_stop_anchor(
     zone: dict[str, Any] | None,
     cfg: PrizrakConfig,
 ) -> float | None:
-    """Nearest ТФ-1 structure in the 2–5% band BEYOND ``boundary`` to hide the stop
-    behind (курс стр.19: «если в диапазоне 2-5% от границы есть стоповый объём / база
-    мелкого ТФ / лой ТФ-1 — стоп прятать за них»).
+    """Nearest structure in the 2–5% band BEYOND ``boundary`` to hide the stop behind
+    (курс стр.18: «Если в диапазоне 2-5% от границы есть стоповый объем – база мелкого
+    ТФ - или Лой того же ТФ или ТФ-1 - идеально стоп прятать за них»).
 
-    Candidates: ТФ-1 swing lows (long) / highs (short) and the ТФ-1 стоповый объём's
-    far edge. Returns the candidate NEAREST to the boundary inside the band (the course
-    hides behind the closest such structure, not the deepest), or None when the lower
-    timeframe is unavailable or nothing sits in the band.
+    Candidates: swing lows (long) / highs (short) of the setup's OWN TF and of ТФ-1,
+    plus the ТФ-1 стоповый объём's far edge (стоповый is by definition a denser base one
+    TF down, стр.34 — no point searching it on the setup's own TF). Returns the candidate
+    NEAREST to the boundary inside the band (the course hides behind the closest such
+    structure, not the deepest), or None when no source frame is available or nothing
+    sits in the band.
     """
     if boundary <= 0 or not ohlcv_by_tf or not tf:
         return None
-    lower_tf = _LOWER_TF.get(str(tf).lower())
-    raw = ohlcv_by_tf.get(lower_tf) if lower_tf else None
-    if not raw:
-        return None
-    lookback = max(_tf_lookback_map(cfg).get(lower_tf or "", 120), 120)
-    rows = raw[-lookback:]
-    bars = bars_from_ohlcv(rows)
+    own_tf = str(tf).lower()
+    lower_tf = _LOWER_TF.get(own_tf)
+    lookbacks = _tf_lookback_map(cfg)
     pts: list[float] = []
-    for _idx, kind, px in _pivots(bars):
-        if (direction == "long" and kind == "low") or (direction == "short" and kind == "high"):
-            pts.append(float(px))
-    if zone and zone.get("width_pct"):
-        sv = find_stop_volume(rows, zone=zone, cfg=cfg)
-        if sv:
-            pts.append(float(sv["lo"] if direction == "long" else sv["hi"]))
+    for src_tf in (own_tf, lower_tf):
+        raw = ohlcv_by_tf.get(src_tf) if src_tf else None
+        if not raw:
+            continue
+        rows = raw[-max(lookbacks.get(src_tf or "", 120), 120):]
+        bars = bars_from_ohlcv(rows)
+        for _idx, kind, px in _pivots(bars):
+            if (direction == "long" and kind == "low") or (direction == "short" and kind == "high"):
+                pts.append(float(px))
+        if src_tf == lower_tf and zone and zone.get("width_pct"):
+            sv = find_stop_volume(rows, zone=zone, cfg=cfg)
+            if sv:
+                pts.append(float(sv["lo"] if direction == "long" else sv["hi"]))
     if direction == "long":
         band = [p for p in pts
                 if boundary * (1 - _NEIGHBOR_STOP_MAX_PCT) <= p <= boundary * (1 - _NEIGHBOR_STOP_MIN_PCT)]
@@ -614,13 +619,13 @@ def _structural_stop(
     buffer off the entry only when no usable zone boundary is available.
 
     Two course refinements deepen the anchor (2026-07-15, PRIZRAK_METHODOLOGY §5 п.1-2):
-    - Ф1 (стр.19): a boundary with 3+ touches that carries wick-проколы (``ext_lo``/
+    - Ф1 (стр.18): a boundary with 3+ touches that carries wick-проколы (``ext_lo``/
       ``ext_hi`` from accumulation.py) anchors behind the deepest прокол, never inside
       the already-wicked range. Zones without prokol data behave as before.
-    - Ф2 (стр.19): when ``ohlcv_by_tf``/``tf``/``cfg`` are supplied, a ТФ-1 stop-volume /
-      swing-low(high) found 2–5% beyond the boundary pulls the anchor behind it
-      (``_neighbor_stop_anchor``); beyond 5% is ignored. Callers without context
-      (tests, bare geometry) keep the plain boundary anchor.
+    - Ф2 (стр.18): when ``ohlcv_by_tf``/``tf``/``cfg`` are supplied, a ТФ-1 stop-volume
+      or an own-TF/ТФ-1 swing-low(high) found 2–5% beyond the boundary pulls the anchor
+      behind it (``_neighbor_stop_anchor``); beyond 5% is ignored. Callers without
+      context (tests, bare geometry) keep the plain boundary anchor.
     """
     if zone:
         lo, hi = zone.get("lo"), zone.get("hi")
