@@ -79,6 +79,11 @@ _LOWER_TF = {"15m": "5m", "1h": "15m", "4h": "1h", "1d": "4h", "1w": "1d"}
 # is the CEILING on where a setup may look for its target, not merely a convenience.
 _UPPER_TF = {"5m": "15m", "15m": "1h", "1h": "4h", "4h": "1d", "1d": "1w"}
 _ENTRY_BAND_PCT = 0.002  # course: entries near POC ± a bit, not one exact tick
+# 0.7% band for "price is currently testing a level/boundary" — one meaning, shared by the
+# ПП retest (_pp_candidate), the trap-flip retest (_trap_flip_candidate) and the вымпел
+# boundary (_figure_pennant_candidate). Was three separate literals; unified so they cannot
+# drift apart.
+_RETEST_TOL = 0.007
 _FORWARD_ZONE_MIN_DIST_PCT = 0.5  # below this, price is basically already there — reactive path owns it
 _FORWARD_ZONE_MAX_DIST_PCT = 20.0  # beyond this, targeting is too speculative to act on
 # The DEEP structural path (swing-low clusters far from recent action) needs a tighter
@@ -1756,7 +1761,6 @@ def _pp_candidate(
     # Emit only when the break is confirmed; an unconfirmed break is abstained on
     # here (a later retest, once confirmed, will produce the real entry).
     min_bodies = cfg.trap_proboy_min_bodies
-    _RETEST_TOL = 0.007  # 0.7% — "price is currently testing the ПП zone"
 
     for direction in ("long", "short"):
         d: Literal["long", "short"] = direction  # type: ignore[assignment]
@@ -1858,7 +1862,6 @@ def _trap_flip_candidate(
     if not zone:
         return None
     hi, lo = zone["hi"], zone["lo"]
-    _RETEST_TOL = 0.007
 
     # Upper boundary broken UP -> flips to support -> LONG on retest from above.
     up = classify_level_touch(bars, level=hi, side="short", cfg=cfg)
@@ -1991,11 +1994,6 @@ def _stop_volume_pre_exit_candidate(
 # по значению, но не по определению.
 _PENNANT_WINDOW = FIGURE_WINDOW
 _PENNANT_MIN_TOUCHES = 6
-# «Цена у трендовой границы» = within this of the MOST RECENT swing touch of that
-# boundary (a converging trendline is best proxied by its latest touch, not the
-# window extreme — in a symmetric pennant the current boundary sits well inside the
-# window's min/max). Same tolerance as the ПП/flip retest band.
-_PENNANT_EDGE_TOL = 0.007
 
 
 def _figure_pennant_candidate(
@@ -2054,7 +2052,11 @@ def _figure_pennant_candidate(
         direction = "short"
     else:
         return None
-    if not (boundary * (1 - _PENNANT_EDGE_TOL) <= price <= boundary * (1 + _PENNANT_EDGE_TOL)):
+    # «Цена у трендовой границы» within _RETEST_TOL of the MOST RECENT swing touch of that
+    # boundary (a converging trendline is best proxied by its latest touch, not the window
+    # extreme — in a symmetric pennant the current boundary sits well inside the window's
+    # min/max). Same testing band as the ПП/flip retest.
+    if not (boundary * (1 - _RETEST_TOL) <= price <= boundary * (1 + _RETEST_TOL)):
         return None  # not at the trend boundary (or already broken out/down) — no 6-touch entry
     # Stop structure = the WHOLE figure (стр.58), not the narrowed half.
     zone: dict[str, Any] = {
