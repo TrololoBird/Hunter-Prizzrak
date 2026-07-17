@@ -37,7 +37,7 @@ from hunt_core.prizrak.dominance import compute_dominance_factor
 from hunt_core.prizrak.liq_reconcile import compute_liquidation_factor
 from hunt_core.prizrak.figures import tag_squeeze_pattern
 from hunt_core.prizrak.marketcap import compute_marketcap_factor
-from hunt_core.prizrak.figures import _narrowing
+from hunt_core.prizrak.figures import _narrowing, _wedge
 from hunt_core.prizrak.pp import _pivots, detect_pereprior
 from hunt_core.prizrak.poc import zone_poc
 from hunt_core.prizrak.stop_volume import find_stop_volume
@@ -1691,6 +1691,44 @@ def _forward_deep_candidate(
     return result
 
 
+# Курс стр.51: «Иногда бывает истинный ПП и ранний ПП +- рядом, тогда закуп лучше делить
+# на 2 части». Насколько «рядом» — сказано только картинкой: на скрине KNC (стр.52)
+# измеритель между двумя ПП показывает 2.05%.
+_PP_NEAR_PCT = 0.02
+
+
+def _pp_confirmed_levels(
+    pp: dict[str, Any],
+    direction: Literal["long", "short"],
+    *,
+    min_bodies: int,
+) -> list[dict[str, Any]]:
+    """Confirmed ПП levels on one side, истинный first (стр.50 — the stronger read).
+
+    Both types coexist and break at different depths (стр.51-52), so this returns a LIST:
+    the caller entries on whichever level price is retesting and, when the other one sits
+    within ``_PP_NEAR_PCT``, splits the buy across both. Levels without a тень-свечи zone
+    are dropped — стр.55 makes the zone the level, and without it there is nothing to
+    test price against (I-6: no zone → no claim).
+    """
+    out: list[dict[str, Any]] = []
+    for kind in ("true", "early"):
+        key = f"pp_{kind}_{direction}"
+        if not pp.get(key):
+            continue
+        if int(pp.get(f"{key}_bodies") or 0) < min_bodies:
+            continue  # unconfirmed прокол — курс стр.55: «не берем позицию в таком случае»
+        z_lo, z_hi = pp.get(f"{key}_zone_lo"), pp.get(f"{key}_zone_hi")
+        level = float(pp.get(f"{key}_level") or 0)
+        if not z_lo or not z_hi or level <= 0:
+            continue
+        out.append({
+            "kind": kind, "level": level, "z_lo": z_lo, "z_hi": z_hi,
+            "bodies": int(pp.get(f"{key}_bodies") or 0),
+        })
+    return out
+
+
 def _pp_candidate(
     *,
     ohlcv: list[list[float]],
@@ -1720,84 +1758,77 @@ def _pp_candidate(
     min_bodies = cfg.trap_proboy_min_bodies
     _RETEST_TOL = 0.007  # 0.7% — "price is currently testing the ПП zone"
 
-    if pp.get("pp_true_long") or pp.get("pp_early_long"):
-        is_true = bool(pp.get("pp_true_long"))
-        bodies = int((pp.get("pp_true_long_bodies") if is_true else pp.get("pp_early_long_bodies")) or 0)
-        if bodies < min_bodies:
-            return None  # unconfirmed прокол — course: не берём позицию
-        level = float(pp.get("pp_true_long_level") or 0) if is_true else float(pp.get("pp_early_long_level") or 0)
-        # Course стр.55: the ПП level is the whole тень-свечи zone. Entry band = that
-        # zone; the traded/defended edge (for the stop) is its lower boundary.
-        z_lo = pp.get("pp_true_long_zone_lo") if is_true else pp.get("pp_early_long_zone_lo")
-        z_hi = pp.get("pp_true_long_zone_hi") if is_true else pp.get("pp_early_long_zone_hi")
-        # Course стр.50-51: "ТВХ является ТЕСТ ПП" — the entry is the retest of the
-        # broken level, not the break itself. Emit only when price has come back
-        # to the zone; if it broke up and ran away (price >> zone), there's no
-        # entry yet — abstain until a retest brings price back.
-        if z_lo and z_hi and not (float(z_lo) * (1 - _RETEST_TOL) <= price <= float(z_hi) * (1 + _RETEST_TOL)):
-            return None
-        entry = float(z_lo) if z_lo is not None else level
-        band = (float(z_lo), float(z_hi)) if (z_lo and z_hi) else None
-        long_swing = _extract_swing_levels(struct_by_tier, direction="long", entry=entry, tf=tf)
-        summary = _base_summary(
-            direction="long", entry=entry, zone={"hi": zone["hi"], "lo": min(zone["lo"], entry)},
-            setup_kind="pp_break", tf_tier=tier_name, tf=tf, catalyst_level=level, poc_info={},
-            ohlcv_by_tf=ohlcv_by_tf, cfg=cfg, swing_levels=long_swing, entry_band=band,
-        )
-        if summary is None:
-            return None
-        summary["gates_failed"] = []
-        summary["geometry_confidence"] = 0.7 if is_true else 0.6
-        summary["pp_bodies"] = bodies
-        result = _apply_confluence(
-            summary, ohlcv=ohlcv,
-            cfg=cfg, htf_bias=htf_bias, struct_by_tier=struct_by_tier,
-        )
-        if result is not None:
-            result["invalidation"] = build_invalidation(
-                direction="long", entry_lo=result.get("entry_lo", entry * 0.998),
-                entry_hi=result.get("entry_hi", entry * 1.002),
-                stop=result.get("stop", 0), catalyst_level=level, zone=zone,
-                swing_highs=long_swing, entry_tf=tf,
-            )
-        return result
+    for direction in ("long", "short"):
+        d: Literal["long", "short"] = direction  # type: ignore[assignment]
+        levels = _pp_confirmed_levels(pp, d, min_bodies=min_bodies)
+        if not levels:
+            continue  # no confirmed слом on this side — unconfirmed прокол, не берём (стр.55)
 
-    if pp.get("pp_true_short") or pp.get("pp_early_short"):
-        is_true = bool(pp.get("pp_true_short"))
-        bodies = int((pp.get("pp_true_short_bodies") if is_true else pp.get("pp_early_short_bodies")) or 0)
-        if bodies < min_bodies:
-            return None  # unconfirmed прокол — course: не берём позицию
-        level = float(pp.get("pp_true_short_level") or 0) if is_true else float(pp.get("pp_early_short_level") or 0)
-        z_lo = pp.get("pp_true_short_zone_lo") if is_true else pp.get("pp_early_short_zone_lo")
-        z_hi = pp.get("pp_true_short_zone_hi") if is_true else pp.get("pp_early_short_zone_hi")
-        # Course стр.50-51: entry = retest of the broken level. Emit only when
-        # price has bounced back up to the ПП zone; if it broke down and ran
-        # away, abstain until the retest.
-        if z_lo and z_hi and not (float(z_lo) * (1 - _RETEST_TOL) <= price <= float(z_hi) * (1 + _RETEST_TOL)):
-            return None
-        entry = float(z_hi) if z_hi is not None else level
-        band = (float(z_lo), float(z_hi)) if (z_lo and z_hi) else None
-        short_swing = _extract_swing_levels(struct_by_tier, direction="short", entry=entry, tf=tf)
+        # Course стр.50-51: «ТВХ является ТЕСТ ПП» — entry is the retest of the broken
+        # level, not the break. Emit only for a level price has actually come back to.
+        tested = [
+            lv for lv in levels
+            if float(lv["z_lo"]) * (1 - _RETEST_TOL) <= price <= float(lv["z_hi"]) * (1 + _RETEST_TOL)
+        ]
+        if not tested:
+            continue
+        primary = tested[0]  # истинный first (стр.50 — the stronger read)
+        level = primary["level"]
+        z_lo, z_hi = float(primary["z_lo"]), float(primary["z_hi"])
+        entry = z_lo if d == "long" else z_hi
+
+        # Course стр.51: «Иногда бывает истинный ПП и ранний ПП +- рядом, тогда закуп
+        # лучше делить на 2 части» — на KNC (стр.52) замерено 2.05% между ними. Both
+        # levels get an order; стр.52 places them only after закрепление полными свечами
+        # under the деeper one, which is what the min_bodies gate above already is.
+        partner = next(
+            (lv for lv in levels
+             if lv["kind"] != primary["kind"]
+             and abs(lv["level"] - level) / level <= _PP_NEAR_PCT),
+            None,
+        )
+
+        swing = _extract_swing_levels(struct_by_tier, direction=d, entry=entry, tf=tf)
+        zone_arg = (
+            {"hi": zone["hi"], "lo": min(zone["lo"], entry)} if d == "long"
+            else {"hi": max(zone["hi"], entry), "lo": zone["lo"]}
+        )
         summary = _base_summary(
-            direction="short", entry=entry, zone={"hi": max(zone["hi"], entry), "lo": zone["lo"]},
+            direction=d, entry=entry, zone=zone_arg,
             setup_kind="pp_break", tf_tier=tier_name, tf=tf, catalyst_level=level, poc_info={},
-            ohlcv_by_tf=ohlcv_by_tf, cfg=cfg, swing_levels=short_swing, entry_band=band,
+            ohlcv_by_tf=ohlcv_by_tf, cfg=cfg, swing_levels=swing, entry_band=(z_lo, z_hi),
         )
         if summary is None:
-            return None
+            continue
         summary["gates_failed"] = []
-        summary["geometry_confidence"] = 0.7 if is_true else 0.6
-        summary["pp_bodies"] = bodies
+        summary["geometry_confidence"] = 0.7 if primary["kind"] == "true" else 0.6
+        summary["pp_bodies"] = primary["bodies"]
+        if partner is not None:
+            gap = abs(partner["level"] - level) / level * 100
+            # Стр.55: «Уровнем ПП является вся зона Тени свечи ... а НЕ ТОЛЬКО "шпиль"».
+            # ``level`` IS the шпиль (``_fill`` stores the pivot price, and _wick_zone puts
+            # that price on the far edge of the zone), so ordering at it would put the
+            # partner limit at the worst fill of its own zone. Take the same edge the
+            # primary entry takes.
+            partner_entry = float(partner["z_lo"] if d == "long" else partner["z_hi"])
+            orders = {
+                round(float(x), 8)
+                for x in (*(summary.get("entry_orders") or ()), entry, partner_entry)
+            }
+            summary["entry_orders"] = sorted(orders, reverse=(d == "short"))
+            summary["management_plan"] = list(summary.get("management_plan") or []) + [
+                f"Истинный и ранний ПП рядом ({gap:.1f}%) → закуп делить на 2 части (стр.51)",
+            ]
         result = _apply_confluence(
-            summary, ohlcv=ohlcv,
-            cfg=cfg, htf_bias=htf_bias, struct_by_tier=struct_by_tier,
+            summary, ohlcv=ohlcv, cfg=cfg, htf_bias=htf_bias, struct_by_tier=struct_by_tier,
         )
         if result is not None:
+            swing_kw = {"swing_highs": swing} if d == "long" else {"swing_lows": swing}
             result["invalidation"] = build_invalidation(
-                direction="short", entry_lo=result.get("entry_lo", entry * 0.998),
+                direction=d, entry_lo=result.get("entry_lo", entry * 0.998),
                 entry_hi=result.get("entry_hi", entry * 1.002),
                 stop=result.get("stop", 0), catalyst_level=level, zone=zone,
-                swing_lows=short_swing, entry_tf=tf,
+                entry_tf=tf, **swing_kw,
             )
         return result
 
@@ -1988,6 +2019,12 @@ def _figure_pennant_candidate(
     if bias not in ("long", "short"):
         return None  # вымпел торгуем строго по тренду (стр.57)
     if not _narrowing(ohlcv, window=_PENNANT_WINDOW):
+        return None
+    # Сужение бывает двух видов, и правило входа у них РАЗНОЕ. «6-е касание + доливка» —
+    # правило вымпела/треугольника (стр.57-58). Клин (стр.60: «выглядит как флаг, только
+    # в сужение») входит иначе: «вход на тесте лонг уровня, или вход на тесте слома
+    # тенденции». Без этой проверки клин получал чужое правило — _narrowing их не различает.
+    if _wedge(ohlcv, window=_PENNANT_WINDOW):
         return None
     tail = ohlcv[-_PENNANT_WINDOW:]
     bars = bars_from_ohlcv(tail)
