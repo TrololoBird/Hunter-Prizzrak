@@ -19,17 +19,11 @@ This skill covers **МАНИПУЛЯЦИИ only**. Check before running anything
 Running the gate anyway and reading "no change" as "no regression" is FALSE SAFETY — the
 harness never executed the code you edited.
 
-**What to do for a prizrak emission change instead:** run its OWN measurer,
-`research/prizrak_replay.py` (added 2026-07-17) — a forward-replay of the production path
-(`build_prizrak_signals`) over `dataset_v10` with no lookahead, touch-based outcome (limit
-fill → stop/target first), reporting win rate and R-expectancy before/after. It is
-deliberately NOT a `backtest_*.py` (that prefix is reserved for the manipulations harness and
-must import the manipulations path); the boundary is now two-directional — `prizrak_replay.py`
-must not import the scanner/delivery path, pinned by `tests/test_module_boundary.py`.
-Reuse its `_load`/`_resolve`, hold an OOS slice (`--oos`), count independent episodes not just
-n, and don't tune on the same slice you judge on (Bailey/López de Prado: in-sample max grows
-with trials). Older precedent for a targeted one-off measurement: the стр.24 ТФ+1 ceiling
-(229b1f7), 12 symbols × 40 setups. Either is a real measurement; the backtest gate would be null.
+**What to do for a prizrak emission change instead:** measure it directly on live data —
+compute the affected quantity before/after across the universe via public `fetchOHLCV` and
+report what moved and by how much. Precedent: the стр.24 ТФ+1 target ceiling (commit
+229b1f7) was measured over 12 symbols × 40 setups, showing every change was a scalp reaching
+for a 1D level. That is a real measurement; the backtest would have been a null one.
 
 
 Some fixes change WHAT is emitted or HOW a position is managed, not just the Telegram text.
