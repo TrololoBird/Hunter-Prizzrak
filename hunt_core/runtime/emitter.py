@@ -128,13 +128,3 @@ def _register_tracker(signal: Signal, row: dict[str, Any]) -> None:
         _LOG.exception("signal_tracker_register_failed symbol=%s", signal.symbol)
 
 
-async def emit_lifecycle_message(
-    broadcaster: Any,
-    row: dict[str, Any],
-    *,
-    cycle_peers: list[dict[str, Any]] | None = None,
-    store: SignalLifecycleStore | None = None,
-) -> bool:
-    emitter = SignalEmitter(store=store)
-    preview = emitter.preview_deep_row(row)
-    return await emitter.emit_deep(broadcaster, row, cycle_peers=cycle_peers, transition=preview)

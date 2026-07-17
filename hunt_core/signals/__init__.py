@@ -18,25 +18,36 @@ The two lanes converge only AFTER emission, at `track/tracker.py::register_signa
 row dict and no shared spine. `module=2` is unreachable scaffolding; keep it or delete it,
 but do not read it as evidence that this module is generic.
 
+Nothing imports this PACKAGE — every consumer imports the submodules (`.lifecycle`,
+`.model`, `.price_sanity`) directly — so the facade below is unreachable too. `__init__` is
+still executed (importing `signals.lifecycle` runs the parent first), which is why vulture
+never flagged it: `__all__` and the lazy import are real references to a dead surface. That
+is what hid `emit_lifecycle_message` here until 2026-07-17, when it was deleted.
+
 See CLAUDE.md § «Два модуля — НЕ ПУТАТЬ».
 """
+from typing import Any
+
 from hunt_core.signals.lifecycle import SignalLifecycleStore, compute_setup_id, process_lifecycle_tick
 from hunt_core.signals.model import Signal, SignalModule, SignalState
 
 
-def _lazy_emitter() -> tuple:
-    from hunt_core.runtime.emitter import SignalEmitter, emit_lifecycle_message  # noqa: PLC0415
-    return SignalEmitter, emit_lifecycle_message
+def SignalEmitter(store: SignalLifecycleStore | None = None) -> Any:
+    """Lazily construct `runtime.emitter.SignalEmitter` (breaks an import cycle).
 
+    Signature mirrors the real class. It used to be `(*args: object, **kwargs: object)`
+    behind an untyped `_lazy_emitter() -> tuple`, which defeated type-checking entirely —
+    once the indirection went, mypy immediately caught that `object` was not
+    `SignalLifecycleStore | None`. The facade had been lying about its own arguments for as
+    long as nothing called it.
 
-def SignalEmitter(*args: object, **kwargs: object) -> object:
-    cls, _ = _lazy_emitter()
-    return cls(*args, **kwargs)
-
-
-def emit_lifecycle_message(*args: object, **kwargs: object) -> object:
-    _, func = _lazy_emitter()
-    return func(*args, **kwargs)
+    NB it still has no callers — nothing imports the `hunt_core.signals` PACKAGE; every
+    consumer imports the submodules directly. Kept because dropping the package's public
+    surface is a wider call than the dead-code sweep that removed `emit_lifecycle_message`
+    from beside it. If you are here to tidy: this and `__all__` go too, on the same evidence.
+    """
+    from hunt_core.runtime.emitter import SignalEmitter as _SignalEmitter  # noqa: PLC0415
+    return _SignalEmitter(store)
 
 
 __all__ = [
@@ -46,6 +57,5 @@ __all__ = [
     "SignalModule",
     "SignalState",
     "compute_setup_id",
-    "emit_lifecycle_message",
     "process_lifecycle_tick",
 ]
