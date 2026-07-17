@@ -32,7 +32,7 @@ from typing import Any, Literal
 from hunt_core.prizrak.invalidation import build_invalidation
 from hunt_core.prizrak.accumulation import _CLUSTER_TOL, _overlaps, find_accumulation_zone, find_accumulation_zones
 from hunt_core.prizrak.confluence import compute_confluence
-from hunt_core.prizrak.config import PrizrakConfig, ScaleTier
+from hunt_core.prizrak.config import LadderTF, PrizrakConfig, ScaleTier
 from hunt_core.prizrak.dominance import compute_dominance_factor
 from hunt_core.prizrak.liq_reconcile import compute_liquidation_factor
 from hunt_core.prizrak.figures import tag_squeeze_pattern
@@ -906,7 +906,7 @@ def _htf_bias(
     of institutional absorption, not a counter-trend blip to ignore.
     """
     struct_by_tf: dict[str, dict[str, Any]] = {}
-    tier_for_tf: dict[str, str] = {"1w": "macro", "1d": "macro", "4h": "meso", "1h": "meso"}
+    tier_for_tf: dict[LadderTF, str] = {"1w": "macro", "1d": "macro", "4h": "meso", "1h": "meso"}
     if ohlcv_by_tf is not None:
         for tf, tier_key in tier_for_tf.items():
             if tf in ohlcv_by_tf:
@@ -1019,7 +1019,7 @@ def _higher_tf_neutral(
     return _tier_trend(higher) == "neutral"
 
 
-def _mk_scale_tier(tf: str, tier_key: str, cfg: PrizrakConfig) -> ScaleTier:
+def _mk_scale_tier(tf: LadderTF, tier_key: str, cfg: PrizrakConfig) -> ScaleTier:
     """Build a single-TF ScaleTier with the configured lookback for that tier."""
     lookbacks = {
         "macro": cfg.macro.lookback_bars,

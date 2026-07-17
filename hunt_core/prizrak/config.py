@@ -8,15 +8,24 @@ mandatory — every level-finding detector runs at all three tiers, never just o
 """
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 from pydantic import BaseModel, Field
 
 from hunt_core.domain.config import load_config_defaults_toml
 
+# The course's own ladder, стр.17: «Мы используем основные ТФ (5м/15м/час/4ч/1Д/1Н)».
+# Constrained to a Literal so a TOML typo like "30m"/"3h" fails LOUDLY at config load
+# instead of silently: those TFs are unknown to _LOWER_TF/_UPPER_TF, and _tf_rank would
+# return its default 15 — numerically indistinguishable from a real 15m — collapsing the
+# target ladder or mis-ranking the setup (docs/PRIZRAK_METHODOLOGY.md §6 п.20). And
+# analyst_assembly fetches each tier TF straight from CCXT, so a bad TF is a live per-tick
+# fetch failure. A ValidationError at load is the honest failure mode.
+LadderTF = Literal["5m", "15m", "1h", "4h", "1d", "1w"]
+
 
 class ScaleTier(BaseModel):
-    timeframes: tuple[str, ...]
+    timeframes: tuple[LadderTF, ...]
     lookback_bars: int = Field(ge=10)
 
 
@@ -40,8 +49,6 @@ class PrizrakConfig(BaseModel):
     # different price regimes (e.g. an old ATH high with a recent low), which produces
     # unusable stop distances. Reject rather than emit a degraded, over-wide box.
     accumulation_max_width_pct: float = Field(default=12.0, ge=1.0)
-    # Swing pivot lookback (both sides) for накопление/стоповый-объём boundary detection.
-    swing_pivot_n: int = Field(default=3, ge=1)
 
     # Traps: prokol = wick beyond level + close back within this many bars.
     trap_prokol_max_bars: int = Field(default=2, ge=1)
@@ -94,9 +101,6 @@ class PrizrakConfig(BaseModel):
     htf_1d_weight: float = Field(default=0.30, ge=0.0)
     htf_4h_weight: float = Field(default=0.25, ge=0.0)
     htf_1h_weight: float = Field(default=0.10, ge=0.0)
-    # Legacy aliases — keep for backward compat but unused internally.
-    htf_macro_weight: float = Field(default=0.6, ge=0.0)
-    htf_meso_weight: float = Field(default=0.4, ge=0.0)
     # Strength multiplier when a candidate aligns with HTF bias; penalty when it opposes
     # HTF bias but a confirmed BOS/CHoCH slom exists in the candidate direction.
     htf_align_bonus: float = Field(default=0.12, ge=0.0, le=0.5)
@@ -107,10 +111,6 @@ class PrizrakConfig(BaseModel):
     # the course requires a FRESH slom to open counter-trend ("для шортов нужен
     # слом структуры на МТФ" = recent, not the first BOS in weeks).
     bos_max_bar_offset: int = Field(default=5, ge=1)
-    # Regime-range veto: when market_regime contains "ranging", candidates with
-    # entry price in the middle fraction of the value area (VAH/VAL) are vetoed.
-    # 0.0=no veto, 0.5=veto when price within middle 50% of the value area, etc.
-    regime_range_veto_mid_fraction: float = Field(default=0.40, ge=0.0, le=1.0)
 
     # Market-cap доп-фактор (Павел М., prizrak_marketcap_factor) — the cap chart as a
     # calibration factor for true-value/price divergence. OFF by default: it needs a

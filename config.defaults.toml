@@ -269,4 +269,9 @@ replay_target_atr = 1.5
 # [deep]/[deep.macro]/[deep.trend]/[deep.positioning]/[deep.risk]/[deep.new_coin]/
 # [deep.regime]) was removed along with that file — PrizrakTrade
 # (hunt_core/prizrak/config.py) is the sole Deep engine now and reads its own [deep.prizrak]
-# section (currently unset, all dataclass defaults apply).
+# section. It is currently UNSET, so all Pydantic-model defaults apply (PrizrakConfig is a
+# BaseModel — the project forbids dataclasses). The forwarding at domain/config.py:359-361 is
+# live and verified (tests/test_prizrak_toml_wired.py) — the section is wired-but-unwritten,
+# NOT doc-only. Most fields are method invariants (min_rr стр.9, accumulation_min_touches
+# стр.22, stop_buffer_pct стр.33); adding the section wholesale invites re-tuning the method
+# in обход of the PDF — leave it unset unless a specific deploy-time override is needed.
