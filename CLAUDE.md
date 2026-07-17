@@ -14,7 +14,7 @@ Crypto-futures **signal-analytics**. Reads public Binance USDⓈ-M via CCXT, Pol
 | | **ПРИЗРАК** | **МАНИПУЛЯЦИИ** |
 |---|---|---|
 | Код | `hunt_core/prizrak/` → `runtime/analyst_assembly.py`, `deliver/_sections.py` | `hunt_core/scanner/` (`detect/patterns.py::advance_manipulation_scales`) → `deliver/manipulation_delivery.py` |
-| Истина | PDF «Мини Курс по трейдингу от PrizrakTrade» (69 стр.) + `research/prizrak_corpus/` | `.txt` транскрипты + `research/manipulations_corpus/` |
+| Истина | PDF «Мини Курс по трейдингу от PrizrakTrade» (69 стр.) — первичен; `research/prizrak_corpus/` разборы вторичны, до перепроверки не переопределяют PDF | `.txt` транскрипты + `research/manipulations_corpus/` |
 | Игра | уровни/накопление/ПОК, непрерывно, RR 1к3 | редкий ММ памп/дамп 20–180%, ~5–6/мес |
 | Стоп | за структуру с запасом 1–3% (стр.33) | ШИРОКИЙ: за экстремум ВСЕЙ манипуляции + 0.3×ATR clamp [3%,5%]; добор/пересиживание (`patterns.py:790,908`, `manipulation_delivery.py:_stop_buffer`) |
 | Гейт эмиссии | **бэктеста НЕТ** — мерить на живых данных | `research/backtest_*.py` (скилл `/backtest-gate`) |

@@ -1,7 +1,15 @@
 # Prizrak corpus — source material for the **Prizrak** module
 
-Primary-source live разборы of the **PrizrakTrade** level/structure strategy that
-`hunt_core/prizrak/` implements (decision authority; deep-analysis engine).
+Live разборы of the **PrizrakTrade** level/structure strategy that
+`hunt_core/prizrak/` implements (deep-analysis engine).
+
+> **Truth hierarchy (2026-07-17, user directive — memory `pdf-course-is-primary-truth`):**
+> the PDF mini-course («Мини Курс по трейдингу от PrizrakTrade», 69 стр.) is THE primary
+> truth for Prizrak. The разборы here are **secondary**: transcription/understanding was
+> done by an agent and may contain errors — every conclusion derived only from a разбор
+> is suspect until re-verified against the video. Full page-by-page multimodal notes of
+> the PDF (text + every chart) live in `course_notes/`; the operational digest is
+> `docs/PRIZRAK_METHODOLOGY.md`.
 
 > **Module boundary — do not confuse.** This corpus feeds **Prizrak**
 > (`hunt_core/prizrak/`) — level trading: ключевой уровень структуры, накопление/ПОК, ПП
