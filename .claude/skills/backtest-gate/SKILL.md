@@ -1,19 +1,50 @@
 ---
 name: backtest-gate
-description: Run the touch-based outcome backtest before/after a change that alters signal EMISSION or position MANAGEMENT (not just presentation), and report the R delta. Use before merging any change to what the scanner detects or how the tracker manages a signal (e.g. G-3, G-7, G-13, or reviving a phantom-key feature). Pinning tests prove correctness, NOT "better by R" — this skill is the emission gate.
+description: "MANIPULATIONS MODULE ONLY (hunt_core/scanner/ + deliver/manipulation_delivery.py). Run the touch-based outcome backtest before/after a change that alters signal EMISSION or position MANAGEMENT there, and report the R delta. DOES NOT APPLY to hunt_core/prizrak/ — no backtest imports it, so a run would return an identical number that means nothing; measure prizrak changes on live data instead. Use before merging a change to what the SCANNER detects or how the tracker manages a scanner signal (e.g. G-3, G-7, G-13). Pinning tests prove correctness, NOT 'better by R'."
 ---
+
+## STOP — which module is your change in?
+
+This skill covers **МАНИПУЛЯЦИИ only**. Check before running anything:
+
+| Your change touches | This skill |
+|---|---|
+| `hunt_core/scanner/**`, `deliver/manipulation_delivery.py` | ✅ applies |
+| `hunt_core/prizrak/**` | ❌ **does NOT apply — do not run it** |
+| shared plumbing (`market/`, `data/`, `features/`) | ✅ only if a scanner path consumes it |
+
+**Why prizrak is out of scope, mechanically:** every `research/backtest_*.py` imports
+`advance_manipulation_scales` / `manipulation_delivery`; **none imports `hunt_core/prizrak/`**
+(pinned by `tests/test_module_boundary.py`). So a prizrak change cannot move the number.
+Running the gate anyway and reading "no change" as "no regression" is FALSE SAFETY — the
+harness never executed the code you edited.
+
+**What to do for a prizrak emission change instead:** measure it directly on live data —
+compute the affected quantity before/after across the universe via public `fetchOHLCV` and
+report what moved and by how much. Precedent: the стр.24 ТФ+1 target ceiling (commit
+229b1f7) was measured over 12 symbols × 40 setups, showing every change was a scalp reaching
+for a 1D level. That is a real measurement; the backtest would have been a null one.
+
 
 Some fixes change WHAT is emitted or HOW a position is managed, not just the Telegram text.
 For those, a green pinning test is necessary but not sufficient — you must show the change
-does not degrade realized expectancy. This skill runs that gate.
+does not degrade realized expectancy. This skill runs that gate **for the scanner path**.
 
 ## When it applies
 
-- Scanner detection changes (what qualifies as a setup / pattern): e.g. G-7 Pattern A.
-- Entry/stop/target geometry, R:R gating: e.g. G-3 worst-entry basis.
-- Tracker management (breakeven, trailing, invalidation, TTL): e.g. G-70, reviving G-68/G-69.
-- Universe/emission filters.
-Presentation-only changes (labels, stats display, dead-code deletion) do NOT need this.
+Every entry below is implicitly prefixed **«in `hunt_core/scanner/` / `manipulation_delivery`»**.
+The same words describe real work in `hunt_core/prizrak/` too, and that is exactly the trap —
+"target geometry" reads as universal, so an agent matches this skill to a prizrak change and
+runs a harness that never imports it. Re-read the module table above before using this list.
+
+- SCANNER detection changes (what qualifies as a setup / pattern): e.g. G-7 Pattern A.
+- SCANNER entry/stop/target geometry, R:R gating: e.g. G-3 worst-entry basis.
+  (`prizrak` target geometry — e.g. `_structural_targets` — is NOT this. See 229b1f7.)
+- Tracker management of a SCANNER signal (breakeven, trailing, invalidation, TTL): G-70.
+- SCANNER universe/emission filters.
+
+Presentation-only changes (labels, stats display, dead-code deletion) do NOT need this —
+in either module.
 
 ## Run (chunked — the full run OOMs, exit 137)
 
