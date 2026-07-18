@@ -104,3 +104,25 @@ def test_fetch_futures_data_series_empty_on_unsupported() -> None:
         rest.fetch_futures_data_series(_NoMethod(), "fapiDataGetOpenInterestHist", {}, "sumOpenInterest")
     )
     assert out == []
+
+
+class _TickersExchange:
+    def __init__(self, tickers: Any, *, raise_it: bool = False) -> None:
+        self._t = tickers
+        self._raise = raise_it
+        self.id = "binance"
+
+    async def fetch_tickers(self) -> Any:
+        if self._raise:
+            raise RuntimeError("boom")
+        return self._t
+
+
+def test_fetch_all_tickers_returns_dict_filters_non_dict() -> None:
+    ex = _TickersExchange({"BTC/USDT:USDT": {"last": 64000.0}, "BAD": None})
+    out = asyncio.run(rest.fetch_all_tickers(ex))
+    assert out == {"BTC/USDT:USDT": {"last": 64000.0}}  # non-dict entry dropped
+
+
+def test_fetch_all_tickers_empty_on_failure() -> None:
+    assert asyncio.run(rest.fetch_all_tickers(_TickersExchange(None, raise_it=True))) == {}

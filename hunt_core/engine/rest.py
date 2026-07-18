@@ -136,6 +136,21 @@ async def fetch_futures_data_series(
     return out
 
 
+async def fetch_all_tickers(exchange: Any) -> dict[str, dict[str, Any]]:
+    """All-symbol 24h tickers via REST ``fetch_tickers`` (the scanner funnel ranks the whole universe).
+
+    The streamed per-symbol ticker planes only cover the TRACKED universe; the scanner has to rank
+    every perp, so this is the one genuinely universe-wide REST batch (weight ~40, periodic). Fail-loud
+    ``{}`` on failure — never a partial/fabricated map.
+    """
+    try:
+        tickers = await exchange.fetch_tickers()
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("engine_fetch_all_tickers_failed", venue=getattr(exchange, "id", "?"), err=str(exc))
+        return {}
+    return {s: t for s, t in (tickers or {}).items() if isinstance(t, dict)}
+
+
 async def poll_open_interest(exchange: Any, symbol: str) -> float | None:
     """Current open interest (``/fapi/v1/openInterest``, weight 1). ``None`` on failure — no fake 0."""
     try:
@@ -257,6 +272,7 @@ __all__ = [
     "fetch_ohlcv_between",
     "fetch_funding_history",
     "fetch_futures_data_series",
+    "fetch_all_tickers",
     "poll_open_interest",
     "poll_funding_rates",
     "poll_long_short_ratio",

@@ -22,7 +22,8 @@ stay (extracted out of the transport). The **transport + caches** die and are re
 | **`fetch_oi_bars_for_maps`** | OI-hist series (E2) + align-to-OHLCV moves to `maps/` at cutover | ◑ E2 (source ready) |
 | **`fetch_klines_between`** (reconcile / backfill / completeness) | `rest.fetch_ohlcv_between(start_ms,end_ms)` (closed-only) | ✅ **E2** |
 | `fetch_funding_rate_history` | `rest.fetch_funding_history` | ✅ **E2** |
-| **`fetch_premium_index_all` / `fetch_funding_info_all` / `fetch_exchange_symbols` / `fetch_ticker_24h`** | universe-wide accessors off streamed tickers/markets (REST fallback) | ⬜ **E3** |
+| **`fetch_ticker_24h`** (scanner funnel, ALL perps) | `rest.fetch_all_tickers` (universe-wide REST batch) | ✅ **E3** |
+| **`fetch_premium_index_all` / `fetch_funding_info_all` / `fetch_exchange_symbols`** | per-symbol mark/funding planes + `exchange.markets` meta — read at consumer-migration (tracked universe covers pinned) | ◑ E3 (per-symbol path) |
 | **`get_cached_funding_rate_zscore` / `_trend` / `_recent_extreme` / `get_cached_basis_stats`** | funding-history buffer in engine → **stats computed in `features/`** (move out of transport) | ⬜ **E4** |
 | **WS-derived** (`agg_trade_delta_30s/60s`, `live_microprice_bias`, `live_depth_imbalance`, `ws_price_chg_1m`, `closed_kline_overlay`, `live_book`, `trade_buffer`, `liquidation_buffers`) | pure helpers over engine `trades`/`book`/`liq` read-through | ⬜ **E5** |
 | **SPOT** (`HuntCcxtSpotCompanion`: `refresh_symbols`, `enrichments_for`, `fetch_weekly_ohlcv`, taker-flow) | a **spot sibling engine** (ccxt spot client; own 6000/min budget) | ⬜ **E6** |
