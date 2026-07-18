@@ -50,19 +50,31 @@ class MultiEngine:
                 await ex.load_markets()
             except Exception as exc:  # noqa: BLE001 — a dead secondary must not sink the primary
                 LOG.warning("engine_secondary_load_failed", venue=venue, err=str(exc))
-        self._bg.append(asyncio.create_task(self._cross_funding_loop(), name="engine_cross_funding"))
+        self._bg.append(asyncio.create_task(self._cross_loop(), name="engine_cross"))
         LOG.info("multi_engine_started", primary=_PRIMARY, secondaries=list(self._secondary_ex))
 
-    async def _cross_funding_loop(self) -> None:
-        bound = int(params.FRESH_CROSS_FUNDING_S * 1000.0)
+    async def _cross_loop(self) -> None:
+        """Poll the uniform cross-venue positioning signals per secondary: funding + open interest."""
+        f_bound = int(params.FRESH_CROSS_FUNDING_S * 1000.0)
+        oi_bound = int(params.FRESH_FUTURES_DATA_S * 1000.0)
         while True:
             for venue, ex in self._secondary_ex.items():
-                rates = await rest.poll_funding_rates(ex, self._symbols)
                 now = int(time.time() * 1000)
                 venue_state = self._cross[venue]
+                markets = getattr(ex, "markets", None) or {}
+                rates = await rest.poll_funding_rates(ex, self._symbols)
                 for sym, rate in rates.items():
-                    st = venue_state.setdefault(sym, SymbolState(sym))
-                    st.put_value("funding", rate, PlaneStamp(Source.REST_SEED, now, now, bound))
+                    venue_state.setdefault(sym, SymbolState(sym)).put_value(
+                        "funding", rate, PlaneStamp(Source.REST_SEED, now, now, f_bound)
+                    )
+                for sym in self._symbols:
+                    if sym not in markets:
+                        continue
+                    oi = await rest.poll_open_interest(ex, sym)
+                    if oi is not None:
+                        venue_state.setdefault(sym, SymbolState(sym)).put_value(
+                            "oi", oi, PlaneStamp(Source.REST_SEED, now, now, oi_bound)
+                        )
             await asyncio.sleep(params.CROSS_FUNDING_POLL_S)
 
     # --- consumer surface ---
@@ -71,27 +83,33 @@ class MultiEngine:
         """Primary (Binance) freshness-proven snapshot — unchanged single-venue contract."""
         return self._primary.snapshot(symbol, required)
 
-    def cross_funding(self, symbol: str) -> dict[str, float | None]:
-        """Fresh funding rate per venue for a symbol: ``{venue: rate|None}``.
+    def _cross_value(self, symbol: str, plane: str, primary_plane: str) -> dict[str, float | None]:
+        """``{venue: value|None}`` for a scalar plane across all venues — fail-loud per venue.
 
-        Binance comes from the primary engine's WS mark stream; secondaries from the REST poll. A
-        venue whose datum is absent or stale reads ``None`` (no data), never a fabricated rate — so
-        a divergence signal is only computed from venues that are actually fresh.
+        Binance from the primary engine, secondaries from the cross poll. A stale/absent venue reads
+        ``None`` (no data), never a fabricated value, so a divergence is only computed from fresh venues.
         """
         now = int(time.time() * 1000)
         out: dict[str, float | None] = {}
-        primary = self._primary.snapshot(symbol, ("funding",))
-        val = primary.optional("funding")
-        out[_PRIMARY] = float(val) if isinstance(val, (int, float)) else None
+        pv = self._primary.snapshot(symbol, (primary_plane,)).optional(primary_plane)
+        out[_PRIMARY] = float(pv) if isinstance(pv, (int, float)) else None
         for venue, states in self._cross.items():
             st = states.get(symbol)
-            stamp = st.stamp_of("funding") if st is not None else None
+            stamp = st.stamp_of(plane) if st is not None else None
             if st is None or stamp is None or stamp.stale_by(now) is not None:
                 out[venue] = None
                 continue
-            fv = st.value_of("funding")
-            out[venue] = float(fv) if isinstance(fv, (int, float)) else None
+            v = st.value_of(plane)
+            out[venue] = float(v) if isinstance(v, (int, float)) else None
         return out
+
+    def cross_funding(self, symbol: str) -> dict[str, float | None]:
+        """Fresh funding rate per venue: ``{venue: rate|None}`` (divergence signal, fail-loud)."""
+        return self._cross_value(symbol, "funding", "funding")
+
+    def cross_open_interest(self, symbol: str) -> dict[str, float | None]:
+        """Fresh open interest per venue: ``{venue: oi|None}`` (fail-loud)."""
+        return self._cross_value(symbol, "oi", "oi")
 
     async def close(self) -> None:
         for task in self._bg:
