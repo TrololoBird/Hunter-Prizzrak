@@ -50,6 +50,24 @@ def make_binance() -> Any:
     return cls(_base_options())
 
 
+def make_binance_spot() -> Any:
+    """A ccxt.pro Binance **spot** client for the spot sibling engine (public data only).
+
+    Spot is a separate venue with its own 6000/min weight budget (never charge the fapi 2400/min
+    counter). Only the generic + streaming knobs are set; ``defaultType='spot'`` selects the spot
+    markets. Same DNS-cached session as the futures client (macOS resolver fix).
+    """
+    cls = dns_cached_class(ccxtpro.binance)
+    opts = _base_options()
+    opts["options"] = {
+        "defaultType": "spot",
+        "OHLCVLimit": params.OHLCV_LIMIT,
+        "tradesLimit": params.TRADES_LIMIT,
+        "watchOrderBookLimit": params.ORDER_BOOK_LIMIT,
+    }
+    return cls(opts)
+
+
 SECONDARY_VENUES: tuple[str, ...] = ("okx", "bybit", "bitget")
 
 

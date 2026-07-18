@@ -30,7 +30,7 @@ stay (extracted out of the transport). The **transport + caches** die and are re
 | **WS-derived book** (`live_microprice_bias`, `live_depth_imbalance`) | extract existing pure book-math (§2) over `book` read-through | ◑ E5b (extract) |
 | `closed_kline_overlay` / `live_book` / `trade_buffer` / `liquidation_buffers` | subsumed by engine frame-merge + `book`/`trades`/`liq` read-through | ✅ subsumed |
 | **SPOT** pure metrics (lead/spread/ref/volume/taker) | `engine/spot_metrics.py` (reuses `orderflow.taker_flow`) | ✅ **E6a** |
-| **SPOT** live source (`refresh_symbols`/`enrichments_for`/`fetch_weekly_ohlcv`) | a **spot sibling engine** — ccxt.pro spot WS (ticker/1m-ohlcv/trades) + REST weekly ladder | ⬜ **E6b** |
+| **SPOT** live source (`refresh_symbols`/`enrichments_for`/`fetch_weekly_ohlcv`) | `engine/spot.py::SpotEngine` — ccxt.pro spot WS (ticker/1m-ohlcv/trades) + REST weekly ladder; taker-flow now free (WS) vs the old flag-gated REST call | ✅ **E6b** |
 | `snapshot_rest_cache_ages` / `used_weight_1m` (diagnostics) | engine plane-age introspection + throttler weight | ⬜ **E7** (thin) |
 
 **Dead — drop, do not port** (0 consumers, verified): `fetch_premium_index_ohlcv`,

@@ -10,6 +10,16 @@ from __future__ import annotations
 
 from hunt_core.engine.api import Engine
 from hunt_core.engine.multi import MultiEngine
+from hunt_core.engine.spot import SpotEngine
 from hunt_core.engine.state import MarketSnapshot, NotReady, Plane, Source, SymbolState
 
-__all__ = ["Engine", "MarketSnapshot", "MultiEngine", "NotReady", "Plane", "Source", "SymbolState"]
+__all__ = [
+    "Engine",
+    "MarketSnapshot",
+    "MultiEngine",
+    "NotReady",
+    "Plane",
+    "Source",
+    "SpotEngine",
+    "SymbolState",
+]
