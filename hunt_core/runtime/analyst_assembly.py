@@ -117,7 +117,12 @@ async def assemble_analyst_tick(
     if spot_companion is not None:
         _fut_mid = float((ticker_by_sym.get(sym) or {}).get("last_price") or 0) or None
         try:
-            await spot_companion.refresh_symbols([sym], futures_mid_by_symbol={sym: _fut_mid})
+            # with_taker_flow: the deep/pinned path is per-symbol and low-frequency, so it
+            # can afford the extra spot aggTrades call that the universe tick cannot — this
+            # is the only place the spot taker-flow line is fetched.
+            await spot_companion.refresh_symbols(
+                [sym], futures_mid_by_symbol={sym: _fut_mid}, with_taker_flow=True
+            )
         except Exception as exc:
             LOG.debug("deep_spot_refresh_failed", symbol=sym, error=repr(exc))
 

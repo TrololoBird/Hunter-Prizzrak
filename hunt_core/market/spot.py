@@ -28,6 +28,13 @@ class SpotMetrics:
     spot_futures_spread_bps: float | None
     spot_quote_volume_24h: float | None
     fetched_at: float
+    # Spot taker aggression over a recent aggTrades window: net (buy−sell) notional and
+    # buy share — a first-order read of which side is actively hitting the spot book
+    # («крупняк на споте покупает на зонах» — Prizrak). Fetched ONLY on the deep/pinned
+    # path (with_taker_flow); None on the universe tick, which must not pay a per-symbol
+    # fetch_trades call. None = «нет данных», never a fabricated 0.0 (invariant I-6).
+    spot_taker_delta_usd: float | None = None
+    spot_taker_buy_ratio: float | None = None
 
 
 # Weekly spot OHLCV cache TTL. A closed 1w candle changes once per week; 6h keeps
@@ -90,6 +97,48 @@ class HuntCcxtSpotCompanion:
         return result
 
     @staticmethod
+    def _taker_flow(trades: list[dict[str, Any]] | None) -> tuple[float | None, float | None]:
+        """Spot taker buy/sell notional from public aggTrades → (net_delta_usd, buy_ratio).
+
+        CCXT's ``trade['side']`` is the TAKER side: 'buy' = taker lifted the ask (aggressive
+        buy), 'sell' = taker hit the bid. Net delta = buy − sell notional; buy_ratio = buy /
+        (buy+sell). Returns ``(None, None)`` when no usable trade — an empty/garbage window is
+        «нет данных», never a fabricated ``0.0`` that would read as «perfect balance» (I-6).
+        """
+        buy = 0.0
+        sell = 0.0
+        used = 0
+        for t in trades or []:
+            if not isinstance(t, dict):
+                continue
+            side = t.get("side")
+            if side not in ("buy", "sell"):
+                continue
+            cost = t.get("cost")
+            if cost is None:
+                px, amt = t.get("price"), t.get("amount")
+                if px is None or amt is None:
+                    continue
+                try:
+                    cost = float(px) * float(amt)
+                except (TypeError, ValueError):
+                    continue
+            try:
+                cost_f = float(cost)
+            except (TypeError, ValueError):
+                continue
+            if side == "buy":
+                buy += cost_f
+            else:
+                sell += cost_f
+            used += 1
+        if used == 0:
+            return None, None
+        total = buy + sell
+        ratio = buy / total if total > 0 else None
+        return buy - sell, ratio
+
+    @staticmethod
     def _lead_return_1m(ohlcv: list[list]) -> float | None:
         """Spot 1m lead/lag return, in percent.
 
@@ -143,6 +192,7 @@ class HuntCcxtSpotCompanion:
         symbol: str,
         *,
         futures_mid: float | None = None,
+        with_taker_flow: bool = False,
     ) -> SpotMetrics | None:
         sym = to_binance_symbol(symbol)
         if not sym:
@@ -178,6 +228,26 @@ class HuntCcxtSpotCompanion:
             )
             lead = self._lead_return_1m(ohlcv)
             spread = self._spread_bps(spot_ref, futures_mid)
+            # Taker flow — deep/pinned path only. A failure here must degrade to «нет
+            # данных» for THIS field, not null the whole metrics object (spread/volume are
+            # independently useful), so it has its own try; rate-limit still propagates.
+            taker_delta: float | None = None
+            taker_ratio: float | None = None
+            if with_taker_flow:
+                try:
+                    trades = await self._spot_fetch(
+                        lambda: self._ex.fetch_trades(ccxt_sym, limit=1000),
+                        context=f"spot_trades:{sym}",
+                        weight=4,
+                        method="fetchTrades",
+                    )
+                    taker_delta, taker_ratio = self._taker_flow(trades)
+                except ccxt.BaseError as exc:
+                    if is_ccxt_rate_limited(exc):
+                        raise
+                    LOG.debug("spot_taker_flow_failed", symbol=sym, error=str(exc))
+                except DEFENSIVE_EXC as exc:
+                    LOG.debug("spot_taker_flow_failed", symbol=sym, error=str(exc))
             return SpotMetrics(
                 symbol=sym,
                 spot_price=spot_price,
@@ -185,6 +255,8 @@ class HuntCcxtSpotCompanion:
                 spot_futures_spread_bps=spread,
                 spot_quote_volume_24h=spot_qv,
                 fetched_at=time.monotonic(),
+                spot_taker_delta_usd=taker_delta,
+                spot_taker_buy_ratio=taker_ratio,
             )
         except ccxt.BaseError as exc:
             if is_ccxt_rate_limited(exc):
@@ -204,6 +276,7 @@ class HuntCcxtSpotCompanion:
         *,
         futures_mid_by_symbol: dict[str, float | None] | None = None,
         concurrency: int = 6,
+        with_taker_flow: bool = False,
     ) -> int:
         mids = futures_mid_by_symbol or {}
         sem = asyncio.Semaphore(max(1, int(concurrency)))
@@ -215,6 +288,7 @@ class HuntCcxtSpotCompanion:
                 metrics = await self.fetch_symbol_metrics(
                     symbol,
                     futures_mid=mids.get(to_binance_symbol(symbol)),
+                    with_taker_flow=with_taker_flow,
                 )
                 if metrics is None:
                     return
@@ -242,6 +316,10 @@ class HuntCcxtSpotCompanion:
             payload["spot_futures_spread_bps"] = metrics.spot_futures_spread_bps
         if metrics.spot_quote_volume_24h is not None:
             payload["spot_quote_volume_24h"] = metrics.spot_quote_volume_24h
+        if metrics.spot_taker_delta_usd is not None:
+            payload["spot_taker_delta_usd"] = metrics.spot_taker_delta_usd
+        if metrics.spot_taker_buy_ratio is not None:
+            payload["spot_taker_buy_ratio"] = metrics.spot_taker_buy_ratio
         return payload
 
     async def fetch_weekly_ohlcv(
