@@ -15,12 +15,12 @@ import aiohttp
 import pytest
 from ccxt.async_support.base.exchange import Exchange as AsyncExchange
 
+from hunt_core.engine.dns import DNS_CACHE_TTL_S as _DNS_CACHE_TTL_S
+from hunt_core.engine.dns import dns_cached_class
 from hunt_core.market.factory import (
-    _DNS_CACHE_TTL_S,
     create_async_binance_future,
     create_async_binance_spot,
     create_pro_binance_future,
-    dns_cached_class,
 )
 
 

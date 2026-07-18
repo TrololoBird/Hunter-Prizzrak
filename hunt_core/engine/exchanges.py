@@ -11,7 +11,7 @@ from typing import Any
 import ccxt.pro as ccxtpro
 
 from hunt_core.engine import params
-from hunt_core.market.factory import dns_cached_class
+from hunt_core.engine.dns import dns_cached_class
 
 
 def _base_options() -> dict[str, Any]:

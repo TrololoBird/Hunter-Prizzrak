@@ -30,7 +30,7 @@ try:
 
     # One source of truth for the DNS cache TTL — the CCXT plane and the Telegram
     # plane must not drift apart on the same setting.
-    from hunt_core.market.factory import _DNS_CACHE_TTL_S
+    from hunt_core.engine.dns import DNS_CACHE_TTL_S as _DNS_CACHE_TTL_S
 
     try:
         from aiogram.exceptions import TelegramAPIError as _AiogramAPIError
