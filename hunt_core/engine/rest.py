@@ -44,6 +44,33 @@ async def poll_open_interest(exchange: Any, symbol: str) -> float | None:
     return float(value) if value is not None else None
 
 
+async def poll_funding_rates(exchange: Any, symbols: list[str]) -> dict[str, float]:
+    """Unified cross-venue funding via ``fetch_funding_rates`` (all venues support it).
+
+    Filters to symbols the venue actually lists, parses ``fundingRate`` fail-loud (a missing/garbage
+    rate is skipped, never fabricated). Returns ``{unified_symbol: rate}``.
+    """
+    markets = getattr(exchange, "markets", None) or {}
+    wanted = [s for s in symbols if s in markets]
+    if not wanted:
+        return {}
+    try:
+        data = await exchange.fetch_funding_rates(wanted)
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("engine_poll_funding_failed", venue=getattr(exchange, "id", "?"), err=str(exc))
+        return {}
+    out: dict[str, float] = {}
+    for sym, fr in (data or {}).items():
+        rate = fr.get("fundingRate") if isinstance(fr, dict) else None
+        if rate is None:
+            continue
+        try:
+            out[sym] = float(rate)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 async def poll_futures_data(
     exchange: Any, method: str, req_params: dict[str, Any]
 ) -> list[dict[str, Any]] | None:
@@ -67,4 +94,4 @@ async def poll_futures_data(
     return list(rows) if isinstance(rows, list) else None
 
 
-__all__ = ["seed_ohlcv", "poll_open_interest", "poll_futures_data"]
+__all__ = ["seed_ohlcv", "poll_open_interest", "poll_funding_rates", "poll_futures_data"]

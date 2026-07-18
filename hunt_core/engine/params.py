@@ -40,6 +40,9 @@ RATE_LIMIT_BACKOFF_S: float = 60.0  # PROJECT cryptofeed 429 sleep
 
 # --- REST poll cadences (the only recurring REST) ---
 OI_CURRENT_POLL_S: float = 60.0  # PROJECT cryptofeed
+# Cross-venue funding is an 8h number → 60s poll is ample; bound at 3× (DOC funding slow).
+CROSS_FUNDING_POLL_S: float = 60.0
+FRESH_CROSS_FUNDING_S: float = 180.0
 # DOC: /futures/data/* are computed every 5 min — polling faster returns duplicates + burns budget.
 FUTURES_DATA_POLL_S: float = 300.0
 

@@ -50,6 +50,17 @@ def make_binance() -> Any:
     return cls(_base_options())
 
 
-# NB: secondary venues (OKX/Bybit/Bitget cross-venue funding/liq) keep ccxt for its multi-exchange
-# abstraction; their factory is added when that plane is wired — deliberately not stubbed here so no
-# unused surface ships (ADR-0002 §9).
+SECONDARY_VENUES: tuple[str, ...] = ("okx", "bybit", "bitget")
+
+
+def make_secondary(venue: str) -> Any:
+    """A ccxt.pro client for a secondary venue (cross-venue funding/liq), public data only.
+
+    Same DNS-cached / newUpdates / rate-limited config as Binance; ``defaultType='swap'`` (the
+    secondaries expose USDT perps as swaps). ccxt unifies symbols, so ``BTC/USDT:USDT`` maps across
+    venues — everything stays strictly ccxt-native.
+    """
+    cls = dns_cached_class(getattr(ccxtpro, venue))
+    opts = _base_options()
+    opts["options"] = {**opts["options"], "defaultType": "swap"}
+    return cls(opts)
