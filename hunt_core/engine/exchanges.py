@@ -11,6 +11,7 @@ from typing import Any
 import ccxt.pro as ccxtpro
 
 from hunt_core.engine import params
+from hunt_core.market.factory import dns_cached_class
 
 
 def _base_options() -> dict[str, Any]:
@@ -32,8 +33,14 @@ def _base_options() -> dict[str, Any]:
 
 
 def make_binance() -> Any:
-    """A ccxt.pro Binance USDⓈ-M futures client configured for the engine (public data only)."""
-    return ccxtpro.binance(_base_options())
+    """A ccxt.pro Binance USDⓈ-M futures client configured for the engine (public data only).
+
+    Uses the DNS-cached session class (``ThreadedResolver`` + sane ``ttl_dns_cache``): ccxt/aiohttp's
+    default ``AsyncResolver`` (c-ares) bypasses the OS resolver and fails to resolve on macOS. This
+    is necessary ccxt connector config, not a crutch — every ccxt client on this platform needs it.
+    """
+    cls = dns_cached_class(ccxtpro.binance)
+    return cls(_base_options())
 
 
 # NB: secondary venues (OKX/Bybit/Bitget cross-venue funding/liq) keep ccxt for its multi-exchange
