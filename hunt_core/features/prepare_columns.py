@@ -44,10 +44,13 @@ ALL_PREPARE_GROUPS: frozenset[str] = frozenset(
     }
 )
 
-# Canonical 7-coin anchor set — must match config.defaults.toml [pinned.defaults].
-PINNED_SYMBOLS: frozenset[str] = frozenset({
-    "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "XAUUSDT", "XAGUSDT", "PAXGUSDT"
-})
+# Single source of truth — the config-driven pinned set from data/universe.py. Was a
+# hardcoded duplicate here; if an operator added an 8th analyst asset in config, universe
+# picked it up but this frozenset did not, and the new anchor silently got the LEAN prepare
+# (no extended columns) while universe's consumers wrote it as a continuous pinned symbol.
+from hunt_core.data.universe import PINNED_SYMBOLS as _UNIVERSE_PINNED
+
+PINNED_SYMBOLS: frozenset[str] = frozenset(_UNIVERSE_PINNED)
 
 # Not referenced by strategies or enrichment telemetry — safe to skip on live path.
 LIVE_SKIPPABLE_GROUPS: frozenset[str] = frozenset(

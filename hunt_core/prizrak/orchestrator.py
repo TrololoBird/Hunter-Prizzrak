@@ -1842,6 +1842,9 @@ def _pp_candidate(
         summary["gates_failed"] = []
         summary["geometry_confidence"] = 0.7 if primary["kind"] == "true" else 0.6
         summary["pp_bodies"] = primary["bodies"]
+        # ТВХ = ретест сломанного уровня, цена уже у зоны (гейт retest выше) — активный
+        # вход, не «idle». Без этого шапка печатала «⏸ Не готово» над направленным сетапом.
+        summary["activation"] = "in_entry_zone"
         if partner is not None:
             gap = abs(partner["level"] - level) / level * 100
             # Стр.55: «Уровнем ПП является вся зона Тени свечи ... а НЕ ТОЛЬКО "шпиль"».
@@ -1911,6 +1914,7 @@ def _trap_flip_candidate(
         )
         if summary is not None:
             summary["pattern"] = "ловушка_пробой_флип"
+            summary["activation"] = "in_entry_zone"  # флип на ретесте — цена у уровня, не idle
             result = _apply_confluence(
                 summary, ohlcv=ohlcv,
                 cfg=cfg, htf_bias=htf_bias, struct_by_tier=struct_by_tier,
@@ -1937,6 +1941,7 @@ def _trap_flip_candidate(
         )
         if summary is not None:
             summary["pattern"] = "ловушка_пробой_флип"
+            summary["activation"] = "in_entry_zone"  # флип на ретесте — цена у уровня, не idle
             result = _apply_confluence(
                 summary, ohlcv=ohlcv,
                 cfg=cfg, htf_bias=htf_bias, struct_by_tier=struct_by_tier,

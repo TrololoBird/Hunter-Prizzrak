@@ -429,6 +429,7 @@ class AnalystReport:
         "zone_target_deep": "глубокая зона (отложенная)",
         "trap_flip": "ловушка/пробой (флип уровня)",
         "pp_break": "перелом ПП",
+        "figure_pennant_6touch": "вымпел (6-е касание)",
     }
     _TIER_TF_RU = {"intraday": "внутри дня", "meso": "первый трейд", "macro": "второй трейд"}
     _QUALITY_RU = {"favorable": "хорошее", "marginal": "среднее", "poor": "слабое"}
@@ -471,7 +472,14 @@ class AnalystReport:
             entry_orders = summary.get("entry_orders")
             if isinstance(entry_orders, list) and len(entry_orders) >= 2:
                 orders_str = " · ".join(fmt_price(float(o)) for o in entry_orders)
-                lines.append(f"↳ Ордера (зона+ПОК): <code>{orders_str}</code>")
+                # Метка честная по факту: «зона+ПОК» только когда POC реально среди ордеров.
+                # Для pp_break/trap_flip poc_info={} → POC нет, а прежняя жёсткая метка врала.
+                _poc = summary.get("poc")
+                has_poc = _poc is not None and any(
+                    abs(float(o) - float(_poc)) < float(_poc) * 1e-4 for o in entry_orders
+                )
+                label = "зона+ПОК" if has_poc else "зона+уровень"
+                lines.append(f"↳ Ордера ({label}): <code>{orders_str}</code>")
             # Course глава «Фигуры» (стр.56-62): каждая фигура — частный случай уже
             # торгуемого примитива, и её имя говорит трейдеру, какое правило курса
             # применимо (дно/вершина → закуп от теста ПП + от границы, стр.62; клин →

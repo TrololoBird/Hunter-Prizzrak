@@ -163,6 +163,10 @@ def compute_marketcap_factor(
     else:
         evidence.append("marketcap_neutral")
 
+    # Клип = config-максимумы конверта: confirm_bonus и diverge_penalty оба `le=0.15`
+    # (config.py), поэтому при их максимуме mult упирается ровно в [0.85, 1.15]. На ДЕФОЛТАХ
+    # (bonus 0.10 × damp, penalty 0.12) достижимо [0.88, 1.10] — клип не срабатывает, но он
+    # НЕ мёртвый: это защита конверта, когда оператор поднимает пороги к их потолку.
     mult = max(0.85, min(1.15, mult))
     return {
         "multiplier": round(mult, 3),
