@@ -63,6 +63,26 @@ _DOMINANCE_CHANGES: ContextVar["dict[str, float] | None"] = ContextVar(
 _LIQ_CONTEXT: ContextVar["dict[str, Any] | None"] = ContextVar(
     "prizrak_liq_context", default=None
 )
+# Per-tick abstain sink: structured reasons a candidate was REJECTED, with numbers. The
+# dominant sync outcome is silent divergence («канал дал сетап, бот молчит») — and the gates
+# compute the reason then throw it away (return None). This makes «почему молчит» readable:
+# /signal X on a WAIT symbol prints «нет сделки: RR 2.3 < 3.0 · стоп … · TP1 …». Same
+# ambient-context pattern; ``build_prizrak_signals`` installs the list, deep abstain points
+# append to it via ``_note_abstain``, the caller reads it onto ``row["prizrak_abstain"]``.
+_ABSTAIN_SINK: ContextVar["list[dict[str, Any]] | None"] = ContextVar(
+    "prizrak_abstain_sink", default=None
+)
+
+
+def _note_abstain(reason: str, *, tf: str | None, direction: str, **nums: Any) -> None:
+    """Record WHY a candidate was rejected, with numbers, if a sink is installed. No-op when
+    none is (tests / callers that don't want the trace pay nothing)."""
+    sink = _ABSTAIN_SINK.get()
+    if sink is None:
+        return
+    entry: dict[str, Any] = {"reason": reason, "tf": tf, "direction": direction}
+    entry.update({k: (round(v, 8) if isinstance(v, float) else v) for k, v in nums.items()})
+    sink.append(entry)
 # Max width of a displayed interest/добор zone («вход по факту касания» = a limit band).
 # Tighter than accumulation_max_width_pct (12%, used for forward zone-targeting): a limit
 # zone must be actionable, not the whole range (ETH head-to-head vs Prizrak: our 1633–1810
@@ -723,7 +743,9 @@ def _geometry_from_zone(
     )
     risk = entry - stop if direction == "long" else stop - entry
     if risk <= 0:
+        _note_abstain("degenerate_stop", tf=min_tf, direction=direction, entry=entry, stop=stop)
         return None
+    buffer_pct = round(cfg.stop_buffer_pct * 100, 2)
     # Rungs closer than a quarter of the risk (floored at 0.15% of entry for very
     # tight stops) describe one zone twice rather than two distinct targets.
     min_gap = max(risk * 0.25, entry * 0.0015)
@@ -732,12 +754,21 @@ def _geometry_from_zone(
         min_tf=min_tf, min_gap=min_gap,
     )
     if not targets:
+        _note_abstain(
+            "no_structural_target", tf=min_tf, direction=direction,
+            entry=entry, stop=stop, buffer_pct=buffer_pct,
+        )
         return None
 
     # Build the full ladder: tp1..tpN from the combined target list.
     tp_ladder = targets[:5]
     rr = abs(tp_ladder[0] - entry) / risk
     if rr < cfg.min_rr:
+        _note_abstain(
+            "rr_below_floor", tf=min_tf, direction=direction,
+            rr=round(rr, 2), min_rr=cfg.min_rr, entry=entry, stop=stop,
+            tp1=round(tp_ladder[0], 8), buffer_pct=buffer_pct,
+        )
         return None
 
     result: dict[str, Any] = {
@@ -1102,6 +1133,10 @@ def _apply_confluence(
             direction, htf_bias=htf_bias, struct_by_tier=struct_by_tier, cfg=cfg,
         )
         if verdict == "veto":
+            _note_abstain(
+                "htf_counter_trend_no_slom", tf=summary.get("tf"), direction=direction,
+                htf_bias=htf_bias.get("bias"), setup_kind=summary.get("setup_kind"),
+            )
             return None
 
     conf = compute_confluence(ohlcv, direction=direction, cfg=cfg)
@@ -2105,6 +2140,7 @@ def build_prizrak_signals(
     marketcap_series: list[list[float]] | None = None,
     dominance_changes: dict[str, float] | None = None,
     liq_context: dict[str, Any] | None = None,
+    abstain_sink: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """0..N independent ScenarioVerdict-summary-compatible signals for one tick.
 
@@ -2119,6 +2155,10 @@ def build_prizrak_signals(
     ``liq_context`` = the bot's own per-tick map keys (``liq_cascade_risk``,
     ``liq_synthetic_only``, ``map_book_imbalance_1pct``) for the bias↔liq reconciliation
     (WS-2M.2); ``None`` leaves that factor neutral (map-less callers/tests unaffected).
+
+    ``abstain_sink`` — pass a list to collect the structured reasons candidates were
+    REJECTED (with numbers), so a WAIT symbol can explain «почему молчит» instead of
+    falling silent. ``None`` (default) disables the trace — tests pay nothing.
     """
     cfg = cfg or PrizrakConfig.load()
     if price <= 0:
@@ -2127,12 +2167,14 @@ def build_prizrak_signals(
     token = _MARKETCAP_SERIES.set(marketcap_series)
     dom_token = _DOMINANCE_CHANGES.set(dominance_changes)
     liq_token = _LIQ_CONTEXT.set(liq_context)
+    abstain_token = _ABSTAIN_SINK.set(abstain_sink)
     try:
         return _build_prizrak_signals_inner(ohlcv_by_tf, price=price, cfg=cfg)
     finally:
         _MARKETCAP_SERIES.reset(token)
         _DOMINANCE_CHANGES.reset(dom_token)
         _LIQ_CONTEXT.reset(liq_token)
+        _ABSTAIN_SINK.reset(abstain_token)
 
 
 def _build_prizrak_signals_inner(

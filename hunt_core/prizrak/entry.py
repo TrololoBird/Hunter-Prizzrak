@@ -72,10 +72,15 @@ def ensure_prizrak_verdict(
                 "liq_synthetic_only": market.get("liq_synthetic_only"),
                 "map_book_imbalance_1pct": market.get("map_book_imbalance_1pct"),
             }
+    abstain_reasons: list[dict[str, Any]] = []
     candidates = build_prizrak_signals(
         ohlcv_by_tf, price=price, cfg=cfg, marketcap_series=marketcap_series,
         dominance_changes=dominance_changes, liq_context=liq_context,
+        abstain_sink=abstain_reasons,
     )
+    # Structured "why no trade" for the WAIT tick — the dominant sync outcome is silent
+    # divergence, and this makes /signal X explain it instead of falling silent.
+    row["prizrak_abstain"] = abstain_reasons
     # Single structural source of truth for the display layer (📐 МТФ структура) — this is
     # exactly the multi-scale structure + HTF bias that gated the candidates above.
     from hunt_core.prizrak.orchestrator import compute_interest_zones, compute_prizrak_structure

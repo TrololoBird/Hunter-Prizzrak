@@ -34,15 +34,31 @@ def load_deep_tick_summaries(*, limit: int = 500) -> list[dict[str, Any]]:
         if row is None:
             continue
         summary = row.get("prizrak_summary")
-        if not isinstance(summary, dict):
-            continue
-        out.append(
-            {
-                "ts": row.get("ts"),
-                "symbol": str(row.get("symbol") or "").upper(),
-                **summary,
-            }
-        )
+        if isinstance(summary, dict):
+            out.append(
+                {
+                    "ts": row.get("ts"),
+                    "symbol": str(row.get("symbol") or "").upper(),
+                    **summary,
+                }
+            )
+        else:
+            # WAIT tick: no candidate survived. This used to be dropped — which is exactly
+            # why gate_failures/top_blockers were always empty (the diagnostic half was dead).
+            # Feed the STRUCTURED abstain reasons as gates_failed so the roll-up shows what is
+            # silencing the bot (RR floor / no target / htf veto). The dominant sync outcome
+            # («канал дал, бот молчит») is now aggregatable.
+            abstain = row.get("prizrak_abstain")
+            reasons = sorted({str(a.get("reason")) for a in abstain if isinstance(a, dict)}) \
+                if isinstance(abstain, list) else []
+            out.append(
+                {
+                    "ts": row.get("ts"),
+                    "symbol": str(row.get("symbol") or "").upper(),
+                    "action": "wait",
+                    "gates_failed": reasons,
+                }
+            )
         if len(out) >= limit:
             break
     return out

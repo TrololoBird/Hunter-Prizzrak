@@ -114,6 +114,39 @@ def _nearest_zone(row: dict[str, Any], price: float) -> tuple[str, float, float,
     return best
 
 
+_ABSTAIN_PRIORITY = ("rr_below_floor", "no_structural_target", "htf_counter_trend_no_slom",
+                     "degenerate_stop")
+
+
+def _abstain_reason_line(row: dict[str, Any]) -> str | None:
+    """Turn the structured reject-reasons (row["prizrak_abstain"]) into one human line, so a
+    WAIT symbol explains «почему нет сделки» with numbers instead of falling silent. Picks the
+    most informative reason (an RR that just missed the floor is more actionable than a veto)."""
+    reasons = row.get("prizrak_abstain")
+    if not isinstance(reasons, list) or not reasons:
+        return None
+    by_reason = {r.get("reason"): r for r in reversed(reasons) if isinstance(r, dict)}
+    pick = next((by_reason[k] for k in _ABSTAIN_PRIORITY if k in by_reason), None)
+    if pick is None:
+        return None
+    kind = pick.get("reason")
+    if kind == "rr_below_floor":
+        parts = [f"RR {pick.get('rr')} < {pick.get('min_rr')}"]
+        if pick.get("stop") is not None:
+            buf = pick.get("buffer_pct")
+            parts.append(f"стоп {fmt_price(float(pick['stop']))}" + (f" (буфер {buf}%)" if buf else ""))
+        if pick.get("tp1") is not None:
+            parts.append(f"TP1 {fmt_price(float(pick['tp1']))}")
+        return "почему нет сделки: " + " · ".join(parts)
+    if kind == "no_structural_target":
+        return "почему нет сделки: нет структурной цели впереди в полосе ТФ (стр.24)"
+    if kind == "htf_counter_trend_no_slom":
+        return f"почему нет сделки: против старшего тренда ({pick.get('htf_bias')}) без слома МТФ (стр.31)"
+    if kind == "degenerate_stop":
+        return "почему нет сделки: вырожденная геометрия стопа"
+    return None
+
+
 def _briefing_text(analysis: AnalystReport, price: float) -> str | None:
     """Three lines answering what a reader opens this card to learn.
 
@@ -203,6 +236,11 @@ def _briefing_text(analysis: AnalystReport, price: float) -> str | None:
             lines.append(
                 f"ближайшая {side_ru}: <code>{fmt_price(edge)}</code> — {dist:.1f}% от цены{away}"
             )
+    # WHY no trade — the structured reject-reason with numbers, so the reader sees «RR 2.3 < 3.0»
+    # instead of an unexplained silence (the dominant sync-with-channel outcome).
+    _why = _abstain_reason_line(row)
+    if _why is not None:
+        lines.append(_why)
     return "\n".join(lines) if lines else None
 
 
