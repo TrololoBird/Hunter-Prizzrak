@@ -25,7 +25,9 @@ stay (extracted out of the transport). The **transport + caches** die and are re
 | **`fetch_ticker_24h`** (scanner funnel, ALL perps) | `rest.fetch_all_tickers` (universe-wide REST batch) | ✅ **E3** |
 | **`fetch_premium_index_all` / `fetch_funding_info_all` / `fetch_exchange_symbols`** | per-symbol mark/funding planes + `exchange.markets` meta — read at consumer-migration (tracked universe covers pinned) | ◑ E3 (per-symbol path) |
 | **`get_cached_funding_rate_zscore` / `_trend` / `_recent_extreme` / `get_cached_basis_stats`** | funding-history buffer in engine → **stats computed in `features/`** (move out of transport) | ⬜ **E4** |
-| **WS-derived** (`agg_trade_delta_30s/60s`, `live_microprice_bias`, `live_depth_imbalance`, `ws_price_chg_1m`, `closed_kline_overlay`, `live_book`, `trade_buffer`, `liquidation_buffers`) | pure helpers over engine `trades`/`book`/`liq` read-through | ⬜ **E5** |
+| **WS-derived** (`agg_trade_delta_30s/60s`, `ws_cvd`, `ws_price_chg_1m`, `fetch_agg_trade_snapshot`) | `engine/orderflow.py::taker_flow`/`price_change_pct` (pure, over trades read-through) | ✅ **E5a** |
+| **WS-derived book** (`live_microprice_bias`, `live_depth_imbalance`) | extract existing pure book-math (§2) over `book` read-through | ◑ E5b (extract) |
+| `closed_kline_overlay` / `live_book` / `trade_buffer` / `liquidation_buffers` | subsumed by engine frame-merge + `book`/`trades`/`liq` read-through | ✅ subsumed |
 | **SPOT** (`HuntCcxtSpotCompanion`: `refresh_symbols`, `enrichments_for`, `fetch_weekly_ohlcv`, taker-flow) | a **spot sibling engine** (ccxt spot client; own 6000/min budget) | ⬜ **E6** |
 | `snapshot_rest_cache_ages` / `used_weight_1m` (diagnostics) | engine plane-age introspection + throttler weight | ⬜ **E7** (thin) |
 
