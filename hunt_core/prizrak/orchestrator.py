@@ -669,9 +669,14 @@ def _structural_stop(
     ohlcv_by_tf: dict[str, list[list[float]]] | None = None,
     tf: str | None = None,
     cfg: PrizrakConfig | None = None,
-) -> float:
+) -> tuple[float, str]:
     """Stop behind the STRUCTURE with a 1-3% buffer (course стр.33: "Безопасный СТОП за
     дно структуры с запасом 1-3%"), not a flat distance off the entry.
+
+    Returns ``(stop_price, anchor_kind)`` — the kind names WHAT the stop hides behind so the
+    card can state it (стр.33 требует обоснование, не голую цену): ``"structure"`` (за дно/
+    верх структуры), ``"wick"`` (за прокол 3+ касаний, Ф1), ``"neighbor"`` (за соседний
+    стоповый/лой 2-5%, Ф2), ``"entry_fallback"`` (нет пригодной границы зоны).
 
     The setup's structure is the zone passed by the caller — the накопление for level
     trades, the тень-свечи zone for ПП (стр.50), the стоповый объём for its own scalp
@@ -691,29 +696,34 @@ def _structural_stop(
         lo, hi = zone.get("lo"), zone.get("hi")
         if direction == "long" and lo is not None and float(lo) <= entry:
             anchor = float(lo)
+            kind = "structure"
             ext_lo = zone.get("ext_lo")
-            if ext_lo is not None and int(zone.get("lo_touches") or 0) >= _WICK_STOP_MIN_TOUCHES:
-                anchor = min(anchor, float(ext_lo))
+            if ext_lo is not None and int(zone.get("lo_touches") or 0) >= _WICK_STOP_MIN_TOUCHES \
+                    and float(ext_lo) < anchor:
+                anchor, kind = float(ext_lo), "wick"
             if ohlcv_by_tf and cfg is not None:
                 neighbor = _neighbor_stop_anchor(
                     "long", anchor, ohlcv_by_tf=ohlcv_by_tf, tf=tf, zone=zone, cfg=cfg,
                 )
-                if neighbor is not None:
-                    anchor = min(anchor, neighbor)
-            return anchor * (1 - buffer_pct)
+                if neighbor is not None and neighbor < anchor:
+                    anchor, kind = neighbor, "neighbor"
+            return anchor * (1 - buffer_pct), kind
         if direction == "short" and hi is not None and float(hi) >= entry:
             anchor = float(hi)
+            kind = "structure"
             ext_hi = zone.get("ext_hi")
-            if ext_hi is not None and int(zone.get("hi_touches") or 0) >= _WICK_STOP_MIN_TOUCHES:
-                anchor = max(anchor, float(ext_hi))
+            if ext_hi is not None and int(zone.get("hi_touches") or 0) >= _WICK_STOP_MIN_TOUCHES \
+                    and float(ext_hi) > anchor:
+                anchor, kind = float(ext_hi), "wick"
             if ohlcv_by_tf and cfg is not None:
                 neighbor = _neighbor_stop_anchor(
                     "short", anchor, ohlcv_by_tf=ohlcv_by_tf, tf=tf, zone=zone, cfg=cfg,
                 )
-                if neighbor is not None:
-                    anchor = max(anchor, neighbor)
-            return anchor * (1 + buffer_pct)
-    return entry * (1 - buffer_pct) if direction == "long" else entry * (1 + buffer_pct)
+                if neighbor is not None and neighbor > anchor:
+                    anchor, kind = neighbor, "neighbor"
+            return anchor * (1 + buffer_pct), kind
+    fallback = entry * (1 - buffer_pct) if direction == "long" else entry * (1 + buffer_pct)
+    return fallback, "entry_fallback"
 
 
 def _geometry_from_zone(
@@ -737,7 +747,7 @@ def _geometry_from_zone(
     swing levels between entry and zone targets — prevents fake R:R where TP1 skips
     structural resistance ahead.
     """
-    stop = _structural_stop(
+    stop, stop_anchor = _structural_stop(
         direction, entry, zone, buffer_pct=cfg.stop_buffer_pct,
         ohlcv_by_tf=ohlcv_by_tf, tf=min_tf, cfg=cfg,
     )
@@ -773,6 +783,8 @@ def _geometry_from_zone(
 
     result: dict[str, Any] = {
         "stop": round(stop, 8),
+        "stop_anchor": stop_anchor,           # WHAT the stop hides behind (стр.33 обоснование)
+        "stop_buffer_pct": round(cfg.stop_buffer_pct * 100, 2),
         "rr_primary": round(rr, 2),
         "tp_ladder": tp_ladder,
     }
@@ -822,6 +834,8 @@ def _base_summary(
         ),
         "management_plan": _management_plan(direction) if direction in ("long", "short") else [],
         "stop": (geo or {}).get("stop"),
+        "stop_anchor": (geo or {}).get("stop_anchor"),        # F2: за что спрятан стоп (стр.33)
+        "stop_buffer_pct": (geo or {}).get("stop_buffer_pct"),
         "tp1": (geo or {}).get("tp1"),
         "tp2": (geo or {}).get("tp2"),
         "tp3": (geo or {}).get("tp3"),

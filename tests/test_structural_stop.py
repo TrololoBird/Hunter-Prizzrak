@@ -17,31 +17,35 @@ ZONE = {"lo": 100.0, "hi": 104.0}
 
 def test_long_stop_is_below_the_zone_low_not_the_entry() -> None:
     """Entry at the ПОК (102), inside the zone — stop must sit below the zone LOW (100)."""
-    stop = _structural_stop("long", entry=102.0, zone=ZONE, buffer_pct=BUF)
+    stop, anchor = _structural_stop("long", entry=102.0, zone=ZONE, buffer_pct=BUF)
     assert stop == 100.0 * (1 - BUF)          # 98.0, behind the structure
+    assert anchor == "structure"              # F2: за дно структуры
     assert stop < ZONE["lo"]                  # below the base, squeeze-safe
     # A flat 2% off the entry would sit at 99.96 — INSIDE the 100–104 base, easily wicked.
     assert stop < 102.0 * (1 - BUF)
 
 
 def test_short_stop_is_above_the_zone_high() -> None:
-    stop = _structural_stop("short", entry=102.0, zone=ZONE, buffer_pct=BUF)
+    stop, anchor = _structural_stop("short", entry=102.0, zone=ZONE, buffer_pct=BUF)
     assert stop == 104.0 * (1 + BUF)          # 106.08, behind the structure top
+    assert anchor == "structure"
     assert stop > ZONE["hi"]
 
 
 def test_boundary_entry_coincides_with_structural_stop() -> None:
     """Buying exactly at the zone low: structural and entry-anchored stops coincide."""
-    stop = _structural_stop("long", entry=100.0, zone=ZONE, buffer_pct=BUF)
+    stop, _ = _structural_stop("long", entry=100.0, zone=ZONE, buffer_pct=BUF)
     assert stop == 100.0 * (1 - BUF)
 
 
 def test_buffer_widens_the_stop() -> None:
-    tight = _structural_stop("long", entry=102.0, zone=ZONE, buffer_pct=0.01)
-    wide = _structural_stop("long", entry=102.0, zone=ZONE, buffer_pct=0.05)
+    tight, _ = _structural_stop("long", entry=102.0, zone=ZONE, buffer_pct=0.01)
+    wide, _ = _structural_stop("long", entry=102.0, zone=ZONE, buffer_pct=0.05)
     assert wide < tight < ZONE["lo"]          # bigger buffer → stop further below the base
 
 
 def test_falls_back_to_entry_buffer_without_a_usable_zone() -> None:
-    assert _structural_stop("long", entry=102.0, zone=None, buffer_pct=BUF) == 102.0 * (1 - BUF)
-    assert _structural_stop("long", entry=102.0, zone={}, buffer_pct=BUF) == 102.0 * (1 - BUF)
+    stop_none, kind_none = _structural_stop("long", entry=102.0, zone=None, buffer_pct=BUF)
+    assert stop_none == 102.0 * (1 - BUF) and kind_none == "entry_fallback"
+    stop_empty, _ = _structural_stop("long", entry=102.0, zone={}, buffer_pct=BUF)
+    assert stop_empty == 102.0 * (1 - BUF)

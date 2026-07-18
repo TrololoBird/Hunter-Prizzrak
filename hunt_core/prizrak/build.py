@@ -488,7 +488,21 @@ class AnalystReport:
             if isinstance(pattern, str) and pattern:
                 lines.append(f"↳ Фигура: {pattern}")
             if stop is not None:
-                lines.append(f"🛑 Стоп: <code>{fmt_price(float(stop))}</code>")
+                # F2 / стр.33: обоснование стопа — за ЧТО спрятан + буфер, не голая цена.
+                # «Безопасный» стоп прячется за структуру/прокол/соседа; «рисковый» — за вход
+                # (нет пригодной границы зоны). Трейдер сверяет это с формулировкой канала.
+                anchor_ru = {
+                    "structure": "за дно/верх структуры",
+                    "wick": "за прокол (3+ касаний)",
+                    "neighbor": "за соседнюю структуру ТФ-1",
+                    "entry_fallback": "за вход (структурной границы нет)",
+                }.get(str(summary.get("stop_anchor") or ""), "")
+                buf = summary.get("stop_buffer_pct")
+                safety = "рисковый" if summary.get("stop_anchor") == "entry_fallback" else "безопасный"
+                tail = ""
+                if anchor_ru:
+                    tail = f" — {safety}: {anchor_ru}" + (f", буфер {buf}%" if buf else "")
+                lines.append(f"🛑 Стоп: <code>{fmt_price(float(stop))}</code>{tail}")
 
             # Build TP ladder from tp_ladder field (preferred) or fall back to tp1-tp3.
             tp_ladder_raw = summary.get("tp_ladder")

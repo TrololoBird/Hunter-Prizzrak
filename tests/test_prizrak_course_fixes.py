@@ -63,16 +63,16 @@ def test_stop_behind_wick_prokol_on_3plus_touches() -> None:
     этот прокол». Anchor = min(lo, ext_lo), буфер поверх."""
     zone = {"lo": 100.0, "hi": 104.0, "ext_lo": 98.5, "ext_hi": 105.5,
             "lo_touches": 3, "hi_touches": 3}
-    assert _structural_stop("long", entry=102.0, zone=zone, buffer_pct=BUF) == 98.5 * (1 - BUF)
-    assert _structural_stop("short", entry=102.0, zone=zone, buffer_pct=BUF) == 105.5 * (1 + BUF)
+    assert _structural_stop("long", entry=102.0, zone=zone, buffer_pct=BUF)[0] == 98.5 * (1 - BUF)
+    assert _structural_stop("short", entry=102.0, zone=zone, buffer_pct=BUF)[0] == 105.5 * (1 + BUF)
 
 
 def test_stop_ignores_wick_below_3_touches_or_without_prokol_data() -> None:
     """<3 касания или нет данных о проколах → прежнее поведение (за cluster-границу)."""
     two_touch = {"lo": 100.0, "hi": 104.0, "ext_lo": 98.5, "lo_touches": 2}
-    assert _structural_stop("long", entry=102.0, zone=two_touch, buffer_pct=BUF) == 100.0 * (1 - BUF)
+    assert _structural_stop("long", entry=102.0, zone=two_touch, buffer_pct=BUF)[0] == 100.0 * (1 - BUF)
     no_ext = {"lo": 100.0, "hi": 104.0}
-    assert _structural_stop("long", entry=102.0, zone=no_ext, buffer_pct=BUF) == 100.0 * (1 - BUF)
+    assert _structural_stop("long", entry=102.0, zone=no_ext, buffer_pct=BUF)[0] == 100.0 * (1 - BUF)
 
 
 # ------------------------------------------------- Ф2: соседняя структура в 2-5%
@@ -86,7 +86,7 @@ def _flat_with_dip(dip_low: float, n: int = 40, px: float = 100.0) -> list[list[
 def test_stop_hides_behind_tf1_low_in_2_5pct_band() -> None:
     """Курс стр.18: лой ТФ-1 в 2-5% за границей → стоп прятать за него."""
     zone = {"lo": 100.0, "hi": 104.0}
-    stop = _structural_stop(
+    stop, _ = _structural_stop(
         "long", entry=102.0, zone=zone, buffer_pct=BUF,
         ohlcv_by_tf={"1h": _flat_with_dip(97.0)}, tf="4h", cfg=CFG,
     )
@@ -96,7 +96,7 @@ def test_stop_hides_behind_tf1_low_in_2_5pct_band() -> None:
 def test_neighbor_beyond_5pct_is_ignored() -> None:
     """Структура дальше 5% от границы — «слишком далеко», якорь остаётся прежним."""
     zone = {"lo": 100.0, "hi": 104.0}
-    stop = _structural_stop(
+    stop, _ = _structural_stop(
         "long", entry=102.0, zone=zone, buffer_pct=BUF,
         ohlcv_by_tf={"1h": _flat_with_dip(93.0)}, tf="4h", cfg=CFG,
     )
@@ -110,7 +110,7 @@ def test_stop_hides_behind_same_tf_low_in_2_5pct_band() -> None:
     ограничивался ТФ-1 и лой собственного ТФ игнорировался.
     """
     zone = {"lo": 100.0, "hi": 104.0}
-    stop = _structural_stop(
+    stop, _ = _structural_stop(
         "long", entry=102.0, zone=zone, buffer_pct=BUF,
         ohlcv_by_tf={"4h": _flat_with_dip(97.0)}, tf="4h", cfg=CFG,  # ТФ-1 фрейма нет
     )
@@ -120,7 +120,7 @@ def test_stop_hides_behind_same_tf_low_in_2_5pct_band() -> None:
 def test_neighbor_nearest_candidate_wins_across_tfs() -> None:
     """Кандидаты на обоих ТФ → прячемся за БЛИЖАЙШИЙ к границе (не самый глубокий)."""
     zone = {"lo": 100.0, "hi": 104.0}
-    stop = _structural_stop(
+    stop, _ = _structural_stop(
         "long", entry=102.0, zone=zone, buffer_pct=BUF,
         ohlcv_by_tf={"4h": _flat_with_dip(96.0), "1h": _flat_with_dip(97.5)},
         tf="4h", cfg=CFG,
@@ -132,7 +132,7 @@ def test_neighbor_short_side_mirrors() -> None:
     zone = {"lo": 100.0, "hi": 104.0}
     rows = [[i * _STEP, 104.0, 104.0, 103.5, 104.0, 50.0] for i in range(40)]
     rows[20][2] = 107.5  # swing-high ТФ-1, +3.4% над границей
-    stop = _structural_stop(
+    stop, _ = _structural_stop(
         "short", entry=102.0, zone=zone, buffer_pct=BUF,
         ohlcv_by_tf={"1h": rows}, tf="4h", cfg=CFG,
     )
