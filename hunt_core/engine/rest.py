@@ -24,8 +24,12 @@ async def seed_ohlcv(exchange: Any, symbol: str, timeframe: str, *, limit: int) 
     Returns ``[]`` on failure (logged) — the caller keeps the plane ``absent`` and the snapshot
     reports ``NotReady``, never a fabricated frame.
     """
+    # Binance clamps a single fetch_ohlcv to 1000 bars (and a wide since→until returns only the first
+    # 1000) — so for deep history route through ccxt's deterministic paginator; a normal ≤1000 seed
+    # stays a single call.
+    extra = {"paginate": True} if limit > 1000 else {}
     try:
-        rows = await exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+        rows = await exchange.fetch_ohlcv(symbol, timeframe, limit=limit, params=extra)
     except Exception as exc:  # noqa: BLE001
         LOG.warning("engine_seed_ohlcv_failed", symbol=symbol, tf=timeframe, err=str(exc))
         return []
