@@ -287,29 +287,15 @@ def format_grid_telegram(grid: list[dict[str, Any]], *, price: float = 0) -> str
                 bucket_n = num_by[tf].setdefault(k, [])
                 if fv not in bucket_n:
                     bucket_n.append(fv)
-    for tf in order:
-        parts: list[str] = []
-        for k in _KIND_ORDER:
-            nums = num_by[tf].get(k, [])
-            if k == "support":
-                nums = sorted(nums, reverse=True)  # nearest (highest) first
-            elif k == "resistance":
-                nums = sorted(nums)  # nearest (lowest) first
-            for val in nums:
-                # Distance is what makes a level readable at a glance: a support 0.1%
-                # away and one 9.6% away used to render identically, leaving the reader
-                # to divide every number on the card by spot in their head.
-                parts.append(f"{_K_RU.get(k, k)}={_fmt_price(val)}{_fmt_dist(val, price)}")
-            for tok in tok_by[tf].get(k, []):
-                parts.append(f"{_K_RU.get(k, k)}={tok}")
-        if parts:
-            lines.append(f"· {tf}: " + ", ".join(parts[:6]))
-
-    # Multi-TF confluence: the SAME structural level across ≥2 TFs is stronger than a
-    # single-TF one, but the per-TF layout buried it in separate lines (57758.6 shown
-    # twice as 1w AND 1d support). Surface it as a dedicated «усиленный» highlight.
+    # Multi-TF confluence, computed BEFORE the per-TF lines so a shared level is LIFTED
+    # out of them rather than duplicated: a level on ≥2 TFs used to print on every per-TF
+    # line AND in the highlight — 62505.1 as «1h», «4h» AND «(1h+4h)», the same number
+    # three times. Now it prints once, in the «усиленные» line, with its distance; only
+    # genuinely single-TF numeric levels stay on the per-TF lines. (String ranges and the
+    # глубже/выше list tokens carry no TF set and are never folded.)
     _tf_rank = {t: i for i, t in enumerate(("1m", "5m", "15m", "1h", "4h", "1d", "1w"))}
     conf_bits: list[str] = []
+    absorbed: set[tuple[str, str, float]] = set()
     for k in ("support", "resistance"):
         groups: list[dict[str, Any]] = []
         pts = sorted((v, tf) for tf in order for v in num_by[tf].get(k, []))
@@ -320,13 +306,42 @@ def format_grid_telegram(grid: list[dict[str, Any]], *, price: float = 0) -> str
                     matched = g
                     break
             if matched is None:
-                groups.append({"price": pv, "tfs": {tf}})
+                groups.append({"price": pv, "tfs": {tf}, "members": [(tf, pv)]})
             else:
                 matched["tfs"].add(tf)
+                matched["members"].append((tf, pv))
         for g in groups:
             if len(g["tfs"]) >= 2:
+                for m_tf, m_pv in g["members"]:
+                    absorbed.add((m_tf, k, m_pv))
                 tfs = "+".join(sorted(g["tfs"], key=lambda t: _tf_rank.get(t, 99)))
-                conf_bits.append(f"{_K_RU[k]} {_fmt_price(g['price'])} ({tfs})")
+                # Same distance grammar as the per-TF lines, but inside the (TF · %)
+                # group — fmt_dist wraps its own parens, so strip them before nesting.
+                dist_raw = _fmt_dist(g["price"], price).strip()
+                inner = dist_raw[1:-1] if dist_raw[:1] == "(" and dist_raw[-1:] == ")" else dist_raw
+                tail = f" · {inner}" if inner else ""
+                conf_bits.append(f"{_K_RU[k]} {_fmt_price(g['price'])} ({tfs}{tail})")
+
+    for tf in order:
+        parts: list[str] = []
+        for k in _KIND_ORDER:
+            nums = num_by[tf].get(k, [])
+            if k == "support":
+                nums = sorted(nums, reverse=True)  # nearest (highest) first
+            elif k == "resistance":
+                nums = sorted(nums)  # nearest (lowest) first
+            for val in nums:
+                if (tf, k, val) in absorbed:
+                    continue  # shown once in the «усиленные» confluence line instead
+                # Distance is what makes a level readable at a glance: a support 0.1%
+                # away and one 9.6% away used to render identically, leaving the reader
+                # to divide every number on the card by spot in their head.
+                parts.append(f"{_K_RU.get(k, k)}={_fmt_price(val)}{_fmt_dist(val, price)}")
+            for tok in tok_by[tf].get(k, []):
+                parts.append(f"{_K_RU.get(k, k)}={tok}")
+        if parts:
+            lines.append(f"· {tf}: " + ", ".join(parts[:6]))
+
     if conf_bits:
         lines.append("🔗 <b>мульти-ТФ конфлюенс</b> (усиленные): " + ", ".join(conf_bits))
     return "\n".join(lines) if len(lines) > 1 else ""

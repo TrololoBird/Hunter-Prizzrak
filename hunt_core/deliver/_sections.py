@@ -889,13 +889,10 @@ def format_book_walls_section(row: dict[str, Any]) -> str:
     maps = row.get("maps") or {}
     ob = maps.get("orderbook") if isinstance(maps, dict) else None
     if isinstance(ob, dict):
-        sticky = ob.get("sticky_walls") or []
-        if sticky and isinstance(sticky[0], dict):
-            s = sticky[0]
-            lines.append(
-                f"Sticky {s.get('side', '?')} @ <code>{_fmt_price(float(s.get('price') or 0))}</code>"
-                f" ({s.get('samples')} samples)"
-            )
+        # The nearest sticky wall is deliberately NOT printed here: it duplicated — as a
+        # strict subset, without notional or distance — the top line of «Тепловая карта
+        # ликвидности», which renders the same walls per side with $ and % distance. Only
+        # icebergs are unique to the DOM section.
         ice = ob.get("iceberg_levels") or []
         if ice and isinstance(ice[0], dict):
             i0 = ice[0]

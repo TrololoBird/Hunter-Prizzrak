@@ -51,6 +51,25 @@ def test_multi_tf_level_surfaced_as_confluence() -> None:
     assert "61806.0" not in conf  # single-TF level not flagged as confluence
 
 
+def test_confluence_level_lifted_out_of_per_tf_lines() -> None:
+    # A level shared across ≥2 TFs must print ONCE — in the «усиленные» confluence line —
+    # not also on each per-TF line. Live, 62505.1 rendered as «1h», «4h» AND «(1h+4h)»:
+    # the same number three times. Single-TF resistances stay on their per-TF lines.
+    grid = [
+        {"tf": "1h", "support": 62505.1, "resistance": 64356.7},
+        {"tf": "4h", "support": 62505.1, "resistance": 65589.7},
+    ]
+    text = format_grid_telegram(grid, price=63926.6)
+    assert text.count("62505.1") == 1, f"shared level must print exactly once: {text}"
+    conf = next((ln for ln in text.splitlines() if "мульти-ТФ конфлюенс" in ln), "")
+    assert "62505.1" in conf and "1h+4h" in conf
+    assert "62505.1" not in _line(text, "1h"), "confluence level must leave the per-TF line"
+    # the confluence highlight carries its own distance, like the per-TF lines
+    assert "%" in conf or "у цены" in conf, f"confluence line needs distance: {conf}"
+    # single-TF resistances are untouched
+    assert "64356.7" in _line(text, "1h") and "65589.7" in _line(text, "4h")
+
+
 def test_no_confluence_line_when_no_shared_levels() -> None:
     grid = [{"tf": "1h", "support": 61806.0, "resistance": 63000.0}]
     text = format_grid_telegram(grid, price=62000.0)
