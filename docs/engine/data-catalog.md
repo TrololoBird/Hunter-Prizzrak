@@ -97,7 +97,10 @@ force-order's side (`sell` force-order = a **long** being liquidated). Bitget: n
 
 ### Long/short ratio — `fetchLongShortRatioHistory`
 `info` `symbol` `timestamp?` `datetime?` `timeframe?` `longShortRatio`. Unified, all four. Binance →
-`globalLongShortAccountRatio` (global accounts, NOT top-trader).
+`globalLongShortAccountRatio` (global accounts, NOT top-trader). **Timeframe availability differs
+(measured live):** only **`1h`** is served by all four — Bybit returns an *empty* history for
+`5m`/`15m` (no sub-hour retention), Bitget errors on `1d` (`Parameter 1d does not exist`). The engine
+polls `1h` (the common denominator); a shorter period silently starves Bybit to `None`.
 
 ### Mark-price & bids-asks streams
 Both reuse the **Ticker** struct, sparsely: `watchMarkPrices` → `markPrice`/`indexPrice`
@@ -128,10 +131,10 @@ tokenized-equity filter), `contractType` (`PERPETUAL`/`CURRENT_QUARTER`/…), `s
 
 ## 4. Engine implications
 
-1. **Liquidation notional** must be computed (`contracts*contractSize*price`) — never trust WS `baseValue/quoteValue`.
+1. **Liquidation notional** must be computed (`contracts*contractSize*price`) — never trust WS `baseValue/quoteValue`. ✅ `engine/liquidations.py::liquidation_notional` (side-split, market-`contractSize` fallback, fail-loud); cross-venue via `MultiEngine.cross_liquidations` / `cross_liquidation_notional` (OKX/Bybit REST `fetchLiquidations`; Binance from the primary WS `!forceOrder`; Bitget None).
 2. **OI notional** cross-venue: OKX direct; Binance from `/futures/data` history; Bitget amount-only (fail-loud None on notional).
 3. **Funding** uniform via REST `fetchFundingRates`; only OKX streams it / gives `nextFundingRate`.
-4. **Long/short ratio** is unified (`fetchLongShortRatioHistory`) across all four — prefer it over Binance-specific `fapiData` for the global-accounts ratio; keep raw `fapiData*` only for the **top-trader** ratios + basis + takerBuySellVol (Binance-only signals).
+4. **Long/short ratio** is unified (`fetchLongShortRatioHistory`) across all four — prefer it over Binance-specific `fapiData` for the global-accounts ratio; keep raw `fapiData*` only for the **top-trader** ratios + basis + takerBuySellVol (Binance-only signals). ✅ `rest.poll_long_short_ratio` + `MultiEngine.cross_long_short` (aligned to the primary `global_ls_5m` plane).
 5. **BBO** from `watchBidsAsks` (all four) — don't parse the book for top-of-book.
 6. **Mark price**: Binance/OKX stream it; Bybit/Bitget read it off `watchTicker` (`markPrice` field) — a per-venue source difference to encode when mark is wired for secondaries.
 7. **`underlyingType == 'COIN'`** (raw `info`) is the universe filter — ticker id ≠ underlying.

@@ -17,6 +17,7 @@ import structlog
 from hunt_core.engine import exchanges, params, rest
 from hunt_core.engine.health import Watchdog
 from hunt_core.engine.ingest import Ingest
+from hunt_core.engine.liquidations import market_contract_size
 from hunt_core.engine.state import MarketSnapshot, Plane, PlaneStamp, Source, SymbolState
 
 LOG = structlog.get_logger(__name__)
@@ -72,8 +73,14 @@ def _resolve(ex: object, st: SymbolState, symbol: str, name: str) -> object | No
         trades = (getattr(ex, "trades", {}) or {}).get(symbol)
         return list(trades) if trades else None
     if name == "liq":
-        liqs = (getattr(ex, "liquidations", {}) or {}).get(symbol)
-        return list(liqs) if liqs else None
+        # ccxt.pro stores liquidations as ONE flat ArrayCache across all symbols (NOT a per-symbol
+        # dict like trades/orderbooks), and it is None until the first !forceOrder — so filter the
+        # flat cache by symbol rather than indexing it.
+        cache = getattr(ex, "liquidations", None)
+        if not cache:
+            return None
+        evs = [e for e in list(cache) if isinstance(e, dict) and e.get("symbol") == symbol]
+        return evs or None
     return st.value_of(name)  # value-backed: mark / funding / ticker / oi / taker / global_ls
 
 
@@ -188,6 +195,10 @@ class Engine:
                 name, value, stamp.source, stamp.received_ms, stamp.event_ms, stamp.bound_ms
             )
         return MarketSnapshot(symbol, now, planes, tuple(not_ready))
+
+    def contract_size(self, symbol: str) -> float | None:
+        """The market's contract size for notional math (e.g. liquidations), or ``None`` fail-loud."""
+        return market_contract_size(self._ingest.exchange, symbol)
 
     async def close(self) -> None:
         if self._watchdog is not None:

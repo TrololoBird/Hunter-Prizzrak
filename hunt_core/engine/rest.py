@@ -9,6 +9,7 @@ fabricates a value: a missing/failed datum returns ``None`` and is logged, never
 """
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import structlog
@@ -75,6 +76,60 @@ async def poll_funding_rates(exchange: Any, symbols: list[str]) -> dict[str, flo
     return out
 
 
+async def poll_long_short_ratio(
+    exchange: Any, symbol: str, *, timeframe: str = "1h"
+) -> float | None:
+    """Latest global long/short **account** ratio via unified ``fetchLongShortRatioHistory``.
+
+    Portable across all four venues (Binance maps it to ``globalLongShortAccountRatio``). Returns the
+    newest record's ``longShortRatio`` as a finite float, or ``None`` fail-loud (venue lacks the
+    method / empty history / unparseable) — never a fabricated ``1.0``. The ``has`` guard is silent
+    (unsupported-by-design is not a failure; the caller gates which venues it polls at start).
+
+    ``timeframe='1h'`` is deliberate: it is the ONLY period all four venues actually serve — Bybit
+    returns an empty history for ``5m``/``15m`` (no sub-hour retention), Bitget errors on ``1d``
+    (measured live). A shorter default silently starved Bybit to ``None``. The account ratio barely
+    moves across granularities (Binance ``5m`` 1.495 vs ``1h`` 1.4994), so 1h is apples-to-apples
+    with the primary engine's ``global_ls_5m`` plane for a divergence signal.
+    """
+    if not getattr(exchange, "has", {}).get("fetchLongShortRatioHistory"):
+        return None
+    try:
+        rows = await exchange.fetch_long_short_ratio_history(symbol, timeframe, limit=30)
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("engine_poll_lsr_failed", venue=getattr(exchange, "id", "?"), symbol=symbol, err=str(exc))
+        return None
+    if not rows or not isinstance(rows[-1], dict):
+        return None
+    try:
+        value = float(rows[-1].get("longShortRatio"))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
+
+
+async def poll_liquidations(
+    exchange: Any, symbol: str, *, limit: int = 100
+) -> list[dict[str, Any]] | None:
+    """Recent public liquidation events via unified ``fetchLiquidations`` (OKX/Bybit; not Bitget).
+
+    Binance has **no** public REST liquidation endpoint (its liquidations come from the WS
+    ``!forceOrder`` stream), so this is capability-gated on ``has['fetchLiquidations']``. Returns the
+    raw liquidation structures (notional is computed by the caller via
+    :func:`hunt_core.engine.liquidations.liquidation_notional` — the payload's ``baseValue``/
+    ``quoteValue`` are unreliable), or ``None`` fail-loud when unsupported/failed. The ``has`` guard
+    is silent (unsupported-by-design is not a failure; the caller gates venues at start).
+    """
+    if not getattr(exchange, "has", {}).get("fetchLiquidations"):
+        return None
+    try:
+        rows = await exchange.fetch_liquidations(symbol, limit=limit)
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("engine_poll_liq_failed", venue=getattr(exchange, "id", "?"), symbol=symbol, err=str(exc))
+        return None
+    return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else None
+
+
 async def poll_futures_data(
     exchange: Any, method: str, req_params: dict[str, Any]
 ) -> list[dict[str, Any]] | None:
@@ -98,4 +153,11 @@ async def poll_futures_data(
     return list(rows) if isinstance(rows, list) else None
 
 
-__all__ = ["seed_ohlcv", "poll_open_interest", "poll_funding_rates", "poll_futures_data"]
+__all__ = [
+    "seed_ohlcv",
+    "poll_open_interest",
+    "poll_funding_rates",
+    "poll_long_short_ratio",
+    "poll_liquidations",
+    "poll_futures_data",
+]
