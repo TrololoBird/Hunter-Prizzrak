@@ -17,20 +17,23 @@ jobs:
       - name: Set up Python 3.14
         run: uv python install 3.14
 
+      - name: Create virtual environment
+        run: uv venv
+
       - name: Install project (with dev extras)
-        run: uv pip install --system -e ".[dev]"
+        run: uv pip install --python .venv -e ".[dev]"
 
       - name: Ruff lint
-        run: ruff check .
+        run: uv run ruff check .
 
       - name: Vulture (dead-code guard, conf 80 + whitelist)
-        run: vulture
+        run: uv run vulture
 
       - name: Prohibited private CCXT API call scan
-        run: python scripts/check_prohibited_apis.py
+        run: uv run python scripts/check_prohibited_apis.py
 
       - name: mypy (blocking — backlog cleared, 0 issues)
-        run: mypy hunt_core
+        run: uv run mypy hunt_core
 
       - name: pytest
-        run: pytest -q
+        run: uv run pytest -q
