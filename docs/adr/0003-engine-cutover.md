@@ -24,7 +24,8 @@ stay (extracted out of the transport). The **transport + caches** die and are re
 | `fetch_funding_rate_history` | `rest.fetch_funding_history` | ✅ **E2** |
 | **`fetch_ticker_24h`** (scanner funnel, ALL perps) | `rest.fetch_all_tickers` (universe-wide REST batch) | ✅ **E3** |
 | **`fetch_premium_index_all` / `fetch_funding_info_all` / `fetch_exchange_symbols`** | per-symbol mark/funding planes + `exchange.markets` meta — read at consumer-migration (tracked universe covers pinned) | ◑ E3 (per-symbol path) |
-| **`get_cached_funding_rate_zscore` / `_trend` / `_recent_extreme` / `get_cached_basis_stats`** | funding-history buffer in engine → **stats computed in `features/`** (move out of transport) | ⬜ **E4** |
+| **`get_cached_funding_rate_zscore` / `_trend` / `_recent_extreme`** | `engine/funding_stats.py` (pure, over `fetch_funding_history` settled records — the same source the old client used; falsy-zero bug fixed) | ✅ **E4a** |
+| **`get_cached_basis_stats`** | basis_pct/slope from the mark+index plane (WS zscore was always None; the REST zscore path was dead) — folds into the features/ migration | ◑ E4b (at features migration) |
 | **WS-derived** (`agg_trade_delta_30s/60s`, `ws_cvd`, `ws_price_chg_1m`, `fetch_agg_trade_snapshot`) | `engine/orderflow.py::taker_flow`/`price_change_pct` (pure, over trades read-through) | ✅ **E5a** |
 | **WS-derived book** (`live_microprice_bias`, `live_depth_imbalance`) | extract existing pure book-math (§2) over `book` read-through | ◑ E5b (extract) |
 | `closed_kline_overlay` / `live_book` / `trade_buffer` / `liquidation_buffers` | subsumed by engine frame-merge + `book`/`trades`/`liq` read-through | ✅ subsumed |
