@@ -196,6 +196,19 @@ class Engine:
             )
         return MarketSnapshot(symbol, now, planes, tuple(not_ready))
 
+    @property
+    def exchange(self) -> object:
+        """The live ccxt.pro client — for on-demand REST of NON-tracked symbols (scanner funnel).
+
+        Tracked symbols read warm WS planes via :meth:`snapshot`; the dynamic tail (arbitrary perps)
+        is fetched on demand through this client by the engine's ``rest`` helpers.
+        """
+        return self._ingest.exchange
+
+    def tracked_symbols(self) -> frozenset[str]:
+        """The symbols this engine holds warm WS planes for (vs on-demand REST for the rest)."""
+        return frozenset(self._symbols)
+
     def contract_size(self, symbol: str) -> float | None:
         """The market's contract size for notional math (e.g. liquidations), or ``None`` fail-loud."""
         return market_contract_size(self._ingest.exchange, symbol)
