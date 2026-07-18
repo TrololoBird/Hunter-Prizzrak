@@ -29,7 +29,8 @@ stay (extracted out of the transport). The **transport + caches** die and are re
 | **WS-derived** (`agg_trade_delta_30s/60s`, `ws_cvd`, `ws_price_chg_1m`, `fetch_agg_trade_snapshot`) | `engine/orderflow.py::taker_flow`/`price_change_pct` (pure, over trades read-through) | ✅ **E5a** |
 | **WS-derived book** (`live_microprice_bias`, `live_depth_imbalance`) | extract existing pure book-math (§2) over `book` read-through | ◑ E5b (extract) |
 | `closed_kline_overlay` / `live_book` / `trade_buffer` / `liquidation_buffers` | subsumed by engine frame-merge + `book`/`trades`/`liq` read-through | ✅ subsumed |
-| **SPOT** (`HuntCcxtSpotCompanion`: `refresh_symbols`, `enrichments_for`, `fetch_weekly_ohlcv`, taker-flow) | a **spot sibling engine** (ccxt spot client; own 6000/min budget) | ⬜ **E6** |
+| **SPOT** pure metrics (lead/spread/ref/volume/taker) | `engine/spot_metrics.py` (reuses `orderflow.taker_flow`) | ✅ **E6a** |
+| **SPOT** live source (`refresh_symbols`/`enrichments_for`/`fetch_weekly_ohlcv`) | a **spot sibling engine** — ccxt.pro spot WS (ticker/1m-ohlcv/trades) + REST weekly ladder | ⬜ **E6b** |
 | `snapshot_rest_cache_ages` / `used_weight_1m` (diagnostics) | engine plane-age introspection + throttler weight | ⬜ **E7** (thin) |
 
 **Dead — drop, do not port** (0 consumers, verified): `fetch_premium_index_ohlcv`,
