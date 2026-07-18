@@ -1,0 +1,68 @@
+"""Thin ccxt-native REST — three jobs only, each fail-loud + logged (ADR-0002 §6.2, §11.E).
+
+1. **seed** — warm-up history so a plane is never empty before WS fills it.
+2. **reseed** — refetch after a detected gap / watchdog trip (same call as seed).
+3. **poll positioning** — the un-streamable ``/futures/data/*`` stats on their 5-min native cadence.
+
+All calls go through ccxt's built-in weighted throttler (no custom governor). Nothing here
+fabricates a value: a missing/failed datum returns ``None`` and is logged, never a substituted ``0``.
+"""
+from __future__ import annotations
+
+from typing import Any
+
+import structlog
+
+from hunt_core.engine.freshness import Bar
+
+LOG = structlog.get_logger(__name__)
+
+
+async def seed_ohlcv(exchange: Any, symbol: str, timeframe: str, *, limit: int) -> list[Bar]:
+    """Fetch closed history via REST to warm a kline plane (drops the forming last bar, I-5).
+
+    Returns ``[]`` on failure (logged) — the caller keeps the plane ``absent`` and the snapshot
+    reports ``NotReady``, never a fabricated frame.
+    """
+    try:
+        rows = await exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("engine_seed_ohlcv_failed", symbol=symbol, tf=timeframe, err=str(exc))
+        return []
+    bars = [list(map(float, r)) for r in (rows or [])]
+    return bars[:-1] if bars else []
+
+
+async def poll_open_interest(exchange: Any, symbol: str) -> float | None:
+    """Current open interest (``/fapi/v1/openInterest``, weight 1). ``None`` on failure — no fake 0."""
+    try:
+        oi = await exchange.fetch_open_interest(symbol)
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("engine_poll_oi_failed", symbol=symbol, err=str(exc))
+        return None
+    value = oi.get("openInterestAmount") if isinstance(oi, dict) else None
+    return float(value) if value is not None else None
+
+
+async def poll_futures_data(
+    exchange: Any, method: str, symbol: str, *, period: str = "5m", limit: int = 1
+) -> list[dict[str, Any]] | None:
+    """Fetch one ``/futures/data/*`` statistic via ccxt's implicit endpoint (5-min native cadence).
+
+    ``method`` is a ccxt implicit method name, e.g. ``fapiDataGetOpenInterestHist``,
+    ``fapiDataGetTopLongShortAccountRatio``, ``fapiDataGetTakerlongshortRatio``. Capability-gated:
+    a venue/method that does not exist yields a loud skip, never a fabricated series.
+    """
+    fn = getattr(exchange, method, None)
+    if fn is None:
+        LOG.warning("engine_futures_data_unsupported", method=method, symbol=symbol)
+        return None
+    try:
+        rows = await fn({"symbol": symbol.replace("/", "").split(":")[0], "period": period, "limit": limit})
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("engine_futures_data_failed", method=method, symbol=symbol, err=str(exc))
+        return None
+    return list(rows) if isinstance(rows, list) else None
+
+
+__all__ = ["seed_ohlcv", "poll_open_interest", "poll_futures_data"]
