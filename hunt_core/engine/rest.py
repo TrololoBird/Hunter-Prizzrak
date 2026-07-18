@@ -10,6 +10,7 @@ fabricates a value: a missing/failed datum returns ``None`` and is logged, never
 from __future__ import annotations
 
 import math
+import time
 from typing import Any
 
 import structlog
@@ -17,6 +18,30 @@ import structlog
 from hunt_core.engine.freshness import Bar
 
 LOG = structlog.get_logger(__name__)
+
+
+async def _fetch_ohlcv_raw(
+    exchange: Any,
+    symbol: str,
+    timeframe: str,
+    *,
+    limit: int,
+    since: int | None = None,
+    params: dict[str, Any] | None = None,
+) -> list[Bar] | None:
+    """Core ccxt ``fetch_ohlcv`` → ascending float bars-list, or ``None`` on failure (logged).
+
+    ``None`` (not ``[]``) distinguishes a failed call from a genuine empty window, so callers keep
+    a plane ``absent`` rather than fabricating a frame.
+    """
+    try:
+        rows = await exchange.fetch_ohlcv(
+            symbol, timeframe, since=since, limit=limit, params=params or {}
+        )
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("engine_fetch_ohlcv_failed", symbol=symbol, tf=timeframe, err=str(exc))
+        return None
+    return [[float(x) for x in r] for r in (rows or [])]
 
 
 async def seed_ohlcv(exchange: Any, symbol: str, timeframe: str, *, limit: int) -> list[Bar]:
@@ -29,13 +54,86 @@ async def seed_ohlcv(exchange: Any, symbol: str, timeframe: str, *, limit: int) 
     # 1000) — so for deep history route through ccxt's deterministic paginator; a normal ≤1000 seed
     # stays a single call.
     extra = {"paginate": True} if limit > 1000 else {}
-    try:
-        rows = await exchange.fetch_ohlcv(symbol, timeframe, limit=limit, params=extra)
-    except Exception as exc:  # noqa: BLE001
-        LOG.warning("engine_seed_ohlcv_failed", symbol=symbol, tf=timeframe, err=str(exc))
+    bars = await _fetch_ohlcv_raw(exchange, symbol, timeframe, limit=limit, params=extra)
+    if bars is None:
         return []
-    bars = [list(map(float, r)) for r in (rows or [])]
     return bars[:-1] if bars else []
+
+
+async def fetch_ohlcv_series(
+    exchange: Any, symbol: str, timeframe: str, *, limit: int, price: str | None = None
+) -> list[Bar]:
+    """Closed OHLCV series, optionally the mark/index/premium candle stream (``price='mark'`` …).
+
+    Same shape as :func:`seed_ohlcv` (drops the forming bar, I-5). For mark/index/premiumIndex the
+    OHLC is meaningful but ``volume[5]`` is 0/meaningless (data-catalog). Fail-loud ``[]``.
+    """
+    params: dict[str, Any] = {}
+    if price is not None:
+        params["price"] = price
+    if limit > 1000:
+        params["paginate"] = True
+    bars = await _fetch_ohlcv_raw(exchange, symbol, timeframe, limit=limit, params=params)
+    if bars is None:
+        return []
+    return bars[:-1] if bars else []
+
+
+async def fetch_ohlcv_between(
+    exchange: Any, symbol: str, timeframe: str, *, start_ms: int, end_ms: int
+) -> list[Bar]:
+    """Windowed CLOSED OHLCV in ``[start_ms, end_ms]`` (reconcile / path-backfill). Fail-loud ``[]``.
+
+    Filters to fully-closed bars (``open + interval ≤ min(end_ms, now)``) so a forming bar at the
+    window edge is never served as data (I-5). ``end_ms`` maps to ccxt's ``until`` (Binance
+    ``endTime``); ``start_ms`` to ``since``.
+    """
+    interval_ms = int(exchange.parse_timeframe(timeframe) * 1000)
+    bars = await _fetch_ohlcv_raw(
+        exchange, symbol, timeframe, since=int(start_ms), limit=1500, params={"until": int(end_ms)}
+    )
+    if not bars:
+        return []
+    cutoff = min(int(end_ms), int(time.time() * 1000))
+    return [b for b in bars if int(b[0]) + interval_ms <= cutoff]
+
+
+async def fetch_funding_history(exchange: Any, symbol: str, *, limit: int = 16) -> list[dict[str, Any]]:
+    """Settled funding records via ``fetch_funding_rate_history`` (``fundingRate``/``timestamp`` each).
+
+    Raw ccxt records, oldest→newest, for the derived funding stats (z-score/trend/extreme) that move
+    to ``features/`` at cutover. Fail-loud ``[]`` (a failed fetch is not an empty history).
+    """
+    try:
+        rows = await exchange.fetch_funding_rate_history(symbol, limit=limit)
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("engine_funding_history_failed", symbol=symbol, err=str(exc))
+        return []
+    return [r for r in (rows or []) if isinstance(r, dict)]
+
+
+async def fetch_futures_data_series(
+    exchange: Any, method: str, req_params: dict[str, Any], key: str
+) -> list[float]:
+    """A ``/futures/data/*`` statistic as a ``list[float]`` (oldest→newest) for ``key``.
+
+    Backs the OI / global-L-S series (``fapiDataGetOpenInterestHist`` → ``sumOpenInterest``;
+    ``fapiDataGetGlobalLongShortAccountRatio`` → ``longShortRatio``). Fail-loud: an absent series or a
+    non-finite/garbage entry is skipped, never fabricated (``[]`` on total failure).
+    """
+    rows = await poll_futures_data(exchange, method, req_params)
+    if not rows:
+        return []
+    out: list[float] = []
+    for row in rows:
+        raw = row.get(key) if isinstance(row, dict) else None
+        try:
+            value = float(raw)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value):
+            out.append(value)
+    return out
 
 
 async def poll_open_interest(exchange: Any, symbol: str) -> float | None:
@@ -155,6 +253,10 @@ async def poll_futures_data(
 
 __all__ = [
     "seed_ohlcv",
+    "fetch_ohlcv_series",
+    "fetch_ohlcv_between",
+    "fetch_funding_history",
+    "fetch_futures_data_series",
     "poll_open_interest",
     "poll_funding_rates",
     "poll_long_short_ratio",

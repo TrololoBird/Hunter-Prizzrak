@@ -17,9 +17,11 @@ stay (extracted out of the transport). The **transport + caches** die and are re
 | `fetch_agg_trade_snapshot` | `"trades"` read-through + a pure agg helper | ⬜ helper |
 | `fetch_open_interest` / `fetch_funding_rate` / `fetch_*_ls_ratio` / `fetch_taker_ratio` / `fetch_basis` | value-backed planes (`oi`,`funding`,`global_ls_5m`,`top_ls_*`,`taker_5m`,`basis`) | ✅ exists |
 | `fetch_cross_exchange_snapshot` / secondary funding/tickers | `MultiEngine.cross_funding/oi/long_short/liquidations` | ✅ exists (shape bridge ⬜) |
-| **`fetch_mark_ohlcv` / `fetch_index_ohlcv`** | REST-seeded mark/index frames (`params={'price':...}`) | ⬜ **E1** |
-| **`fetch_open_interest_series` / `fetch_global_ls_series` / `fetch_oi_bars_for_maps`** | engine REST series methods | ⬜ **E2** |
-| **`fetch_klines_between`** (reconcile / backfill / completeness) | engine windowed REST fetch | ⬜ **E2** |
+| **`fetch_mark_ohlcv` / `fetch_index_ohlcv`** | `rest.fetch_ohlcv_series(price='mark'\|'index')` | ✅ **E1** |
+| **`fetch_open_interest_series` / `fetch_global_ls_series`** | `rest.fetch_futures_data_series(method,params,key)` | ✅ **E2** |
+| **`fetch_oi_bars_for_maps`** | OI-hist series (E2) + align-to-OHLCV moves to `maps/` at cutover | ◑ E2 (source ready) |
+| **`fetch_klines_between`** (reconcile / backfill / completeness) | `rest.fetch_ohlcv_between(start_ms,end_ms)` (closed-only) | ✅ **E2** |
+| `fetch_funding_rate_history` | `rest.fetch_funding_history` | ✅ **E2** |
 | **`fetch_premium_index_all` / `fetch_funding_info_all` / `fetch_exchange_symbols` / `fetch_ticker_24h`** | universe-wide accessors off streamed tickers/markets (REST fallback) | ⬜ **E3** |
 | **`get_cached_funding_rate_zscore` / `_trend` / `_recent_extreme` / `get_cached_basis_stats`** | funding-history buffer in engine → **stats computed in `features/`** (move out of transport) | ⬜ **E4** |
 | **WS-derived** (`agg_trade_delta_30s/60s`, `live_microprice_bias`, `live_depth_imbalance`, `ws_price_chg_1m`, `closed_kline_overlay`, `live_book`, `trade_buffer`, `liquidation_buffers`) | pure helpers over engine `trades`/`book`/`liq` read-through | ⬜ **E5** |
