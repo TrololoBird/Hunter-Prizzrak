@@ -17,7 +17,7 @@ import structlog
 from hunt_core.engine import exchanges, params, rest
 from hunt_core.engine.health import Watchdog
 from hunt_core.engine.ingest import _TF_MS, Ingest
-from hunt_core.engine.state import MarketSnapshot, Plane, Source
+from hunt_core.engine.state import MarketSnapshot, Plane, PlaneStamp, Source, SymbolState
 
 LOG = structlog.get_logger(__name__)
 
@@ -38,6 +38,32 @@ def _last_float(rows: list[dict[str, object]] | None, key: str) -> float | None:
     except (TypeError, ValueError):
         return None
     return value if math.isfinite(value) else None
+
+
+def _book_snapshot(ob: object) -> dict[str, object] | None:
+    """Plain-dict copy of a ccxt.pro order book (top ``ORDER_BOOK_LIMIT`` levels), or ``None``."""
+    if not ob:
+        return None
+    try:
+        bids = [[float(x[0]), float(x[1])] for x in list(ob["bids"])[: params.ORDER_BOOK_LIMIT]]  # type: ignore[index]
+        asks = [[float(x[0]), float(x[1])] for x in list(ob["asks"])[: params.ORDER_BOOK_LIMIT]]  # type: ignore[index]
+    except (KeyError, TypeError, ValueError, IndexError):
+        return None
+    ts = ob.get("timestamp") if hasattr(ob, "get") else None
+    return {"bids": bids, "asks": asks, "timestamp": ts}
+
+
+def _resolve(ex: object, st: SymbolState, symbol: str, name: str) -> object | None:
+    """Read-through a plane's value from the right source — no parallel copy of ccxt's caches."""
+    if name.startswith("kline."):
+        frame = st.frame_of(name)
+        return [list(b) for b in frame] if frame else None
+    if name == "book":
+        return _book_snapshot((getattr(ex, "orderbooks", {}) or {}).get(symbol))
+    if name == "trades":
+        trades = (getattr(ex, "trades", {}) or {}).get(symbol)
+        return list(trades) if trades else None
+    return st.value_of(name)  # value-backed: mark / funding / oi / taker / global_ls
 
 
 class Engine:
@@ -72,7 +98,9 @@ class Engine:
                 bars = await rest.seed_ohlcv(ex, symbol, tf, limit=params.OHLCV_LIMIT)
                 if bars:
                     bound = int(params.fresh_kline_s(_TF_MS[tf] / 1000.0) * 1000.0)
-                    st.put(Plane(f"kline.{tf}", bars, Source.REST_SEED, now, int(bars[-1][0]), bound))
+                    st.seed_frame(
+                        f"kline.{tf}", bars, PlaneStamp(Source.REST_SEED, now, int(bars[-1][0]), bound)
+                    )
 
     async def _poll_positioning(self) -> None:
         """Poll the un-streamable ``/futures/data/*`` planes on their 5-min native cadence.
@@ -88,24 +116,48 @@ class Engine:
                 st = self._ingest.state_for(symbol)
                 oi = await rest.poll_open_interest(ex, symbol)
                 if oi is not None:
-                    st.put(Plane("oi", oi, Source.REST_SEED, now, now, bound))
+                    st.put_value("oi", oi, PlaneStamp(Source.REST_SEED, now, now, bound))
                 taker = await rest.poll_futures_data(ex, "fapiDataGetTakerlongshortRatio", symbol)
                 ratio = _last_float(taker, "buySellRatio")
                 if ratio is not None:
-                    st.put(Plane("taker_5m", ratio, Source.REST_SEED, now, now, bound))
+                    st.put_value("taker_5m", ratio, PlaneStamp(Source.REST_SEED, now, now, bound))
                 gls = await rest.poll_futures_data(ex, "fapiDataGetGlobalLongShortAccountRatio", symbol)
                 lsr = _last_float(gls, "longShortRatio")
                 if lsr is not None:
-                    st.put(Plane("global_ls_5m", lsr, Source.REST_SEED, now, now, bound))
+                    st.put_value("global_ls_5m", lsr, PlaneStamp(Source.REST_SEED, now, now, bound))
             await asyncio.sleep(params.FUTURES_DATA_POLL_S)
 
     def snapshot(self, symbol: str, required: Sequence[str]) -> MarketSnapshot:
-        """A consistent, freshness-checked view; ``not_ready`` names any absent/stale required plane."""
+        """A consistent, freshness-checked view; ``not_ready`` names any absent/stale required plane.
+
+        Resolution is **read-through** — kline frames from our REST-seeded+WS-merged store, ``book`` /
+        ``trades`` from ccxt's own caches, scalars (mark/funding/oi/…) from the value-backed store. No
+        parallel copy of ccxt's data; nothing fabricated — an unresolved/stale plane lands in
+        ``not_ready``.
+        """
         now = int(time.time() * 1000)
         st = self._ingest.states.get(symbol)
         if st is None:
             return MarketSnapshot(symbol, now, {}, (f"{symbol}: not tracked",))
-        return st.snapshot(now, tuple(required))
+        ex = self._ingest.exchange
+        planes: dict[str, Plane[object]] = {}
+        not_ready: list[str] = []
+        for name in required:
+            stamp = st.stamp_of(name)
+            if stamp is None:
+                not_ready.append(f"{name}: absent")
+                continue
+            if stamp.stale_by(now) is not None:
+                not_ready.append(f"{name}: stale {now - stamp.received_ms}ms>{stamp.bound_ms}ms")
+                continue
+            value = _resolve(ex, st, symbol, name)
+            if value is None:
+                not_ready.append(f"{name}: absent")
+                continue
+            planes[name] = Plane(
+                name, value, stamp.source, stamp.received_ms, stamp.event_ms, stamp.bound_ms
+            )
+        return MarketSnapshot(symbol, now, planes, tuple(not_ready))
 
     async def close(self) -> None:
         if self._watchdog is not None:

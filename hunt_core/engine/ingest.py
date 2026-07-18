@@ -19,7 +19,7 @@ from typing import Any
 import structlog
 
 from hunt_core.engine import freshness, params
-from hunt_core.engine.state import Plane, Source, SymbolState
+from hunt_core.engine.state import PlaneStamp, Source, SymbolState
 
 LOG = structlog.get_logger(__name__)
 
@@ -118,26 +118,24 @@ class Ingest:
                 )
                 await asyncio.sleep(delay)
 
-    # --- per-stream steps (one `await watch_*` + one fail-loud Plane write) ---
+    # --- per-stream steps: each `await watch_*` DRIVES updates + reconnect; the DATA stays in
+    # ccxt's own caches (read-through at snapshot) — we only stamp freshness. OHLCV is the sole
+    # exception: ccxt's WS cache lacks deep history, so we merge its recent closed bars into the
+    # REST-seeded frame (freqtrade "REST truth, WS fresh tail" — a minimal append, not a 2nd cache).
 
     def _step_ohlcv(self, symbol: str, tf: str) -> Callable[[], Awaitable[None]]:
-        interval_ms = _TF_MS[tf]
-        bound_ms = int(params.fresh_kline_s(interval_ms / 1000.0) * 1000.0)
+        bound_ms = int(params.fresh_kline_s(_TF_MS[tf] / 1000.0) * 1000.0)
 
         async def step() -> None:
-            cache = await self._ex.watch_ohlcv(symbol, tf)
-            bars = freshness.closed_bars(list(cache))  # drop the forming candle (I-5)
-            if not bars:
+            await self._ex.watch_ohlcv(symbol, tf)  # trigger + reconnect; return is a delta (newUpdates)
+            cache = ((getattr(self._ex, "ohlcvs", {}) or {}).get(symbol) or {}).get(tf) or []
+            closed = freshness.closed_bars(list(cache))  # ccxt's recent CLOSED bars (drop forming, I-5)
+            if not closed:
                 return
-            self.state_for(symbol).put(
-                Plane(
-                    name=f"kline.{tf}",
-                    value=[list(b) for b in bars],
-                    source=Source.WS,
-                    received_ms=_now_ms(),
-                    event_ms=int(bars[-1][0]),
-                    bound_ms=bound_ms,
-                )
+            self.state_for(symbol).merge_frame(
+                f"kline.{tf}",
+                [[float(x) for x in bar] for bar in closed],
+                PlaneStamp(Source.WS, _now_ms(), int(closed[-1][0]), bound_ms),
             )
 
         return step
@@ -146,41 +144,26 @@ class Ingest:
         bound_ms = int(params.FRESH_DEPTH_S * 1000.0)
 
         async def step() -> None:
-            # ccxt.pro maintains the book natively (REST snapshot + nonce-validated diffs) and raises
-            # ChecksumError on a sequence gap → caught by _stream_loop → next watch re-seeds. No
-            # local book maintenance, no resync bug surface.
+            # ccxt.pro maintains the book natively (REST snapshot + nonce-validated diffs, auto re-seed
+            # on a gap via ChecksumError → caught by _stream_loop). We store nothing — the book is read
+            # through `exchange.orderbooks[symbol]` at snapshot time; here we only stamp freshness.
             ob = await self._ex.watch_order_book(symbol, params.ORDER_BOOK_LIMIT)
-            self.state_for(symbol).put(
-                Plane(
-                    name="book",
-                    value=ob,
-                    source=Source.WS,
-                    received_ms=_now_ms(),
-                    event_ms=int(ob.get("timestamp") or _now_ms()),
-                    bound_ms=bound_ms,
-                )
+            now = _now_ms()
+            self.state_for(symbol).stamp_only(
+                "book", PlaneStamp(Source.WS, now, int(ob.get("timestamp") or now), bound_ms)
             )
 
         return step
 
     def _step_trades(self, symbol: str) -> Callable[[], Awaitable[None]]:
+        # Event-driven: silence ≠ stale (a quiet symbol has no trades); the transport watchdog catches
+        # a dead socket. Data is read through `exchange.trades[symbol]` at snapshot time.
+        bound_ms = int(params.NO_MESSAGE_WATCHDOG_S * 1000.0)
+
         async def step() -> None:
-            trades = await self._ex.watch_trades(symbol)
-            if not trades:
-                return
-            # Event-driven: silence ≠ stale (a quiet symbol has no trades), so there is NO tight
-            # per-plane bound — the transport watchdog (health.py) catches a dead socket. bound_ms
-            # here is generous, only guarding an obviously-frozen tape.
-            self.state_for(symbol).put(
-                Plane(
-                    name="trades",
-                    value=list(trades),
-                    source=Source.WS,
-                    received_ms=_now_ms(),
-                    event_ms=int(trades[-1].get("timestamp") or _now_ms()),
-                    bound_ms=int(params.NO_MESSAGE_WATCHDOG_S * 1000.0),
-                )
-            )
+            await self._ex.watch_trades(symbol)  # drive ccxt's trades cache; stamp freshness only
+            now = _now_ms()
+            self.state_for(symbol).stamp_only("trades", PlaneStamp(Source.WS, now, now, bound_ms))
 
         return step
 
@@ -190,19 +173,23 @@ class Ingest:
         fund_bound_ms = int(params.FRESH_FUNDING_S * 1000.0)
 
         async def step() -> None:
-            # One universe-wide subscription; `r` = funding rate, `T` = next funding time → funding
-            # comes from WS, never REST-polled (DOC Mark-Price-Stream).
+            # One universe-wide subscription; `r` = funding rate → funding from WS, never REST-polled.
+            # mark/funding are small scalars ccxt doesn't cache per-symbol usefully, so value-backed.
             marks = await self._ex.watch_mark_prices()
             now = _now_ms()
             for sym, mk in marks.items():
                 if sym not in wanted:
                     continue
                 st = self.state_for(sym)
-                st.put(Plane("mark", mk, Source.WS, now, int(mk.get("timestamp") or now), bound_ms))
-                info = mk.get("info") or {}
-                rate = info.get("r")
-                if rate is not None:
-                    st.put(Plane("funding", float(rate), Source.WS, now, now, fund_bound_ms))
+                st.put_value("mark", mk, PlaneStamp(Source.WS, now, int(mk.get("timestamp") or now), bound_ms))
+                rate = (mk.get("info") or {}).get("r")
+                if rate is None:
+                    continue
+                try:
+                    fval = float(rate)
+                except (TypeError, ValueError):
+                    continue
+                st.put_value("funding", fval, PlaneStamp(Source.WS, now, now, fund_bound_ms))
 
         return step
 
