@@ -983,6 +983,7 @@ def merge_ws_kline_closed(
     interval = {
         "5m_closed": "5m",
         "15m_closed": "15m",
+        "4h_closed": "4h",
     }.get(tf_key, "1m")
     overlay = ws_feed.closed_kline_overlay(symbol, interval=interval)
     if not overlay:

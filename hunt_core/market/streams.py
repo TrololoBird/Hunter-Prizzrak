@@ -45,6 +45,7 @@ _WS_WATCH_TIMEOUT_S: float = 120.0
 _KLINE_INTERVAL = "1m"
 _KLINE_5M_INTERVAL = "5m"
 _KLINE_15M_INTERVAL = "15m"
+_KLINE_4H_INTERVAL = "4h"
 # Staleness bound for the cross-venue funding OVERLAY (live_funding_cross).
 # Deliberately generous, for two opposite reasons:
 #   * too tight would be wrong — funding is a slow number (8 h period) and some venues
@@ -64,6 +65,13 @@ def _kline_ws_5m_enabled() -> bool:
 
 def _kline_ws_15m_enabled() -> bool:
     return os.getenv("HUNT_KLINE_WS_15M", "1").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _kline_ws_4h_enabled() -> bool:
+    # 4h WS overlay keeps the pinned 4h newest-closed bar fresh independent of the REST
+    # weight budget — immunises the analyst path against the klines.4h.stale blackout even
+    # if a REST refresh is starved/banned. Kill-switch: HUNT_KLINE_WS_4H=0.
+    return os.getenv("HUNT_KLINE_WS_4H", "1").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _kline_grace_sec() -> float:
@@ -227,6 +235,10 @@ class HuntCcxtStreams:
     _kline_waiting_15m: dict[str, _ClosedKlineBar] = field(default_factory=dict)
     _kline_ready_15m: dict[str, _ClosedKlineBar] = field(default_factory=dict)
     _last_kline_open_ms_15m: dict[str, int] = field(default_factory=dict)
+    _kline_closed_open_ms_4h: dict[str, int] = field(default_factory=dict)
+    _kline_waiting_4h: dict[str, _ClosedKlineBar] = field(default_factory=dict)
+    _kline_ready_4h: dict[str, _ClosedKlineBar] = field(default_factory=dict)
+    _last_kline_open_ms_4h: dict[str, int] = field(default_factory=dict)
     kline_ws_enabled: bool = True
     mark_price_enabled: bool = True
     # (ts_ms, mark, index, funding|None) — funding is Optional because "the message
@@ -287,6 +299,10 @@ class HuntCcxtStreams:
     @property
     def kline_15m_enabled(self) -> bool:
         return self.kline_ws_enabled and _kline_ws_15m_enabled()
+
+    @property
+    def kline_4h_enabled(self) -> bool:
+        return self.kline_ws_enabled and _kline_ws_4h_enabled()
 
     @property
     def cross_ws_connected(self) -> bool:
@@ -431,9 +447,11 @@ class HuntCcxtStreams:
             self._kline_ready.clear()
             self._kline_ready_5m.clear()
             self._kline_ready_15m.clear()
+            self._kline_ready_4h.clear()
             self._kline_waiting.clear()
             self._kline_waiting_5m.clear()
             self._kline_waiting_15m.clear()
+            self._kline_waiting_4h.clear()
             self._post_reconnect_quiet_until = time.monotonic() + 45.0
             self._reconnect_count += 1
             LOG.info(
@@ -766,6 +784,12 @@ class HuntCcxtStreams:
                 self._kline_ready_15m,
                 self._kline_closed_open_ms_15m,
             )
+        elif interval == _KLINE_4H_INTERVAL:
+            waiting, ready, closed_ms = (
+                self._kline_waiting_4h,
+                self._kline_ready_4h,
+                self._kline_closed_open_ms_4h,
+            )
         else:
             waiting, ready, closed_ms = (
                 self._kline_waiting,
@@ -788,12 +812,16 @@ class HuntCcxtStreams:
                 self._kline_ready_5m.clear()
             if self.kline_15m_enabled:
                 self._kline_ready_15m.clear()
+            if self.kline_4h_enabled:
+                self._kline_ready_4h.clear()
             return set()
         self._promote_kline_grace()
         if self.kline_5m_enabled:
             self._promote_kline_grace(interval=_KLINE_5M_INTERVAL)
         if self.kline_15m_enabled:
             self._promote_kline_grace(interval=_KLINE_15M_INTERVAL)
+        if self.kline_4h_enabled:
+            self._promote_kline_grace(interval=_KLINE_4H_INTERVAL)
         return set(self._kline_ready)
 
     def consume_kline_close_triggers(self, symbols: set[str] | frozenset[str]) -> None:
@@ -804,6 +832,8 @@ class HuntCcxtStreams:
                 self._kline_ready_5m.pop(sym_n, None)
             if self.kline_15m_enabled:
                 self._kline_ready_15m.pop(sym_n, None)
+            if self.kline_4h_enabled:
+                self._kline_ready_4h.pop(sym_n, None)
 
     def _bar_overlay(self, bar: _ClosedKlineBar, *, interval: str) -> dict[str, Any]:
         body = abs(bar.c - bar.o)
@@ -839,12 +869,16 @@ class HuntCcxtStreams:
             return None
         if interval == _KLINE_15M_INTERVAL and not self.kline_15m_enabled:
             return None
+        if interval == _KLINE_4H_INTERVAL and not self.kline_4h_enabled:
+            return None
         self._promote_kline_grace(interval=interval)
         sym = to_binance_symbol(symbol)
         if interval == _KLINE_5M_INTERVAL:
             ready = self._kline_ready_5m
         elif interval == _KLINE_15M_INTERVAL:
             ready = self._kline_ready_15m
+        elif interval == _KLINE_4H_INTERVAL:
+            ready = self._kline_ready_4h
         else:
             ready = self._kline_ready
         bar = ready.get(sym)
@@ -857,6 +891,9 @@ class HuntCcxtStreams:
 
     def closed_15m_overlay(self, symbol: str) -> dict[str, Any] | None:
         return self.closed_kline_overlay(symbol, interval=_KLINE_15M_INTERVAL)
+
+    def closed_4h_overlay(self, symbol: str) -> dict[str, Any] | None:
+        return self.closed_kline_overlay(symbol, interval=_KLINE_4H_INTERVAL)
 
     def closed_1m_kline_overlay(self, symbol: str) -> dict[str, Any] | None:
         return self.closed_kline_overlay(symbol, interval=_KLINE_INTERVAL)
@@ -1012,6 +1049,8 @@ class HuntCcxtStreams:
             self._kline_waiting_5m[sym] = bar
         elif interval == _KLINE_15M_INTERVAL:
             self._kline_waiting_15m[sym] = bar
+        elif interval == _KLINE_4H_INTERVAL:
+            self._kline_waiting_4h[sym] = bar
         else:
             self._kline_waiting[sym] = bar
 
@@ -1029,6 +1068,8 @@ class HuntCcxtStreams:
             last_open = self._last_kline_open_ms_5m
         elif interval == _KLINE_15M_INTERVAL:
             last_open = self._last_kline_open_ms_15m
+        elif interval == _KLINE_4H_INTERVAL:
+            last_open = self._last_kline_open_ms_4h
         else:
             last_open = self._last_kline_open_ms
         prev_open = last_open.get(sym)
@@ -1069,6 +1110,8 @@ class HuntCcxtStreams:
                 specs.append(("hunt_ccxt_kline_5m", self._watch_ohlcv_5m_mux))
             if self.kline_15m_enabled:
                 specs.append(("hunt_ccxt_kline_15m", self._watch_ohlcv_15m_mux))
+            if self.kline_4h_enabled:
+                specs.append(("hunt_ccxt_kline_4h", self._watch_ohlcv_4h_mux))
         elif self.kline_ws_enabled:
             self.kline_ws_enabled = False
             LOG.info("hunt_ccxt_kline_disabled | reason=exchange_has_no_watch_ohlcv")
@@ -1404,6 +1447,53 @@ class HuntCcxtStreams:
                 if self._ws_transport_fatal(exc):
                     _subscribed = frozenset()
                 await self._on_ws_loop_error("kline_ws_15m", exc)
+
+    async def _watch_ohlcv_4h_mux(self) -> None:
+        """Multiplexed 4h OHLCV — overlays REST ``4h_closed`` on confirm path.
+
+        Keeps the pinned 4h newest-closed bar fresh from WS so the analyst path no longer
+        depends on the REST weight budget for it (klines.4h.stale blackout immunisation).
+        """
+        if not self.kline_4h_enabled:
+            return
+        ex = self._ws_ex()
+        _subscribed: frozenset[str] = frozenset()
+        while not self._stop.is_set():
+            syms = self._ccxt_symbols()
+            if not syms:
+                await asyncio.sleep(0.5)
+                continue
+            syms_set = frozenset(syms)
+            removed = _subscribed - syms_set
+            if removed:
+                await self._unwatch_removed_ohlcv(ex, removed, _KLINE_4H_INTERVAL)
+            _subscribed = syms_set
+            try:
+                if self._ws_has(ex, "watchOHLCVForSymbols"):
+                    pairs = [(s, _KLINE_4H_INTERVAL) for s in syms]
+                    result = await asyncio.wait_for(ex.watch_ohlcv_for_symbols(pairs), timeout=_WS_WATCH_TIMEOUT_S)
+                    self._touch()
+                    if isinstance(result, dict):
+                        for ccxt_sym, tf_map in result.items():
+                            sym = self._ws_binance_id(ex, str(ccxt_sym))
+                            if not sym or not isinstance(tf_map, dict):
+                                continue
+                            ohlcv = tf_map.get(_KLINE_4H_INTERVAL)
+                            if isinstance(ohlcv, list):
+                                self._on_ohlcv_update(sym, ohlcv, interval=_KLINE_4H_INTERVAL)
+                else:
+                    sym = syms[0]
+                    ohlcv = await asyncio.wait_for(ex.watch_ohlcv(sym, _KLINE_4H_INTERVAL), timeout=_WS_WATCH_TIMEOUT_S)
+                    self._touch()
+                    bin_sym = self._ws_binance_id(ex, sym)
+                    if isinstance(ohlcv, list) and bin_sym:
+                        self._on_ohlcv_update(bin_sym, ohlcv, interval=_KLINE_4H_INTERVAL)
+            except asyncio.CancelledError:
+                break
+            except defensive_exc_types(Exception) as exc:
+                if self._ws_transport_fatal(exc):
+                    _subscribed = frozenset()
+                await self._on_ws_loop_error("kline_ws_4h", exc)
 
     async def _watch_order_book_mux(self) -> None:
         """Live L2 order book via watch_order_book_for_symbols → depth imbalance + microprice."""

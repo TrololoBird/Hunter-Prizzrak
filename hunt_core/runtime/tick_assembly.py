@@ -667,6 +667,7 @@ async def snapshot_symbol(
         merge_ws_kline_closed(tf, symbol, ws_feed, tf_key="1m_closed")
         merge_ws_kline_closed(tf, symbol, ws_feed, tf_key="5m_closed")
         merge_ws_kline_closed(tf, symbol, ws_feed, tf_key="15m_closed")
+        merge_ws_kline_closed(tf, symbol, ws_feed, tf_key="4h_closed")
         tf["stale_15m"] = _snapshot_mod._stale_15m_flag(tf)
         _refresh_tf_stale_flags(tf)
         if prepared.work_15m is not None and not prepared.work_15m.is_empty():

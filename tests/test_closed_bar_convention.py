@@ -107,3 +107,25 @@ def test_overlay_seeds_empty_base() -> None:
     fresh = {"close": 400.5, "closed_bar": True, "ws_open_ms": 1_752_607_200_000}
     merge_ws_kline_closed(tf, "BTCUSDT", _WsFeed(fresh), tf_key="15m_closed")
     assert tf["15m_closed"]["close"] == 400.5
+
+
+# 4h WS overlay — REST-independent freshening of the pinned 4h bar (klines.4h.stale fix).
+# Same machinery as 15m; proves the 4h_closed→4h interval map + TF_MS["4h"] stale guard.
+def test_fresh_ws_4h_overlay_is_applied() -> None:
+    tf: dict[str, Any] = {
+        "4h_closed": {"close": 300.5, "close_time_ms": 1_752_595_199_999},
+    }
+    # WS 4h bar opening when the base closed → overlay_ts = open + 4h > base close.
+    fresh = {"close": 400.5, "closed_bar": True, "ws_open_ms": 1_752_595_200_000}
+    merge_ws_kline_closed(tf, "BTCUSDT", _WsFeed(fresh), tf_key="4h_closed")
+    assert tf["4h_closed"]["close"] == 400.5
+
+
+def test_stale_ws_4h_overlay_cannot_clobber_fresher_rest_bar() -> None:
+    tf: dict[str, Any] = {
+        "4h_closed": {"close": 300.5, "close_time_ms": 1_752_609_599_999},
+    }
+    # WS bar from a prior 4h period: overlay_ts = old_open + 4h < advanced REST close.
+    stale = {"close": 100.5, "closed_bar": True, "ws_open_ms": 1_752_580_800_000}
+    merge_ws_kline_closed(tf, "BTCUSDT", _WsFeed(stale), tf_key="4h_closed")
+    assert tf["4h_closed"]["close"] == 300.5, "stale WS 4h bar must be rejected"
