@@ -151,24 +151,41 @@ class AnalystReport:
             slom = (" · слом: " + ", ".join(slom_bits)) if slom_bits else ""
             lines.append(f"  {tf_key}: <b>{_TREND_RU.get(trend, trend)}</b>{w_str}{slom}")
 
-        # Intraday tier (5m/15m) — timing context ONLY, explicitly NOT part of the
-        # HTF-bias score (its own labelled sub-row so it can't be read as an HTF input).
-        intra_trend = str(tier_trends.get("intraday") or "neutral")
-        _raw_intra_s = struct_by_tier.get("intraday")
-        intra_s = _raw_intra_s if isinstance(_raw_intra_s, dict) else {}
-        intra_slom = []
-        if intra_s.get("bos_up"):
-            intra_slom.append("BOS↑")
-        if intra_s.get("bos_down"):
-            intra_slom.append("BOS↓")
-        if intra_s.get("choch_bull"):
-            intra_slom.append("CHoCH↑")
-        if intra_s.get("choch_bear"):
-            intra_slom.append("CHoCH↓")
-        intra_slom_str = (" · слом: " + ", ".join(intra_slom)) if intra_slom else ""
-        tf_lbl = str(intra_s.get("tf") or "5m/15m")
+        # Intraday tier — timing context ONLY, explicitly NOT part of the HTF-bias score
+        # (its own labelled sub-row so it can't be read as an HTF input). Show BOTH 15m and
+        # 5m: the intraday tier read returns only the first available TF (5m), so 15m — the
+        # base persisted bar — used to be dropped from the direction read entirely. 15m
+        # first: it is the less-noisy structural bar; 5m below it is finer timing.
+        def _slom_str(s: dict[str, Any]) -> str:
+            bits = []
+            if s.get("bos_up"):
+                bits.append("BOS↑")
+            if s.get("bos_down"):
+                bits.append("BOS↓")
+            if s.get("choch_bull"):
+                bits.append("CHoCH↑")
+            if s.get("choch_bear"):
+                bits.append("CHoCH↓")
+            return (" · слом: " + ", ".join(bits)) if bits else ""
+
         lines.append("<i>внутридневной контекст (не в HTF-балле):</i>")
-        lines.append(f"  {tf_lbl}: <b>{_TREND_RU.get(intra_trend, intra_trend)}</b>{intra_slom_str}")
+        intraday_rendered = False
+        for tf_key in ("15m", "5m"):
+            _raw_s = struct_by_tf.get(tf_key)
+            s = _raw_s if isinstance(_raw_s, dict) else {}
+            if not s:
+                continue
+            trend = str(tf_trends.get(tf_key) or "neutral")
+            lines.append(f"  {tf_key}: <b>{_TREND_RU.get(trend, trend)}</b>{_slom_str(s)}")
+            intraday_rendered = True
+        if not intraday_rendered:
+            # Backward-compat: rows without per-TF intraday structure (older producers)
+            # still show the single first-available intraday TF rather than nothing.
+            intra_trend = str(tier_trends.get("intraday") or "neutral")
+            _raw_intra_s = struct_by_tier.get("intraday")
+            intra_s = _raw_intra_s if isinstance(_raw_intra_s, dict) else {}
+            tf_lbl = str(intra_s.get("tf") or "5m/15m")
+            lines.append(f"  {tf_lbl}: <b>{_TREND_RU.get(intra_trend, intra_trend)}</b>{_slom_str(intra_s)}")
 
         # This footer used to be a hardcoded "counter-trend без слома — сигнал не
         # берём" caption printed on every message, including delivered signals whose
@@ -286,7 +303,12 @@ class AnalystReport:
             lines.append("<i>зоны WAIT-тика — не активный сигнал</i>")
 
         def _zone_line(z: dict[str, Any]) -> str:
-            t = f" ({_touches_ru(int(z['touches']))})" if z.get("touches") else ""
+            # Touch count is the стр.22 «база из 4+ точек границ» census — whether a
+            # well-formed flat EXISTS — NOT a strength or wear scale (methodology §2 /
+            # PDF стр.13/18: 10–12 касаний = здоровый флет; the course's strength measure
+            # is VOLUME, orchestrator:1547). Framed as «флет: N касаний» so a bare number
+            # can't read as «сильнее»; the tradability ruling is _verdict() beside it.
+            t = f" (флет: {_touches_ru(int(z['touches']))})" if z.get("touches") else ""
             return f"<code>{fmt_price(z['lo'])}–{fmt_price(z['hi'])}</code>{t}{_verdict(z)}"
 
         def _verdict(z: dict[str, Any]) -> str:

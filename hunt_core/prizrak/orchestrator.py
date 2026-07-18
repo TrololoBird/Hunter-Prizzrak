@@ -2441,12 +2441,25 @@ def compute_prizrak_structure(
     struct_by_tier = multi_scale_structure(ohlcv_by_tf, cfg=cfg)
     htf_bias = _htf_bias(struct_by_tier, cfg=cfg, ohlcv_by_tf=ohlcv_by_tf)
     struct_by_tf = htf_bias.get("struct_by_tf") or {}
+    # Intraday per-TF structure (5m AND 15m) for the «внутридневной контекст» render.
+    # multi_scale_structure returns only the FIRST intraday TF with data (5m per config
+    # order), so 15m — the base persisted bar — never surfaced its direction at all. Read
+    # both explicitly here for DISPLAY: the intraday tier is timing context and is NOT part
+    # of the HTF weighted vote (which is fixed to 1w/1d/4h/1h), so these keys cannot leak
+    # into the gating bias — they only feed the two intraday lines the render prints.
+    intraday_by_tf: dict[str, dict[str, Any]] = {}
+    for tf in ("5m", "15m"):
+        if tf in ohlcv_by_tf:
+            s = _tier_structure(ohlcv_by_tf, _mk_scale_tier(tf, "intraday", cfg), cfg=cfg)
+            if s:
+                intraday_by_tf[tf] = s
+    all_by_tf = {**struct_by_tf, **intraday_by_tf}
     return {
         "struct_by_tier": struct_by_tier,
         "htf_bias": {k: v for k, v in htf_bias.items() if k != "struct_by_tf"},
         "tier_trends": {tier: _tier_trend(struct_by_tier.get(tier) or {}) for tier in ("intraday", "meso", "macro")},
-        "tf_trends": {tf: _tier_trend(struct_by_tf.get(tf) or {}) for tf in ("1w", "1d", "4h", "1h")},
-        "struct_by_tf": struct_by_tf,
+        "tf_trends": {tf: _tier_trend(all_by_tf.get(tf) or {}) for tf in ("1w", "1d", "4h", "1h", "5m", "15m")},
+        "struct_by_tf": all_by_tf,
     }
 
 

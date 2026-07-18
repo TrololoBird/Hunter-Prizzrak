@@ -40,13 +40,15 @@ def format_analyst_telegram(analysis: AnalystReport) -> str:
     spot_txt = _spot_context_text(analysis.row)
     if spot_txt:
         parts.extend(["", spot_txt])
-    # Skip structural forecasts for WAIT signals — irrelevant if no trade
-    row_v2 = analysis.row.get("prizrak_summary") or {}
-    forecast_ok = str(row_v2.get("action") or "wait").strip().upper() in {"LONG", "SHORT"}
-    if forecast_ok:
-        fc_txt = analysis.forecast_text()
-        if fc_txt:
-            parts.extend(["", fc_txt])
+    # Structural targets («куда цена может пойти») — shown on WAIT too, not only on an
+    # active LONG/SHORT. On a WAIT tick this is exactly what the reader asks — where the
+    # nearest structural magnets/zones are — and the panel is explicitly labelled
+    # «уверенность в структуре зоны, не вероятность достижения», so it cannot be misread
+    # as a trade call. (Was gated on action ∈ {LONG,SHORT}, hiding the projection on the
+    # dominant WAIT case — the very tick where the reader most wants the «облако».)
+    fc_txt = analysis.forecast_text()
+    if fc_txt:
+        parts.extend(["", fc_txt])
     if analysis.include_watch_appendix:
         parts.extend(["", "<i>Статус сканера — справочно (только PRE-автоскан)</i>"])
         wd = "сигнал прошёл бы" if analysis.would_deliver else "сигнал НЕ прошёл бы"
@@ -272,6 +274,22 @@ def _spot_context_text(row: dict[str, Any]) -> str | None:
         lines.append(
             f"объём 24ч спот/фьюч: <code>{ratio:.2f}</code>"
             f" (спот ${float(spot_qv) / 1e6:,.0f}M / фьюч ${float(fut_qv_m):,.0f}M)"
+        )
+
+    # Spot taker flow — which side is actively hitting the spot book right now (net
+    # buy−sell notional over a recent aggTrades window). This is the closest public read
+    # of «крупняк на споте покупает на зонах»; labelled as taker flow, not literally
+    # «крупные деньги», since it is not size-filtered. Absent → the line is simply omitted
+    # (fail-loud: no fabricated balance).
+    taker_delta = market.get("spot_taker_delta_usd")
+    if isinstance(taker_delta, (int, float)):
+        d = float(taker_delta)
+        lean = "покупатели агрессивнее" if d > 0 else "продавцы агрессивнее" if d < 0 else "баланс"
+        amt = f"{d / 1e6:+.1f}M$" if abs(d) >= 1e6 else f"{d / 1e3:+.0f}K$"
+        _ratio = market.get("spot_taker_buy_ratio")
+        r_s = f" · buy {float(_ratio) * 100:.0f}%" if isinstance(_ratio, (int, float)) else ""
+        lines.append(
+            f"спот-поток тейкеров (агрессивные сделки): <code>{amt}</code> ({lean}{r_s})"
         )
 
     _lad = row.get("spot_weekly_ladder")
