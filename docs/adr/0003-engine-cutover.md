@@ -31,7 +31,8 @@ stay (extracted out of the transport). The **transport + caches** die and are re
 | `closed_kline_overlay` / `live_book` / `trade_buffer` / `liquidation_buffers` | subsumed by engine frame-merge + `book`/`trades`/`liq` read-through | ✅ subsumed |
 | **SPOT** pure metrics (lead/spread/ref/volume/taker) | `engine/spot_metrics.py` (reuses `orderflow.taker_flow`) | ✅ **E6a** |
 | **SPOT** live source (`refresh_symbols`/`enrichments_for`/`fetch_weekly_ohlcv`) | `engine/spot.py::SpotEngine` — ccxt.pro spot WS (ticker/1m-ohlcv/trades) + REST weekly ladder; taker-flow now free (WS) vs the old flag-gated REST call | ✅ **E6b** |
-| `snapshot_rest_cache_ages` / `used_weight_1m` (diagnostics) | engine plane-age introspection + throttler weight | ⬜ **E7** (thin) |
+| `snapshot_rest_cache_ages` | `Engine.plane_ages(symbol)` (stamp-age diagnostic) | ✅ **E7** |
+| `used_weight_1m` (log only) | read `exchange.last_response_headers['x-mbx-used-weight-1m']` at migration (marginal, log-only) | ◑ at migration |
 
 **Dead — drop, do not port** (0 consumers, verified): `fetch_premium_index_ohlcv`,
 `fetch_leverage_tiers`/`get_cached_leverage_tiers` (maps reads it but it's `None`-tolerant → drop),

@@ -104,3 +104,16 @@ def test_optional_never_returns_stale() -> None:
 
 def test_untracked_symbol_snapshot_is_not_ready() -> None:
     assert not MarketSnapshot("XYZ/USDT", 0, {}, ("XYZ/USDT: not tracked",)).ready
+
+
+def test_symbol_state_ages_reports_stamp_age_fail_loud() -> None:
+    import time as _t
+
+    from hunt_core.engine.state import PlaneStamp, Source, SymbolState
+
+    st = SymbolState("BTC/USDT:USDT")
+    now = int(_t.time() * 1000)
+    st.put_value("mark", 100.0, PlaneStamp(Source.WS, now - 5_000, now, 15_000))
+    ages = st.ages(now)
+    assert abs(ages["mark"] - 5.0) < 0.01  # 5s old
+    assert "book" not in ages  # never stamped → no fabricated age

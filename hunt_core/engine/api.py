@@ -200,6 +200,15 @@ class Engine:
         """The market's contract size for notional math (e.g. liquidations), or ``None`` fail-loud."""
         return market_contract_size(self._ingest.exchange, symbol)
 
+    def plane_ages(self, symbol: str) -> dict[str, float]:
+        """Age (s) of each stamped plane for ``symbol`` — freshness diagnostic, ``{}`` if untracked.
+
+        Replaces ``client.snapshot_rest_cache_ages`` (E7): reports staleness straight from the plane
+        stamps, never a fabricated age.
+        """
+        st = self._ingest.states.get(symbol)
+        return st.ages(int(time.time() * 1000)) if st is not None else {}
+
     async def close(self) -> None:
         if self._watchdog is not None:
             self._watchdog.stop()

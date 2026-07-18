@@ -127,6 +127,14 @@ class SymbolState:
             del frame[: len(frame) - params.OHLCV_LIMIT]
         self._stamps[name] = stamp
 
+    def ages(self, now_ms: int) -> dict[str, float]:
+        """Age in seconds of every stamped plane (freshness diagnostic).
+
+        Fail-loud: a plane that was never stamped simply has no entry — never a fabricated age.
+        Replaces the old ``client.snapshot_rest_cache_ages``.
+        """
+        return {name: (now_ms - stamp.received_ms) / 1000.0 for name, stamp in self._stamps.items()}
+
     def stamp_of(self, name: str) -> PlaneStamp | None:
         return self._stamps.get(name)
 
