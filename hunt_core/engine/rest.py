@@ -45,22 +45,24 @@ async def poll_open_interest(exchange: Any, symbol: str) -> float | None:
 
 
 async def poll_futures_data(
-    exchange: Any, method: str, symbol: str, *, period: str = "5m", limit: int = 1
+    exchange: Any, method: str, req_params: dict[str, Any]
 ) -> list[dict[str, Any]] | None:
     """Fetch one ``/futures/data/*`` statistic via ccxt's implicit endpoint (5-min native cadence).
 
-    ``method`` is a ccxt implicit method name, e.g. ``fapiDataGetOpenInterestHist``,
-    ``fapiDataGetTopLongShortAccountRatio``, ``fapiDataGetTakerlongshortRatio``. Capability-gated:
-    a venue/method that does not exist yields a loud skip, never a fabricated series.
+    ``method`` is a ccxt implicit method name (``fapiDataGetOpenInterestHist``,
+    ``fapiDataGetTopLongShortAccountRatio``, ``fapiDataGetBasis``, …); ``req_params`` is the exact
+    query the caller builds (endpoints differ — OI/LS use ``symbol``, basis uses ``pair`` +
+    ``contractType``). Capability-gated: an absent method / failed call yields a loud skip, never a
+    fabricated series.
     """
     fn = getattr(exchange, method, None)
     if fn is None:
-        LOG.warning("engine_futures_data_unsupported", method=method, symbol=symbol)
+        LOG.warning("engine_futures_data_unsupported", method=method)
         return None
     try:
-        rows = await fn({"symbol": symbol.replace("/", "").split(":")[0], "period": period, "limit": limit})
+        rows = await fn(dict(req_params))
     except Exception as exc:  # noqa: BLE001
-        LOG.warning("engine_futures_data_failed", method=method, symbol=symbol, err=str(exc))
+        LOG.warning("engine_futures_data_failed", method=method, params=req_params, err=str(exc))
         return None
     return list(rows) if isinstance(rows, list) else None
 

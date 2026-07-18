@@ -16,22 +16,13 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+import ccxt
 import structlog
 
 from hunt_core.engine import freshness, params
 from hunt_core.engine.state import PlaneStamp, Source, SymbolState
 
 LOG = structlog.get_logger(__name__)
-
-_TF_MS: dict[str, int] = {
-    "1m": 60_000,
-    "5m": 300_000,
-    "15m": 900_000,
-    "1h": 3_600_000,
-    "4h": 14_400_000,
-    "1d": 86_400_000,
-    "1w": 604_800_000,
-}
 
 
 def backoff_delay_s(attempt: int) -> float:
@@ -78,7 +69,14 @@ class Ingest:
                 self._spawn(f"{symbol}:ohlcv.{tf}", self._step_ohlcv(symbol, tf))
             self._spawn(f"{symbol}:book", self._step_book(symbol))
             self._spawn(f"{symbol}:trades", self._step_trades(symbol))
+        # Universe-wide native streams (one subscription each), capability-gated on `has`.
         self._spawn("*:marks", self._step_marks(self._symbols))
+        if self._ex.has.get("watchBidsAsks"):
+            self._spawn("*:bidsasks", self._step_bidsasks(self._symbols))
+        if self._ex.has.get("watchTickers"):
+            self._spawn("*:tickers", self._step_tickers(self._symbols))
+        if self._ex.has.get("watchLiquidationsForSymbols"):
+            self._spawn("*:liquidations", self._step_liquidations(self._symbols))
 
     async def reconnect(self) -> None:
         """Force a clean reconnect: cancel loops, drop the frozen client, respawn on a fresh one.
@@ -102,6 +100,10 @@ class Ingest:
         self._tasks.append(task)
 
     async def _stream_loop(self, key: str, step: Callable[[], Awaitable[None]]) -> None:
+        # Branch on ccxt's typed hierarchy (isinstance, not string names — subsumes every subclass):
+        # ChecksumError → book gap, ccxt re-seeds itself, re-loop; DDoS/RateLimit → LONG backoff (a
+        # short retry extends the 418 ban); NetworkError → transient short jittered backoff;
+        # ExchangeError (non-network: bad symbol / not-supported / bug) → don't retry-storm.
         attempt = 0
         while not self._stop.is_set():
             try:
@@ -110,12 +112,23 @@ class Ingest:
                 self.last_frame_ms[key] = _now_ms()
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:  # noqa: BLE001 — ccxt.pro surfaces NetworkError/ChecksumError here
+            except ccxt.ChecksumError:
+                LOG.debug("engine_ws_checksum_reseed", stream=key)  # expected; ccxt re-seeds the book
+            except (ccxt.DDoSProtection, ccxt.RateLimitExceeded) as exc:
+                LOG.error("engine_ws_rate_limited", stream=key, delay_s=params.RATE_LIMIT_BACKOFF_S, err=str(exc))
+                await asyncio.sleep(params.RATE_LIMIT_BACKOFF_S)
+            except ccxt.NetworkError as exc:
                 attempt += 1
                 delay = backoff_delay_s(attempt)
-                LOG.warning(
-                    "engine_ws_reconnect", stream=key, attempt=attempt, delay_s=round(delay, 2), err=str(exc)
-                )
+                LOG.warning("engine_ws_reconnect", stream=key, attempt=attempt, delay_s=round(delay, 2), err=str(exc))
+                await asyncio.sleep(delay)
+            except ccxt.ExchangeError as exc:
+                LOG.error("engine_ws_exchange_error", stream=key, err=str(exc))
+                await asyncio.sleep(params.RATE_LIMIT_BACKOFF_S)
+            except Exception as exc:  # noqa: BLE001 — unknown → treat as transient
+                attempt += 1
+                delay = backoff_delay_s(attempt)
+                LOG.warning("engine_ws_unknown_error", stream=key, attempt=attempt, delay_s=round(delay, 2), err=str(exc))
                 await asyncio.sleep(delay)
 
     # --- per-stream steps: each `await watch_*` DRIVES updates + reconnect; the DATA stays in
@@ -124,7 +137,7 @@ class Ingest:
     # REST-seeded frame (freqtrade "REST truth, WS fresh tail" — a minimal append, not a 2nd cache).
 
     def _step_ohlcv(self, symbol: str, tf: str) -> Callable[[], Awaitable[None]]:
-        bound_ms = int(params.fresh_kline_s(_TF_MS[tf] / 1000.0) * 1000.0)
+        bound_ms = int(params.fresh_kline_s(self._ex.parse_timeframe(tf)) * 1000.0)  # native tf parse
 
         async def step() -> None:
             await self._ex.watch_ohlcv(symbol, tf)  # trigger + reconnect; return is a delta (newUpdates)
@@ -190,6 +203,55 @@ class Ingest:
                 except (TypeError, ValueError):
                     continue
                 st.put_value("funding", fval, PlaneStamp(Source.WS, now, now, fund_bound_ms))
+
+        return step
+
+    def _step_bidsasks(self, symbols: list[str]) -> Callable[[], Awaitable[None]]:
+        wanted = set(symbols)
+        bound_ms = int(params.FRESH_BBO_S * 1000.0)
+
+        async def step() -> None:
+            # Universe-wide !bookTicker@arr — the native best bid/ask stream (lighter than the book).
+            bbos = await self._ex.watch_bids_asks()
+            now = _now_ms()
+            for sym, ba in bbos.items():
+                if sym in wanted:
+                    self.state_for(sym).put_value(
+                        "bbo", ba, PlaneStamp(Source.WS, now, int(ba.get("timestamp") or now), bound_ms)
+                    )
+
+        return step
+
+    def _step_tickers(self, symbols: list[str]) -> Callable[[], Awaitable[None]]:
+        wanted = set(symbols)
+        bound_ms = int(params.FRESH_TICKER_S * 1000.0)
+
+        async def step() -> None:
+            # Universe-wide !miniTicker@arr; value-backed (small dict, carries 24h volume/quoteVolume).
+            tickers = await self._ex.watch_tickers()
+            now = _now_ms()
+            for sym, tk in tickers.items():
+                if sym in wanted:
+                    self.state_for(sym).put_value(
+                        "ticker", tk, PlaneStamp(Source.WS, now, int(tk.get("timestamp") or now), bound_ms)
+                    )
+
+        return step
+
+    def _step_liquidations(self, symbols: list[str]) -> Callable[[], Awaitable[None]]:
+        wanted = set(symbols)
+        # Event-driven (!forceOrder): silence ≠ stale (no liquidation is normal). Data is read through
+        # `exchange.liquidations[symbol]` at snapshot time; here we stamp only when one arrives.
+        bound_ms = int(params.NO_MESSAGE_WATCHDOG_S * 1000.0)
+
+        async def step() -> None:
+            liqs = await self._ex.watch_liquidations_for_symbols(symbols)
+            now = _now_ms()
+            for liq in liqs if isinstance(liqs, list) else []:
+                sym = liq.get("symbol") if isinstance(liq, dict) else None
+                if sym in wanted:
+                    ev = int(liq.get("timestamp") or now) if isinstance(liq, dict) else now
+                    self.state_for(sym).stamp_only("liq", PlaneStamp(Source.WS, now, ev, bound_ms))
 
         return step
 

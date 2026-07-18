@@ -17,7 +17,7 @@ from hunt_core.engine.api import Engine
 
 LOG = structlog.get_logger(__name__)
 
-_REQUIRED = ("kline.4h", "kline.1m", "book", "mark", "trades")
+_REQUIRED = ("kline.1w", "kline.4h", "kline.1m", "book", "mark", "trades", "ticker", "bbo")
 
 
 async def _main(symbols: list[str]) -> None:

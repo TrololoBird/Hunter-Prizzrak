@@ -22,12 +22,19 @@ def _base_options() -> dict[str, Any]:
         # watch_* returns ONLY what changed since the last call — an unchanged read can never
         # masquerade as fresh (the single most important native anti-stale switch).
         "newUpdates": True,
+        # Transport keepalive tuned like the main client (default 180000×2; ×3 for startup robustness).
+        "streaming": {
+            "keepAlive": params.WS_KEEPALIVE_MS,
+            "maxPingPongMisses": params.WS_MAX_PING_PONG_MISSES,
+        },
         "options": {
             "defaultType": "future",
             "OHLCVLimit": params.OHLCV_LIMIT,
             "tradesLimit": params.TRADES_LIMIT,
             "watchOrderBookLimit": params.ORDER_BOOK_LIMIT,
             "watchOrderBookRate": params.WATCH_ORDER_BOOK_RATE_MS,
+            # ccxt.pro's order book is nonce-validated with checksum ON by default; keep it explicit.
+            "watchOrderBook": {"checksum": True, "maxRetries": 3},
         },
     }
 

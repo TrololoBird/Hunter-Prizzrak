@@ -16,12 +16,12 @@ import structlog
 
 from hunt_core.engine import exchanges, params, rest
 from hunt_core.engine.health import Watchdog
-from hunt_core.engine.ingest import _TF_MS, Ingest
+from hunt_core.engine.ingest import Ingest
 from hunt_core.engine.state import MarketSnapshot, Plane, PlaneStamp, Source, SymbolState
 
 LOG = structlog.get_logger(__name__)
 
-_DEFAULT_TFS: tuple[str, ...] = ("1m", "5m", "15m", "1h", "4h")
+_DEFAULT_TFS: tuple[str, ...] = ("1m", "5m", "15m", "1h", "4h", "1d", "1w")  # incl macro tier (Prizrak)
 
 
 def _last_float(rows: list[dict[str, object]] | None, key: str) -> float | None:
@@ -38,6 +38,14 @@ def _last_float(rows: list[dict[str, object]] | None, key: str) -> float | None:
     except (TypeError, ValueError):
         return None
     return value if math.isfinite(value) else None
+
+
+def _binance_id(ex: object, symbol: str) -> str | None:
+    """Exchange market id (e.g. ``'BTCUSDT'``) for a unified symbol, or ``None`` if unknown/unloaded."""
+    try:
+        return str(ex.market(symbol)["id"])  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _book_snapshot(ob: object) -> dict[str, object] | None:
@@ -63,7 +71,10 @@ def _resolve(ex: object, st: SymbolState, symbol: str, name: str) -> object | No
     if name == "trades":
         trades = (getattr(ex, "trades", {}) or {}).get(symbol)
         return list(trades) if trades else None
-    return st.value_of(name)  # value-backed: mark / funding / oi / taker / global_ls
+    if name == "liq":
+        liqs = (getattr(ex, "liquidations", {}) or {}).get(symbol)
+        return list(liqs) if liqs else None
+    return st.value_of(name)  # value-backed: mark / funding / ticker / oi / taker / global_ls
 
 
 class Engine:
@@ -97,13 +108,23 @@ class Engine:
             for tf in self._timeframes:
                 bars = await rest.seed_ohlcv(ex, symbol, tf, limit=params.OHLCV_LIMIT)
                 if bars:
-                    bound = int(params.fresh_kline_s(_TF_MS[tf] / 1000.0) * 1000.0)
+                    bound = int(params.fresh_kline_s(ex.parse_timeframe(tf)) * 1000.0)
                     st.seed_frame(
                         f"kline.{tf}", bars, PlaneStamp(Source.REST_SEED, now, int(bars[-1][0]), bound)
                     )
 
+    # The complete /futures/data statistic set (implicit method, response key, plane) — same
+    # {symbol, period, limit} shape. basis differs (pair + contractType) and is handled separately.
+    _FUTURES_DATA_STATS: tuple[tuple[str, str, str], ...] = (
+        ("fapiDataGetOpenInterestHist", "sumOpenInterest", "oi_hist_5m"),
+        ("fapiDataGetTakerlongshortRatio", "buySellRatio", "taker_5m"),
+        ("fapiDataGetGlobalLongShortAccountRatio", "longShortRatio", "global_ls_5m"),
+        ("fapiDataGetTopLongShortAccountRatio", "longShortRatio", "top_ls_acct_5m"),
+        ("fapiDataGetTopLongShortPositionRatio", "longShortRatio", "top_ls_pos_5m"),
+    )
+
     async def _poll_positioning(self) -> None:
-        """Poll the un-streamable ``/futures/data/*`` planes on their 5-min native cadence.
+        """Poll every un-streamable ``/futures/data/*`` plane on the 5-min native cadence.
 
         Every write is a real, fail-loud :class:`Plane`; a missing/unparseable datum is skipped
         (logged in ``rest``), never fabricated.
@@ -112,19 +133,28 @@ class Engine:
         while True:
             ex = self._ingest.exchange
             for symbol in self._symbols:
-                now = int(time.time() * 1000)
+                bsym = _binance_id(ex, symbol)
+                if bsym is None:
+                    continue
                 st = self._ingest.state_for(symbol)
+                now = int(time.time() * 1000)
                 oi = await rest.poll_open_interest(ex, symbol)
                 if oi is not None:
                     st.put_value("oi", oi, PlaneStamp(Source.REST_SEED, now, now, bound))
-                taker = await rest.poll_futures_data(ex, "fapiDataGetTakerlongshortRatio", symbol)
-                ratio = _last_float(taker, "buySellRatio")
-                if ratio is not None:
-                    st.put_value("taker_5m", ratio, PlaneStamp(Source.REST_SEED, now, now, bound))
-                gls = await rest.poll_futures_data(ex, "fapiDataGetGlobalLongShortAccountRatio", symbol)
-                lsr = _last_float(gls, "longShortRatio")
-                if lsr is not None:
-                    st.put_value("global_ls_5m", lsr, PlaneStamp(Source.REST_SEED, now, now, bound))
+                base = {"symbol": bsym, "period": "5m", "limit": 1}
+                for method, key, plane in self._FUTURES_DATA_STATS:
+                    val = _last_float(await rest.poll_futures_data(ex, method, base), key)
+                    if val is not None:
+                        st.put_value(plane, val, PlaneStamp(Source.REST_SEED, now, now, bound))
+                basis = _last_float(
+                    await rest.poll_futures_data(
+                        ex, "fapiDataGetBasis",
+                        {"pair": bsym, "contractType": "PERPETUAL", "period": "5m", "limit": 1},
+                    ),
+                    "basis",
+                )
+                if basis is not None:
+                    st.put_value("basis", basis, PlaneStamp(Source.REST_SEED, now, now, bound))
             await asyncio.sleep(params.FUTURES_DATA_POLL_S)
 
     def snapshot(self, symbol: str, required: Sequence[str]) -> MarketSnapshot:
