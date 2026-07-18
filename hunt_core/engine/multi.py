@@ -9,12 +9,16 @@ never a fabricated value, so a divergence is only computed from fresh venues):
 * **open-interest** divergence — REST ``fetch_open_interest`` (all four);
 * **long/short account ratio** — unified ``fetch_long_short_ratio_history`` (all four; Binance maps
   it to the global-accounts ratio, matching the primary engine's ``global_ls_5m`` plane);
-* **liquidations** — REST ``fetch_liquidations`` (OKX/Bybit only; Bitget has none, Binance has no
-  public REST endpoint so its liquidations come from the primary engine's WS ``!forceOrder`` stream).
+* **liquidations** — WS-only on **every** venue (``fetchLiquidations`` is unsupported everywhere:
+  ``has=False`` on Binance, ``NotSupported`` on OKX/Bybit — verified 4.5.59). ``cross_liquidations``
+  serves the **primary Binance** ``!forceOrder`` WS stream (read-through); secondary-venue WS
+  liquidations (``watchLiquidations``: Binance/OKX universe, Bybit per-symbol, Bitget none) are a
+  pending increment. There is **no public historical-liquidation backfill anywhere** — a liquidation
+  window/zone exists only as the live-accumulated buffer and must be persisted to survive restarts.
   Notional is computed (``contracts × contractSize × price``) — never trusted from the payload.
 
-Each secondary is capability-gated at :meth:`start` (``has`` + listed markets), so an unsupported
-venue is silently skipped rather than polled-and-failed every tick.
+Each secondary's optional signal is capability-gated at :meth:`start` (``has`` + listed markets), so
+an unsupported venue is silently skipped rather than polled-and-failed every tick.
 """
 from __future__ import annotations
 
@@ -62,10 +66,9 @@ class MultiEngine:
             except Exception as exc:  # noqa: BLE001 — a dead secondary must not sink the primary
                 LOG.warning("engine_secondary_load_failed", venue=venue, err=str(exc))
             has = getattr(ex, "has", {}) or {}
-            self._cap[venue] = {
-                "lsr": bool(has.get("fetchLongShortRatioHistory")),
-                "liq": bool(has.get("fetchLiquidations")),
-            }
+            # Only REST-pollable optional signals are gated here. Liquidations are WS-only on every
+            # venue (fetchLiquidations unsupported), so there is no REST liq poll to gate.
+            self._cap[venue] = {"lsr": bool(has.get("fetchLongShortRatioHistory"))}
         self._bg.append(asyncio.create_task(self._cross_loop(), name="engine_cross"))
         LOG.info(
             "multi_engine_started", primary=_PRIMARY, secondaries=list(self._secondary_ex), caps=self._cap
@@ -74,10 +77,11 @@ class MultiEngine:
     async def _cross_loop(self) -> None:
         """Poll the uniform cross-venue signals per secondary: funding + OI + long/short + liquidations.
 
-        Bounds by data nature: funding/liquidations use the 180s cross-poll liveness bound
+        Bounds by data nature: funding uses the 180s cross-poll liveness bound
         (``FRESH_CROSS_FUNDING_S``, 3× the 60s cadence); OI and the long/short ratio are 5-min
         positioning stats and use the looser 360s bound. Every write is a real, fail-loud plane —
-        a ``None`` from a poller is skipped, never stored as a fabricated value.
+        a ``None`` from a poller is skipped, never stored as a fabricated value. (Liquidations are
+        WS-only and not REST-polled here — see the class docstring.)
         """
         f_bound = int(params.FRESH_CROSS_FUNDING_S * 1000.0)
         oi_bound = int(params.FRESH_FUTURES_DATA_S * 1000.0)
@@ -103,10 +107,6 @@ class MultiEngine:
                         lsr = await rest.poll_long_short_ratio(ex, sym)
                         if lsr is not None:
                             st.put_value("lsr", lsr, PlaneStamp(Source.REST_SEED, now, now, oi_bound))
-                    if cap.get("liq"):
-                        liq = await rest.poll_liquidations(ex, sym)
-                        if liq is not None:
-                            st.put_value("liq", liq, PlaneStamp(Source.REST_SEED, now, now, f_bound))
             await asyncio.sleep(params.CROSS_FUNDING_POLL_S)
 
     # --- consumer surface ---
@@ -155,9 +155,11 @@ class MultiEngine:
     def cross_liquidations(self, symbol: str) -> dict[str, list[dict[str, Any]] | None]:
         """Recent liquidation events per venue: ``{venue: [events]|None}`` (fail-loud).
 
-        Binance from the primary WS ``!forceOrder`` stream (read-through), OKX/Bybit from the cross
-        REST poll, Bitget → ``None`` (no liquidation feed). The payload carries no reliable notional —
-        pass each list through :meth:`cross_liquidation_notional` (or ``liquidation_notional``).
+        Binance from the primary WS ``!forceOrder`` stream (read-through). Secondary venues read a
+        value-backed ``liq`` plane that a WS liquidation feeder fills — currently unwired, so OKX/Bybit
+        return ``None`` (there is NO REST liquidation endpoint on any venue: ``fetchLiquidations`` is
+        ``has=False``/``NotSupported`` everywhere; Bitget has no liquidation feed at all). The payload
+        carries no reliable notional — pass each list through :meth:`cross_liquidation_notional`.
 
         Freshness semantics differ by source and a divergence consumer must window both consistently:
         the primary's ``liq`` plane is **event-stamped** (a quiet symbol reads ``None`` after

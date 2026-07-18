@@ -221,28 +221,6 @@ async def poll_long_short_ratio(
     return value if math.isfinite(value) else None
 
 
-async def poll_liquidations(
-    exchange: Any, symbol: str, *, limit: int = 100
-) -> list[dict[str, Any]] | None:
-    """Recent public liquidation events via unified ``fetchLiquidations`` (OKX/Bybit; not Bitget).
-
-    Binance has **no** public REST liquidation endpoint (its liquidations come from the WS
-    ``!forceOrder`` stream), so this is capability-gated on ``has['fetchLiquidations']``. Returns the
-    raw liquidation structures (notional is computed by the caller via
-    :func:`hunt_core.engine.liquidations.liquidation_notional` — the payload's ``baseValue``/
-    ``quoteValue`` are unreliable), or ``None`` fail-loud when unsupported/failed. The ``has`` guard
-    is silent (unsupported-by-design is not a failure; the caller gates venues at start).
-    """
-    if not getattr(exchange, "has", {}).get("fetchLiquidations"):
-        return None
-    try:
-        rows = await exchange.fetch_liquidations(symbol, limit=limit)
-    except Exception as exc:  # noqa: BLE001
-        LOG.warning("engine_poll_liq_failed", venue=getattr(exchange, "id", "?"), symbol=symbol, err=str(exc))
-        return None
-    return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else None
-
-
 async def poll_futures_data(
     exchange: Any, method: str, req_params: dict[str, Any]
 ) -> list[dict[str, Any]] | None:
@@ -276,6 +254,5 @@ __all__ = [
     "poll_open_interest",
     "poll_funding_rates",
     "poll_long_short_ratio",
-    "poll_liquidations",
     "poll_futures_data",
 ]

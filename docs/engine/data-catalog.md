@@ -24,7 +24,7 @@ Type legend (Python): `float?` = `Num` (float or None) · `int?` = `Int` (Unix m
 | REST `fetchOpenInterest` | ✅ | ✅ (+`fetchOpenInterests`) | ✅ | ✅ |
 | REST `fetchOpenInterestHistory` | ✅ | ✅ (arg = currency code) | ✅ | ❌ current only |
 | REST `fetchLongShortRatioHistory` | ✅ (→ global-accounts ratio) | ✅ | ✅ | ✅ |
-| REST `fetchLiquidations` (public) | ❌ | ✅ | ✅ | ❌ |
+| REST `fetchLiquidations` (public) | ❌ | ❌ (NotSupported) | ❌ (NotSupported) | ❌ | ← **verified `has`/source 4.5.59: NONE public. WS-only everywhere.** |
 | REST `fetchMarkOHLCV` / `fetchIndexOHLCV` | ✅ / ✅ | ✅ / ✅ | ✅ / ✅ | ✅ / ✅ |
 | REST `fetchPremiumIndexOHLCV` | ✅ | ❌ | ✅ | ❌ |
 | timeframes | 1s→1M (**only 1s**) | 1m→3M | 1m→1M | 1m→1M (+3d) |
@@ -131,7 +131,7 @@ tokenized-equity filter), `contractType` (`PERPETUAL`/`CURRENT_QUARTER`/…), `s
 
 ## 4. Engine implications
 
-1. **Liquidation notional** must be computed (`contracts*contractSize*price`) — never trust WS `baseValue/quoteValue`. ✅ `engine/liquidations.py::liquidation_notional` (side-split, market-`contractSize` fallback, fail-loud); cross-venue via `MultiEngine.cross_liquidations` / `cross_liquidation_notional` (OKX/Bybit REST `fetchLiquidations`; Binance from the primary WS `!forceOrder`; Bitget None).
+1. **Liquidation notional** must be computed (`contracts*contractSize*price`) — never trust WS `baseValue/quoteValue`. ✅ `engine/liquidations.py::liquidation_notional` (side-split, market-`contractSize` fallback, fail-loud). **⚠ CORRECTION (verified 2026-07-18):** liquidations are **WS-only on every venue** — `fetchLiquidations` is `has=False` on Binance and **raises `NotSupported` on OKX/Bybit** (the earlier "OKX/Bybit REST ✅" claim was wrong and unverified). There is **NO public historical-liquidation backfill anywhere** — a liquidation *window/zone* exists ONLY as the live-accumulated WS buffer, so it must be **persisted** to survive restarts. Cross-venue liq therefore needs WS (`watchLiquidations`: Binance/OKX universe via `…ForSymbols`, Bybit per-symbol only, Bitget none), NOT REST. `MultiEngine.cross_liquidations` currently serves the primary Binance WS stream; secondary-venue WS liquidations are a pending increment.
 2. **OI notional** cross-venue: OKX direct; Binance from `/futures/data` history; Bitget amount-only (fail-loud None on notional).
 3. **Funding** uniform via REST `fetchFundingRates`; only OKX streams it / gives `nextFundingRate`.
 4. **Long/short ratio** is unified (`fetchLongShortRatioHistory`) across all four — prefer it over Binance-specific `fapiData` for the global-accounts ratio; keep raw `fapiData*` only for the **top-trader** ratios + basis + takerBuySellVol (Binance-only signals). ✅ `rest.poll_long_short_ratio` + `MultiEngine.cross_long_short` (aligned to the primary `global_ls_5m` plane).
