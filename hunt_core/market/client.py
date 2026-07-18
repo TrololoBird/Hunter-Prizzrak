@@ -47,8 +47,21 @@ _CACHE_TTL: dict[str, int] = {
     "klines_3m": 120,
     "klines_5m": 45,
     "klines_15m": 900,
+    # HTF kline cache TTL must stay < (stale_mult - 2) * interval. Otherwise a cached
+    # frame's idx=-2 bar — the one completeness.audit_kline_staleness checks — drifts
+    # past the reject threshold BETWEEN refetches (worst-case age = 2*interval + TTL),
+    # with errors=0, and the whole pinned universe rejects on klines.<tf>.stale.
+    # 4h@14400 gave idx=-2 age 2*4h + 4h = 12h > the 10h (2.5x) reject — the exact
+    # 43193026ms observed live 2026-07-17 (~5h of pinned-universe blackout across
+    # 11-12/15-16/17-19h). Deterministic drift, independent of (but compounded by)
+    # REST-gate starvation. 1d/1w are not in REQUIRED_SIGNAL_KLINE_TFS so they are
+    # never staleness-audited. Guarded by tests/test_htf_cache_ttl_no_drift.py.
+    # NB klines_1h (3900) marginally violates too (worst 3h5m vs 3h reject), but the
+    # overshoot is 5 min, was NOT seen in the live blackout, and lowering it below one
+    # interval changes test_ohlcv_list_cache_closed_bars.py's forming-bar threat model
+    # (its stale-read scenario needs TTL > one interval) — deferred, xfailed in the guard.
     "klines_1h": 3900,
-    "klines_4h": 14400,
+    "klines_4h": 3600,   # was 14400 (= bar cadence → 12h drift); keeps 2*4h+1h < 10h reject
     "klines_1d": 3600,
     "open_interest": 600,
     "open_interest_change": 600,
