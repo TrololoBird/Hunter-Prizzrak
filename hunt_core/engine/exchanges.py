@@ -56,11 +56,22 @@ SECONDARY_VENUES: tuple[str, ...] = ("okx", "bybit", "bitget")
 def make_secondary(venue: str) -> Any:
     """A ccxt.pro client for a secondary venue (cross-venue funding/liq), public data only.
 
-    Same DNS-cached / newUpdates / rate-limited config as Binance; ``defaultType='swap'`` (the
-    secondaries expose USDT perps as swaps). ccxt unifies symbols, so ``BTC/USDT:USDT`` maps across
-    venues — everything stays strictly ccxt-native.
+    Deliberately does NOT reuse Binance's ``streaming`` / ``watchOrderBook`` tuning — each venue ships
+    its own native keepAlive/ping (OKX/Bybit 18000, Bitget 30000) and order-book config (OKX
+    ``depth:'books'``); forcing Binance's 180000 keepAlive on them would break their WS. Only the
+    generic, venue-agnostic knobs are set. ``defaultType='swap'`` (secondaries expose USDT perps as
+    swaps); ccxt unifies symbols so ``BTC/USDT:USDT`` maps across venues.
     """
     cls = dns_cached_class(getattr(ccxtpro, venue))
-    opts = _base_options()
-    opts["options"] = {**opts["options"], "defaultType": "swap"}
-    return cls(opts)
+    return cls(
+        {
+            "enableRateLimit": True,
+            "newUpdates": True,
+            "options": {
+                "defaultType": "swap",
+                "OHLCVLimit": params.OHLCV_LIMIT,
+                "tradesLimit": params.TRADES_LIMIT,
+                "watchOrderBookLimit": params.ORDER_BOOK_LIMIT,
+            },
+        }
+    )
