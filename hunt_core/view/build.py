@@ -25,6 +25,7 @@ from hunt_core.engine.state import MarketSnapshot
 from hunt_core.toolkit.book_math import depth_imbalance_from_book, microprice_bias_from_book
 from hunt_core.toolkit.ohlcv import ccxt_ohlcv_to_frame
 from hunt_core.view.models import Book, Cross, Derivs, Klines, MarketView, Orderflow, Spot
+from hunt_core.view.price import resolve_price
 
 _DEFAULT_TFS: tuple[str, ...] = ("1m", "5m", "15m", "1h", "4h", "1d", "1w")
 _TF_FIELD: dict[str, str] = {"1m": "m1", "5m": "m5", "15m": "m15", "1h": "h1", "4h": "h4", "1d": "d1", "1w": "w1"}
@@ -41,16 +42,6 @@ def _l1(levels: Any) -> tuple[float | None, float | None]:
         return float(levels[0][0]), float(levels[0][1])
     except (TypeError, ValueError, IndexError):
         return None, None
-
-
-def _resolve_price(snap: MarketSnapshot, mark: dict[str, Any] | None) -> tuple[float | None, str]:
-    """Last price + its source, fail-loud: ticker.last → mark price → None (no view)."""
-    ticker = snap.optional("ticker")
-    if isinstance(ticker, dict) and (last := _num(ticker.get("last"))) is not None and last > 0:
-        return last, "ticker"
-    if mark is not None and (m := _num(mark.get("markPrice"))) is not None and m > 0:
-        return m, "mark"
-    return None, "none"
 
 
 def _quote_volume_24h(snap: MarketSnapshot) -> float | None:
@@ -167,14 +158,18 @@ def build_market_view(
     """
     now = now_ms if now_ms is not None else int(time.time() * 1000)
     engine = multi.primary
-    required = [f"kline.{tf}" for tf in timeframes] + ["book", "mark", "ticker", *_SCALAR_PLANES, "trades", "liq"]
+    required = (
+        [f"kline.{tf}" for tf in timeframes]
+        + ["book", "bbo", "mark", "ticker", *_SCALAR_PLANES, "trades", "liq"]
+    )
     snap = multi.snapshot(symbol, required)
     mark = snap.optional("mark")
     mark = mark if isinstance(mark, dict) else None
 
-    last_price, price_source = _resolve_price(snap, mark)
-    if last_price is None:
+    quote = resolve_price(snap)  # ticker.last → bbo mid → book mid → mark (fail-loud None)
+    if quote is None:
         return None  # no price → no view (never a fabricated one)
+    last_price, price_source = quote.price, quote.source
 
     derivs = _build_derivs(snap, mark)
     return MarketView(
