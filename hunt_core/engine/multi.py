@@ -111,6 +111,11 @@ class MultiEngine:
 
     # --- consumer surface ---
 
+    @property
+    def primary(self) -> Engine:
+        """The primary Binance :class:`Engine` (single-venue planes) — used by the cutover adapters."""
+        return self._primary
+
     def snapshot(self, symbol: str, required: Sequence[str]) -> MarketSnapshot:
         """Primary (Binance) freshness-proven snapshot — unchanged single-venue contract."""
         return self._primary.snapshot(symbol, required)
