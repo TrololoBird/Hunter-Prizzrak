@@ -104,7 +104,7 @@ def volume_profile_levels(
             (pl.col("vol") / (pl.col("b_hi") - pl.col("b_lo") + 1)).alias("share"),
         )
         .with_columns(pl.int_ranges(pl.col("b_lo"), pl.col("b_hi") + 1).alias("b"))
-        .explode("b")
+        .explode("b", empty_as_null=True)  # keep pre-Polars-2.0 behavior (default flips to False)
         .group_by("b")
         .agg(pl.col("share").sum().alias("v"))
     )

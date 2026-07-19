@@ -20,11 +20,11 @@ dependencies = [
     # discipline (precedent: polars_ols went to positional `features` args +
     # mode="coefficients"; ccxt fstream split) — do NOT lower the floors, and
     # re-run the canaries when bumping.
-    "polars>=1.41.2",
+    "polars>=1.42.1",
     "polars-ols>=0.3.5",   # compute_(rolling_)least_squares positional exprs, mode=, RollingKwargs(null_policy=)
     "polars_ta>=0.5.17",   # polars_ta.ta/.tdx/.wq surfaces used by features/polars_ta_bridge.py
     "polars-ds>=0.12.0",   # query_entropy / ks_2samp exprs used by features/research_plugins.py
-    "numpy>=2.4.6",
+    "numpy>=2.4.6,<2.5",  # ceiling: numba (transitive via polars-ta) requires numpy<2.5 on py3.14; 2.5 forces a numba/llvmlite downgrade that fails to build
     "aiohttp>=3.13.5,<4",
     "aiohttp-socks>=0.10.1",
     "python-socks[asyncio]>=2.7.1",
