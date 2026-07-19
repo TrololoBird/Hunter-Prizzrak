@@ -45,7 +45,14 @@ def oi_bars_from_frames(
         if not isinstance(item, dict):
             continue
         ts = item.get("timestamp") or item.get("ts")
-        oi_raw = item.get("openInterestAmount") or item.get("openInterest") or item.get("oi")
+        # sumOpenInterest is the raw /futures/data/openInterestHist key (engine rest path); the others
+        # are ccxt-unified / legacy shapes. Keep all so both the engine and old paths parse.
+        oi_raw = (
+            item.get("sumOpenInterest")
+            or item.get("openInterestAmount")
+            or item.get("openInterest")
+            or item.get("oi")
+        )
         try:
             ts_i = int(ts or 0)
             oi_f = float(oi_raw or 0)
