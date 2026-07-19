@@ -19,7 +19,7 @@ from typing import Any
 import ccxt
 import structlog
 
-from hunt_core.engine import freshness, params
+from hunt_core.engine import freshness, params, rest
 from hunt_core.engine.state import PlaneStamp, Source, SymbolState
 
 LOG = structlog.get_logger(__name__)
@@ -140,15 +140,31 @@ class Ingest:
         bound_ms = int(params.fresh_kline_s(self._ex.parse_timeframe(tf)) * 1000.0)  # native tf parse
 
         async def step() -> None:
-            await self._ex.watch_ohlcv(symbol, tf)  # trigger + reconnect; return is a delta (newUpdates)
+            await self._ex.watch_ohlcv(symbol, tf)  # low-latency close SIGNAL (return is a newUpdates delta)
             cache = ((getattr(self._ex, "ohlcvs", {}) or {}).get(symbol) or {}).get(tf) or []
             closed = freshness.closed_bars(list(cache))  # ccxt's recent CLOSED bars (drop forming, I-5)
             if not closed:
                 return
-            self.state_for(symbol).merge_frame(
-                f"kline.{tf}",
-                [[float(x) for x in bar] for bar in closed],
-                PlaneStamp(Source.WS, _now_ms(), int(closed[-1][0]), bound_ms),
+            st = self.state_for(symbol)
+            frame = st.frame_of(f"kline.{tf}")
+            tail_open = frame[-1][0] if frame else float("-inf")
+            newest_open = int(closed[-1][0])
+            if newest_open <= tail_open:
+                return  # no NEW closed bar — WS re-emits the forming candle every ~1s; nothing to merge
+            # A bar just closed. ccxt's WS kline is 6-element (taker_buy_base_volume dropped) — the CVD /
+            # delta_ratio features need the REAL taker volume, so merge the FULL-FIDELITY bar from
+            # fapiPublicGetKlines rather than the taker-less WS bar (WS is only the close trigger here).
+            # On a REST failure, leave the frame at its last full-fidelity bar and retry on the next
+            # watch tick — never merge a taker-zeroed bar into a taker-carrying frame (no fabrication).
+            new_count = sum(1 for b in closed if int(b[0]) > tail_open)
+            full = await rest.fetch_klines_full(
+                self._ex, symbol, tf, limit=min(params.OHLCV_LIMIT, new_count + 2)
+            )
+            if not full:
+                return
+            st.merge_frame(
+                f"kline.{tf}", full,
+                PlaneStamp(Source.WS, _now_ms(), int(full[-1][0]), bound_ms),
             )
 
         return step

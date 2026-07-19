@@ -7,7 +7,7 @@ trusting a WS-sourced OHLCV frame.
 """
 from __future__ import annotations
 
-Bar = list[float]  # [open_ms, open, high, low, close, volume]
+Bar = list[float]  # [open_ms, open, high, low, close, volume, (close_ms, quote_vol, num_trades, taker_base, taker_quote)?]
 
 
 def closed_bars(cache: list[Bar]) -> list[Bar]:

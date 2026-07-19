@@ -20,6 +20,61 @@ from hunt_core.engine.freshness import Bar
 LOG = structlog.get_logger(__name__)
 
 
+def _market_id(exchange: Any, symbol: str) -> str | None:
+    """Exchange market id (e.g. ``'BTCUSDT'``) for a unified symbol, or ``None`` if unknown/unloaded."""
+    try:
+        return str(exchange.market(symbol)["id"])
+    except Exception:  # noqa: BLE001
+        return None
+
+
+async def fetch_klines_full(
+    exchange: Any,
+    symbol: str,
+    timeframe: str,
+    *,
+    limit: int,
+    market_id: str | None = None,
+    now_ms: int | None = None,
+) -> list[Bar]:
+    """Full-fidelity CLOSED klines via Binance ``fapiPublicGetKlines`` (public implicit method).
+
+    ccxt's unified ``fetch_ohlcv``/``watch_ohlcv`` normalize a kline to 6 columns, **dropping**
+    ``taker_buy_base_volume`` / ``quote_volume`` / ``num_trades``. The raw ``/fapi/v1/klines`` endpoint
+    returns the full 12-element row, so the engine's kline planes carry the REAL taker-buy volume that
+    the orderflow CVD / ``delta_ratio`` features depend on — never a zero-fill (no fabrication, I-6).
+
+    Drops the forming last bar (I-5). Fail-loud ``[]`` on failure / a non-Binance client (no
+    ``fapiPublicGetKlines``) / an unresolved market id. Returned rows are
+    ``[open_ms, o, h, l, c, v, close_ms, quote_vol, num_trades, taker_base, taker_quote]`` — the exact
+    shape ``toolkit.ohlcv.ccxt_ohlcv_to_frame`` reads when ``len(row) >= 11``.
+    """
+    fn = getattr(exchange, "fapiPublicGetKlines", None)
+    if fn is None:
+        return []
+    mid = market_id or _market_id(exchange, symbol)
+    if mid is None:
+        return []
+    try:
+        rows = await fn({"symbol": mid, "interval": timeframe, "limit": int(limit)})
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("engine_fetch_klines_full_failed", symbol=symbol, tf=timeframe, err=str(exc))
+        return []
+    out: list[Bar] = []
+    for r in rows or []:
+        if not isinstance(r, (list, tuple)) or len(r) < 11:
+            continue
+        try:
+            out.append([float(r[i]) for i in range(11)])
+        except (TypeError, ValueError):
+            continue
+    if not out:
+        return []
+    interval_ms = int(exchange.parse_timeframe(timeframe) * 1000)
+    now = int(time.time() * 1000) if now_ms is None else int(now_ms)
+    return [b for b in out if int(b[0]) + interval_ms <= now]  # closed-only (I-5)
+
+
 async def _fetch_ohlcv_raw(
     exchange: Any,
     symbol: str,
@@ -246,6 +301,7 @@ async def poll_futures_data(
 
 __all__ = [
     "seed_ohlcv",
+    "fetch_klines_full",
     "fetch_ohlcv_series",
     "fetch_ohlcv_between",
     "fetch_funding_history",

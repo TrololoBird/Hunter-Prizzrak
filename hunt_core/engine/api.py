@@ -118,7 +118,9 @@ class Engine:
 
         async def _seed_one(symbol: str, tf: str) -> None:
             async with sem:
-                bars = await rest.seed_ohlcv(ex, symbol, tf, limit=params.OHLCV_LIMIT)
+                # Full-fidelity klines (fapiPublicGetKlines, 12-element) so the plane carries REAL
+                # taker_buy_base_volume — the orderflow CVD/delta features read it, never a zero-fill.
+                bars = await rest.fetch_klines_full(ex, symbol, tf, limit=params.OHLCV_LIMIT)
             if bars:
                 bound = int(params.fresh_kline_s(ex.parse_timeframe(tf)) * 1000.0)
                 states[symbol].seed_frame(

@@ -20,7 +20,7 @@ from hunt_core.engine import params
 
 T = TypeVar("T")
 
-Bar = list[float]  # [open_ms, open, high, low, close, volume]
+Bar = list[float]  # [open_ms, open, high, low, close, volume, (close_ms, quote_vol, num_trades, taker_base, taker_quote)?]
 
 
 class Source(Enum):
