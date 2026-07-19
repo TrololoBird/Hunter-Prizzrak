@@ -57,11 +57,19 @@ class SpotEngine:
 
     async def start(self) -> None:
         await self._ex.load_markets()
+        # Skip symbols with no spot market (e.g. commodity perps XAU/XAG have futures but no spot):
+        # streaming them would error on every WS reconnect. A dropped symbol simply yields fail-loud
+        # None spot enrichment for its futures view — never a fabricated value.
+        markets = getattr(self._ex, "markets", None) or {}
+        dropped = [s for s in self._symbols if s not in markets]
+        if dropped:
+            LOG.info("spot_engine_no_spot_market", dropped=dropped)
+        self._symbols = [s for s in self._symbols if s in markets]
         for symbol in self._symbols:
             self._state(symbol)
             self._spawn(f"{symbol}:ohlcv.1m", self._step_ohlcv(symbol))
             self._spawn(f"{symbol}:trades", self._step_trades(symbol))
-        if self._ex.has.get("watchTickers"):
+        if self._ex.has.get("watchTickers") and self._symbols:
             self._spawn("*:tickers", self._step_tickers(self._symbols))
         LOG.info("spot_engine_started", symbols=len(self._symbols))
 
