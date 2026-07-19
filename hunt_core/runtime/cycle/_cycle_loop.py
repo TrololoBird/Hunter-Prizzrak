@@ -9,6 +9,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from hunt_core import clock, serde
+from hunt_core.view.runtime import MarketRuntime, build_market_runtime
 from hunt_core.data.collect import TickBatchCache, safe_fetch
 from hunt_core.data.lake import FeatureLakeWriter, buffer_tick_rows, flush_lake
 from hunt_core.scanner.prescan import (
@@ -18,7 +19,7 @@ from hunt_core.scanner.prescan import (
     prescan_from_tickers,
 )
 from hunt_core.data.baseline_store import batch_update_baselines
-from hunt_core.data.universe import resolve_watch_universe
+from hunt_core.data.universe import PINNED_SYMBOLS, resolve_watch_universe
 from hunt_core.deliver.digest import DigestCandidate, get_digest_scheduler
 from hunt_core.deliver.telegram import TelegramBroadcaster
 from hunt_core.domain.config import (
@@ -207,6 +208,26 @@ async def _manipulation_scan_loop(
     LOG.info("manipulation_scan_loop_stopped")
 
 
+def _engine_universe(*symbol_groups: Sequence[str]) -> tuple[list[str], list[str]]:
+    """Binance-id / short symbols → unified ccxt (futures, spot) for the engine (USDT-linear only).
+
+    ``"BTCUSDT"``/``"BTC"``/``"BTC/USDT:USDT"`` → ``("BTC/USDT:USDT", "BTC/USDT")``. De-duplicated,
+    order-preserving. Used only by the coexistence engine wiring below.
+    """
+    fut: list[str] = []
+    spot: list[str] = []
+    for group in symbol_groups:
+        for raw in group:
+            s = str(raw).upper().replace("/", "").replace(":USDT", "")
+            if not s.endswith("USDT"):
+                s = f"{s}USDT"
+            base = s[:-4]
+            if base:
+                fut.append(f"{base}/USDT:USDT")
+                spot.append(f"{base}/USDT")
+    return list(dict.fromkeys(fut)), list(dict.fromkeys(spot))
+
+
 async def run_loop(
     cli_symbols: tuple[str, ...],
     interval_s: int,
@@ -311,6 +332,7 @@ async def run_loop(
     # actually failing startup.
     plane = None
     _plane_exc: Exception | None = None
+    market_runtime: MarketRuntime | None = None  # ADR-0004 coexistence engine (gated, see below)
     for _attempt in range(1, 4):
         try:
             plane = await create_hunt_market_plane_from_settings(settings)
@@ -334,6 +356,21 @@ async def run_loop(
     from hunt_core.runtime.tick_state import set_live_spot_companion
 
     set_live_spot_companion(spot_companion)
+
+    # ── ADR-0004 coexistence: the engine-native MarketRuntime alongside the legacy plane ──
+    # OFF by default (HUNT_ENGINE_COEXIST). When enabled it constructs+starts the ccxt.pro engine
+    # (MultiEngine + SpotEngine) over the pinned universe so the native MarketView path can be
+    # validated live next to the still-authoritative legacy plane. NOT load-bearing yet — nothing
+    # consumes `market_runtime.view()`, and a start failure degrades (logged), never sinks the loop.
+    if os.environ.get("HUNT_ENGINE_COEXIST", "").strip().lower() in {"1", "true", "yes", "on"}:
+        try:
+            eng_fut, eng_spot = _engine_universe(PINNED_SYMBOLS, cli_symbols)
+            market_runtime = build_market_runtime(eng_fut, spot_symbols=eng_spot)
+            await market_runtime.start()
+            LOG.info("engine_coexist_started", futures=len(eng_fut), spot=len(eng_spot))
+        except Exception:
+            LOG.exception("engine_coexist_start_failed")  # additive/non-load-bearing — degrade
+            market_runtime = None
 
     # ── exchange health check ──────────────────────────────────
     try:
@@ -1148,6 +1185,11 @@ async def run_loop(
                 pass
         if tg_cmds is not None:
             await tg_cmds.close()
+        if market_runtime is not None:
+            try:
+                await market_runtime.close()
+            except Exception:
+                LOG.exception("engine_coexist_close_failed")
         try:
             await plane.aclose()
         except Exception:
