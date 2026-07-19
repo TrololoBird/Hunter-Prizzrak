@@ -14,7 +14,12 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from hunt_core.engine.freshness import closed_bars, newest_closed
-from hunt_core.engine.funding_stats import funding_recent_extreme, funding_trend, funding_zscore
+from hunt_core.engine.funding_stats import (
+    _rates,
+    funding_recent_extreme,
+    funding_trend,
+    funding_zscore,
+)
 from hunt_core.engine.liquidations import liquidation_notional
 from hunt_core.engine.orderflow import taker_flow
 
@@ -104,7 +109,9 @@ def test_taker_flow_window_subsets(trades: list[dict[str, Any]], now: int) -> No
 
 @given(st.lists(st.fixed_dictionaries({"fundingRate": _maybe, "timestamp": st.integers(0, 10**13)}), max_size=40))
 def test_funding_zscore_none_below_min_else_finite(records: list[dict[str, Any]]) -> None:
-    finite_rates = sum(1 for r in records if isinstance(r["fundingRate"], (int, float)) and math.isfinite(r["fundingRate"]))
+    # Count with the implementation's own parser (float()-coercion, so numeric strings like
+    # "0" count) — not a re-implemented isinstance predicate that drifts from _finite.
+    finite_rates = len(_rates(records))
     z = funding_zscore(records, min_records=6)
     if finite_rates < 6:
         assert z is None  # not a fabricated 0.0
