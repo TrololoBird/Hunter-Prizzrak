@@ -140,6 +140,21 @@ def live_spot_engine() -> Any | None:
     return _SPOT_ENGINE
 
 
+# Live engine MarketRuntime handle (ADR-0004 S8-core), registered once by the watch loop ONLY when
+# the coexistence engine is started (HUNT_ENGINE_COEXIST). The tick uses it to build a per-symbol
+# typed MarketView for the big data-source swap. Absent (None) ⇒ the tick is 100% legacy.
+_MARKET_RUNTIME: Any | None = None
+
+
+def set_live_market_runtime(runtime: Any | None) -> None:
+    global _MARKET_RUNTIME
+    _MARKET_RUNTIME = runtime
+
+
+def live_market_runtime() -> Any | None:
+    return _MARKET_RUNTIME
+
+
 def last_tick_store() -> LastTickStore:
     global _STORE
     if _STORE is None:
@@ -168,8 +183,10 @@ __all__ = [
     "deep_query_store",
     "hunt_scan_store",
     "last_tick_store",
+    "live_market_runtime",
     "live_spot_companion",
     "live_spot_engine",
+    "set_live_market_runtime",
     "set_live_spot_companion",
     "set_live_spot_engine",
 ]

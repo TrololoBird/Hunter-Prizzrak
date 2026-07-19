@@ -354,7 +354,11 @@ async def run_loop(
     spot_companion = plane.spot
     # Expose the live spot companion so the deep/analyst plane (assemble_analyst_tick)
     # can reuse the same spot exchange + weight budget for its per-symbol enrichment.
-    from hunt_core.runtime.tick_state import set_live_spot_companion, set_live_spot_engine
+    from hunt_core.runtime.tick_state import (
+        set_live_market_runtime,
+        set_live_spot_companion,
+        set_live_spot_engine,
+    )
 
     set_live_spot_companion(spot_companion)
 
@@ -373,11 +377,15 @@ async def run_loop(
             # (tick_assembly.snapshot_symbol) instead of the legacy companion. None-safe: if spot
             # is disabled the seam falls back to the companion.
             set_live_spot_engine(market_runtime.spot)
+            # S8-core: expose the runtime so the tick can build a per-symbol MarketView for the
+            # data-source swap. Currently shadow-only (parity telemetry, no behaviour change).
+            set_live_market_runtime(market_runtime)
             LOG.info("engine_coexist_started", futures=len(eng_fut), spot=len(eng_spot))
         except Exception:
             LOG.exception("engine_coexist_start_failed")  # additive/non-load-bearing — degrade
             market_runtime = None
             set_live_spot_engine(None)
+            set_live_market_runtime(None)
 
     # ── exchange health check ──────────────────────────────────
     try:

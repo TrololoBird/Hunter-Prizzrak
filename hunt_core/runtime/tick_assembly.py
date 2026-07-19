@@ -274,6 +274,65 @@ def _resolve_spot_extra(
     return None
 
 
+_TF_TO_VIEW_FIELD: dict[str, str] = {
+    "1m": "m1", "5m": "m5", "15m": "m15", "1h": "h1", "4h": "h4", "1d": "d1", "1w": "w1",
+}
+
+
+def _to_unified_perp(symbol: str) -> str:
+    """Tick symbol → the engine's unified linear-perp key (``BASE/USDT:USDT``), best-effort.
+
+    Mirrors ``_cycle_loop._engine_universe``: ``BTCUSDT``/``BTC``/``BTC/USDT:USDT`` all map to
+    ``BTC/USDT:USDT`` so a MarketView lookup hits the engine's unified-keyed states.
+    """
+    s = str(symbol).upper().replace("/", "").replace(":USDT", "")
+    if not s.endswith("USDT"):
+        s = f"{s}USDT"
+    base = s[:-4]
+    return f"{base}/USDT:USDT" if base else str(symbol)
+
+
+def _shadow_parity(
+    view: Any, *, price: float, kline_map: dict[str, Any], funding: float | None, oi: float | None
+) -> dict[str, Any]:
+    """Compare a live MarketView to the legacy tick data — S8-core parity telemetry (ADR-0004).
+
+    Shadow-only and PURE (never raises): nothing in the tick depends on the result. It exists to
+    surface engine↔legacy discrepancies on LIVE data BEFORE any data-source swap — price, per-TF
+    kline row counts, funding/OI, and the known kline taker-fidelity gap (the engine's 6-element
+    ccxt klines zero-fill ``taker_buy_base_volume``, which the legacy 12-element ``/fapi/v1/klines``
+    carry; a swap must route taker/delta features through ``MarketView.orderflow`` instead). Each
+    field is ``[engine, legacy]`` for eyeballing in the log.
+    """
+    if view is None:
+        return {"view": "absent"}
+    out: dict[str, Any] = {"price_src": view.price_source}
+    if price and price > 0 and view.last_price:
+        out["price_bps"] = round((view.last_price - price) / price * 1e4, 2)
+    out["funding"] = [view.derivs.funding, funding]
+    out["oi"] = [view.derivs.oi, oi]
+    rows: dict[str, list[int | None]] = {}
+    taker_zeroed: list[str] = []
+    for tf, field in _TF_TO_VIEW_FIELD.items():
+        legacy = kline_map.get(tf) if isinstance(kline_map, dict) else None
+        vframe = getattr(view.klines, field, None)
+        lh = int(legacy.height) if legacy is not None and hasattr(legacy, "height") else None
+        vh = int(vframe.height) if vframe is not None and hasattr(vframe, "height") else None
+        if lh is not None or vh is not None:
+            rows[tf] = [vh, lh]
+        cols = getattr(vframe, "columns", ()) if vframe is not None else ()
+        if vframe is not None and lh and "taker_buy_base_volume" in cols:
+            try:
+                if float(vframe["taker_buy_base_volume"].sum()) == 0.0:
+                    taker_zeroed.append(tf)
+            except Exception:  # noqa: BLE001 — telemetry only, never sink the tick
+                pass
+    out["kline_rows"] = rows
+    if taker_zeroed:
+        out["taker_zeroed_tfs"] = taker_zeroed
+    return out
+
+
 async def snapshot_symbol(
     client: HuntCcxtClient,
     settings: Any,
@@ -750,6 +809,27 @@ async def snapshot_symbol(
             ws_snap=ws_snap,
             spot_extra=spot_extra,
         )
+        # S8-core shadow parity (ADR-0004): when the coexistence engine is live, build a per-symbol
+        # MarketView and log how it compares to the legacy tick data. Telemetry ONLY — no behaviour
+        # depends on it; fully guarded so it can never sink the tick. De-risks the data-source swap.
+        from hunt_core.runtime.tick_state import live_market_runtime
+
+        _runtime = live_market_runtime()
+        if _runtime is not None:
+            try:
+                LOG.info(
+                    "engine_shadow_parity",
+                    symbol=symbol,
+                    parity=_shadow_parity(
+                        _runtime.view(_to_unified_perp(symbol)),
+                        price=price,
+                        kline_map=kline_map,
+                        funding=finite_float_or_none(market.get("funding_rate")),
+                        oi=finite_float_or_none(market.get("oi")),
+                    ),
+                )
+            except Exception:
+                LOG.debug("engine_shadow_parity_failed | symbol=%s", symbol, exc_info=True)
         if hot_tier and ws_feed is not None:
             await attach_cross_market_fields(
                 market,
