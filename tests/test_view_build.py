@@ -62,7 +62,7 @@ def _snap(planes: dict[str, Any], not_ready: tuple[str, ...] = ()) -> MarketSnap
 
 def test_build_maps_planes_to_typed_fields() -> None:
     snap = _snap({
-        "ticker": {"last": 64000.0},
+        "ticker": {"last": 64000.0, "quoteVolume": 1_234_567.0},
         "mark": {"markPrice": 64010.0, "indexPrice": 64005.0},
         "book": {"bids": [[63999.0, 5.0]], "asks": [[64001.0, 3.0]]},
         "funding": 0.0001,
@@ -76,6 +76,7 @@ def test_build_maps_planes_to_typed_fields() -> None:
     view = build_market_view(multi, "BTC/USDT:USDT", timeframes=(), now_ms=_NOW)  # type: ignore[arg-type]
     assert view is not None
     assert view.last_price == 64000.0 and view.price_source == "ticker"
+    assert view.quote_volume_24h == 1_234_567.0  # futures 24h quote-vol off the ticker plane
     assert view.derivs.mark == 64010.0 and view.derivs.funding == 0.0001 and view.derivs.oi == 1_000_000.0
     assert view.book.bid == 63999.0 and view.book.ask == 64001.0
     assert view.book.depth_imbalance is not None  # from book-math
@@ -89,6 +90,7 @@ def test_build_falls_back_to_mark_price() -> None:
     snap = _snap({"mark": {"markPrice": 64010.0, "indexPrice": 64005.0}})  # no ticker
     view = build_market_view(_StubMulti(snap, _StubExchange()), "BTC/USDT:USDT", timeframes=(), now_ms=_NOW)  # type: ignore[arg-type]
     assert view is not None and view.last_price == 64010.0 and view.price_source == "mark"
+    assert view.quote_volume_24h is None  # no ticker plane → no 24h quote-vol (fail-loud, not 0)
 
 
 def test_build_returns_none_when_no_price() -> None:

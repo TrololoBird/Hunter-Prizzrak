@@ -53,6 +53,12 @@ def _resolve_price(snap: MarketSnapshot, mark: dict[str, Any] | None) -> tuple[f
     return None, "none"
 
 
+def _quote_volume_24h(snap: MarketSnapshot) -> float | None:
+    """Futures 24h quote-volume from the ticker plane, or ``None`` (fail-loud — no fabricated 0)."""
+    ticker = snap.optional("ticker")
+    return _num(ticker.get("quoteVolume")) if isinstance(ticker, dict) else None
+
+
 def _build_klines(snap: MarketSnapshot, timeframes: Sequence[str], exchange: Any) -> Klines:
     frames: dict[str, Any] = {}
     for tf in timeframes:
@@ -176,6 +182,7 @@ def build_market_view(
         now_ms=now,
         last_price=last_price,
         price_source=price_source,
+        quote_volume_24h=_quote_volume_24h(snap),
         klines=_build_klines(snap, timeframes, engine.exchange),
         book=_build_book(snap),
         derivs=derivs,

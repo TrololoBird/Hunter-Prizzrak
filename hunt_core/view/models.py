@@ -140,6 +140,7 @@ class MarketView(_View):
     now_ms: int
     last_price: float
     price_source: str
+    quote_volume_24h: float | None = None  # futures 24h quote-volume (ticker plane); None fail-loud
     klines: Klines = Klines()
     book: Book = Book()
     derivs: Derivs = Derivs()

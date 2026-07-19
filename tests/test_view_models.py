@@ -21,7 +21,7 @@ def _view(**kw: object) -> MarketView:
 def test_unknown_key_rejected_at_construction() -> None:
     # phantom-key / orphan-field family: an unknown key is a hard error, not a silent dead branch.
     with pytest.raises(ValidationError):
-        _view(quote_volume_24h=1.0)  # not a MarketView field
+        _view(not_a_market_view_field=1.0)  # unknown key → hard error (extra="forbid")
     with pytest.raises(ValidationError):
         Derivs(phantom=1.0)  # type: ignore[call-arg]
 
