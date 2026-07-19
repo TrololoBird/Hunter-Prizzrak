@@ -4,13 +4,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import html
-import logging
 import re
 import time
 from collections import deque
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from functools import wraps
 from typing import TYPE_CHECKING, Any, ParamSpec, Protocol, TypeVar, cast
 
 import aiohttp
@@ -21,8 +19,8 @@ from hunt_core.errors import DEFENSIVE_EXC
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-# Legacy Telegram sender retained for callers that still depend on this module.
-# New runtime delivery code lives under bot/telegram/.
+# The Telegram sender — TelegramBroadcaster (HTML send/edit/photo, dedup, flood-control,
+# circuit breaker), used across the runtime delivery paths (runtime/*, deliver/*).
 try:
     from aiogram import Bot
     from aiogram.client.session.aiohttp import AiohttpSession
@@ -50,65 +48,19 @@ except ImportError:
     TelegramRetryAfter = None
     AiogramAPIError = Exception
 
-# tenacity for retries
-try:
-    from tenacity import (
-        before_sleep_log,
-        retry,
-        retry_if_exception,
-        stop_after_attempt,
-        wait_exponential,
-    )
-
-    HAS_TENACITY = True
-except ImportError:
-    HAS_TENACITY = False
-
+# tenacity is a hard dependency — no optional-import fallback (a hand-rolled retry would just
+# duplicate the library). See pyproject `dependencies`.
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 LOG = structlog.get_logger("hunt_core.deliver.telegram")
-RETRY_LOG = logging.getLogger("hunt_core.deliver.telegram")
 P = ParamSpec("P")
 R = TypeVar("R")
-NETWORK_RETRIES = 3
-RETRY_DELAY_SECONDS = 1.5
 TELEGRAM_DUPLICATE_WINDOW_SECONDS = 180
 TELEGRAM_TEXT_LIMIT = 4000
 TELEGRAM_CAPTION_LIMIT = 1024
 TELEGRAM_LOG_PREVIEW_LIMIT = 500
 TELEGRAM_TAGS = re.compile(r"</?(?:b|i|code|pre|a)[^>]*>", flags=re.IGNORECASE)
 TELEGRAM_CHUNK_LIMIT = 3900
-
-# Fallback retry decorator for when tenacity is not installed
-def _simple_retry(
-    max_attempts: int = 3, exceptions: tuple[type[Exception], ...] = (Exception,)
-) -> Callable[[Callable[P, Awaitable[R]]], Callable[P, Awaitable[R]]]:
-    """Simple retry decorator as fallback when tenacity is not available."""
-
-    def decorator(func: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:
-        @wraps(func)
-        async def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-            last_exc: Exception | None = None
-            for attempt in range(max_attempts):
-                try:
-                    return await func(*args, **kwargs)
-                except exceptions as exc:
-                    last_exc = exc
-                    if attempt < max_attempts - 1:
-                        wait_time = RETRY_DELAY_SECONDS * (2**attempt)  # Exponential backoff
-                        LOG.debug(
-                            "retry %s/%s after %.1fs: %s",
-                            attempt + 1,
-                            max_attempts,
-                            wait_time,
-                            exc,
-                        )
-                        await asyncio.sleep(wait_time)
-            raise last_exc or RuntimeError("Retry failed")
-
-        return wrapper
-
-    return decorator
-
 
 def _buffered_input_file_class() -> Any:
     if BufferedInputFile is None:
@@ -162,19 +114,28 @@ def _telegram_retryable(exc: BaseException) -> bool:
     return isinstance(exc, Exception)
 
 
+def _log_before_retry(retry_state: Any) -> None:
+    """tenacity before_sleep hook on structlog (no stdlib logging — structlog-only rule)."""
+    outcome = retry_state.outcome
+    exc = outcome.exception() if outcome is not None else None
+    LOG.info(
+        "telegram_send_retry",
+        attempt=retry_state.attempt_number,
+        error=str(exc) if exc is not None else None,
+    )
+
+
 def _telegram_retry() -> Callable[[Callable[P, Awaitable[R]]], Callable[P, Awaitable[R]]]:
-    if HAS_TENACITY:
-        return cast(
-            "Callable[[Callable[P, Awaitable[R]]], Callable[P, Awaitable[R]]]",
-            retry(
-                stop=stop_after_attempt(3),
-                wait=wait_exponential(multiplier=1, min=2, max=10),
-                retry=retry_if_exception(_telegram_retryable),
-                before_sleep=before_sleep_log(RETRY_LOG, logging.INFO),
-                reraise=True,
-            ),
-        )
-    return _simple_retry(3, (Exception,))
+    return cast(
+        "Callable[[Callable[P, Awaitable[R]]], Callable[P, Awaitable[R]]]",
+        retry(
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=1, min=2, max=10),
+            retry=retry_if_exception(_telegram_retryable),
+            before_sleep=_log_before_retry,
+            reraise=True,
+        ),
+    )
 
 
 if _HAS_AIogram:
