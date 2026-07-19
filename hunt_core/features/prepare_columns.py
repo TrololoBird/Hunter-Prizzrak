@@ -308,19 +308,23 @@ def ichimoku_lines(
 
 
 def weighted_moving_average(series: pl.Series, period: int, *, name: str) -> pl.Series:
-    """Linear-weighted MA via Polars ``rolling_mean(weights=…)`` (was a python window loop).
+    """Linear-weighted MA ``sum(w·x)/sum(w)`` with weights ``[1..n]`` (newest bar weight ``n``).
 
-    Weights ``[1..n]`` give ``sum(w·x)/sum(w)`` per window — verified identical to the loop.
-    ``min_samples=n`` nulls the partial leading windows; ``fill_nan(None)`` nulls any NaN-input
-    window, matching the loop's skip-non-finite behaviour.
+    Implemented as a **null-safe** shift-based weighted sum, NOT ``rolling_mean(weights=…)``: Polars'
+    weighted rolling panics ("weights not yet supported on array with null values") on ANY null in the
+    input — and HMA feeds it ``2·wma_half − wma_full``, which always carries leading warm-up nulls. The
+    shift form is arithmetically identical where the window is null-free and propagates a null for any
+    window containing one (matching ``min_samples=n``), so a partial/warm-up window yields ``None`` and
+    HMA no longer crashes.
     """
     n = max(1, int(period))
-    weights = [float(j) for j in range(1, n + 1)]
-    return (
-        series.rolling_mean(window_size=n, weights=weights, min_samples=n)
-        .fill_nan(None)
-        .rename(name)
-    )
+    weight_sum = float(n * (n + 1) // 2)
+    acc: pl.Series | None = None
+    for k in range(n):  # shift k: element x[i-k]; newest (k=0) weight n, oldest (k=n-1) weight 1
+        term = series.shift(k) * float(n - k)
+        acc = term if acc is None else acc + term
+    assert acc is not None  # n >= 1
+    return (acc / weight_sum).fill_nan(None).rename(name)
 
 
 def hull_moving_average(close: pl.Series, period: int = 21, *, name: str = "hma21") -> pl.Series:
