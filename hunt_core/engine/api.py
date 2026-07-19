@@ -11,6 +11,7 @@ import asyncio
 import math
 import time
 from collections.abc import Sequence
+from typing import Any
 
 import structlog
 
@@ -197,7 +198,7 @@ class Engine:
         return MarketSnapshot(symbol, now, planes, tuple(not_ready))
 
     @property
-    def exchange(self) -> object:
+    def exchange(self) -> Any:
         """The live ccxt.pro client — for on-demand REST of NON-tracked symbols (scanner funnel).
 
         Tracked symbols read warm WS planes via :meth:`snapshot`; the dynamic tail (arbitrary perps)
