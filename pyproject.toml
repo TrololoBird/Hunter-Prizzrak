@@ -25,7 +25,6 @@ dependencies = [
     "polars_ta>=0.5.17",   # polars_ta.ta/.tdx/.wq surfaces used by features/polars_ta_bridge.py
     "polars-ds>=0.12.0",   # query_entropy / ks_2samp exprs used by features/research_plugins.py
     "numpy>=2.4.6",
-    "bottleneck>=1.4",
     "aiohttp>=3.13.5,<4",
     "aiohttp-socks>=0.10.1",
     "python-socks[asyncio]>=2.7.1",

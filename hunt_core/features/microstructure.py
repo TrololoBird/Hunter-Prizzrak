@@ -8,7 +8,6 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-import numpy as np
 import polars as pl
 
 if TYPE_CHECKING:
@@ -39,60 +38,23 @@ def _warn_if_direct_imported() -> None:
 _warn_if_direct_imported()
 
 
-def _bottleneck_move_std(values: np.ndarray, window: int, *, ddof: int = 1) -> np.ndarray:
-    try:
-        import bottleneck as bn
-    except ImportError:
-        return _numpy_move_std(values, window, ddof=ddof)
-    try:
-        return bn.move_std(values, window, min_count=1, ddof=ddof)
-    except Exception:
-        return _numpy_move_std(values, window, ddof=ddof)
-
-
-def _bottleneck_move_mean(values: np.ndarray, window: int) -> np.ndarray:
-    try:
-        import bottleneck as bn
-    except ImportError:
-        return _numpy_move_mean(values, window)
-    try:
-        return bn.move_mean(values, window, min_count=1)
-    except Exception:
-        return _numpy_move_mean(values, window)
-
-
-def _numpy_move_mean(values: np.ndarray, window: int) -> np.ndarray:
-    out = np.full(values.shape, np.nan, dtype=np.float64)
-    for idx in range(values.shape[0]):
-        start = max(0, idx - window + 1)
-        chunk = values[start : idx + 1]
-        if chunk.size:
-            out[idx] = float(np.nanmean(chunk))
-    return out
-
-
-def _numpy_move_std(values: np.ndarray, window: int, *, ddof: int = 1) -> np.ndarray:
-    out = np.full(values.shape, np.nan, dtype=np.float64)
-    for idx in range(values.shape[0]):
-        start = max(0, idx - window + 1)
-        chunk = values[start : idx + 1]
-        if chunk.size >= max(2, ddof + 1):
-            out[idx] = float(np.nanstd(chunk, ddof=ddof))
-        elif chunk.size == 1:
-            out[idx] = 0.0
-    return out
-
-
 def _rolling_std_series(values: pl.Series, window: int, *, ddof: int = 1) -> pl.Series:
-    arr = values.to_numpy().astype(np.float64, copy=False)
-    rolled = _bottleneck_move_std(arr, window, ddof=ddof)
-    return pl.Series(rolled).fill_null(0.0).fill_nan(0.0)
+    """Trailing rolling sample std, Polars-native (was a numpy→bottleneck round-trip).
+
+    Every caller pre-fills its input null/NaN-free, so ``rolling_std(min_samples=1)`` is
+    numerically identical to the old ``bottleneck.move_std(min_count=1, ddof=…)`` path
+    (verified <1e-9); the single-element edge (std undefined) fills to ``0.0`` as before.
+    """
+    return values.rolling_std(window_size=window, min_samples=1, ddof=ddof).fill_null(0.0).fill_nan(0.0)
 
 
 def _rolling_mean_series(values: pl.Series, window: int) -> pl.Series:
-    arr = values.to_numpy().astype(np.float64, copy=False)
-    rolled = _bottleneck_move_mean(arr, window)
-    return pl.Series(rolled).fill_null(0.0).fill_nan(0.0)
+    """Trailing rolling mean, Polars-native (was a numpy→bottleneck round-trip).
+
+    See :func:`_rolling_std_series` — inputs are null-free, so this matches the old
+    ``bottleneck.move_mean(min_count=1)`` path exactly.
+    """
+    return values.rolling_mean(window_size=window, min_samples=1).fill_null(0.0).fill_nan(0.0)
 
 
 def add_microstructure_features(df: pl.DataFrame) -> pl.DataFrame:
