@@ -253,6 +253,27 @@ def _ensure_kinematic_row_fields(
             continue
 
 
+def _resolve_spot_extra(
+    symbol: str, futures_mid: float, spot_companion: Any | None
+) -> dict[str, float] | None:
+    """Spot enrichment (``market.spot_*``) source for the tick — ADR-0004 S8.
+
+    When the coexistence engine is live (``live_spot_engine()`` set only under HUNT_ENGINE_COEXIST),
+    source it from the engine's push-state ``SpotEngine`` (WS, own weight budget); else fall back to
+    the legacy ``HuntCcxtSpotCompanion`` (byte-identical to pre-S8); else ``None``. ``futures_mid`` is
+    the futures last price for the spread bps (a display line; last ≈ mid for liquid perps). None-safe:
+    a symbol with no fresh spot plane yields ``{}``/``None``, never a fabricated spot field (I-6).
+    """
+    from hunt_core.runtime.tick_state import live_spot_engine
+
+    spot_engine = live_spot_engine()
+    if spot_engine is not None:
+        return spot_engine.spot_enrichments(symbol, futures_mid=futures_mid)
+    if spot_companion is not None:
+        return spot_companion.enrichments_for(symbol)
+    return None
+
+
 async def snapshot_symbol(
     client: HuntCcxtClient,
     settings: Any,
@@ -719,11 +740,7 @@ async def snapshot_symbol(
         carry_liq = carry_base.get("liquidity_scenarios")
         carry_data_quality = carry_base.get("data_quality")
     else:
-        spot_extra = (
-            spot_companion.enrichments_for(symbol)
-            if spot_companion is not None
-            else None
-        )
+        spot_extra = _resolve_spot_extra(symbol, price, spot_companion)
         market = market_snapshot(
             prepared,
             pack=pack,

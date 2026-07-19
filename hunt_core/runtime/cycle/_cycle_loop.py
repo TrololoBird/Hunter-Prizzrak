@@ -354,24 +354,30 @@ async def run_loop(
     spot_companion = plane.spot
     # Expose the live spot companion so the deep/analyst plane (assemble_analyst_tick)
     # can reuse the same spot exchange + weight budget for its per-symbol enrichment.
-    from hunt_core.runtime.tick_state import set_live_spot_companion
+    from hunt_core.runtime.tick_state import set_live_spot_companion, set_live_spot_engine
 
     set_live_spot_companion(spot_companion)
 
     # ── ADR-0004 coexistence: the engine-native MarketRuntime alongside the legacy plane ──
     # OFF by default (HUNT_ENGINE_COEXIST). When enabled it constructs+starts the ccxt.pro engine
-    # (MultiEngine + SpotEngine) over the pinned universe so the native MarketView path can be
-    # validated live next to the still-authoritative legacy plane. NOT load-bearing yet — nothing
-    # consumes `market_runtime.view()`, and a start failure degrades (logged), never sinks the loop.
+    # (MultiEngine + SpotEngine) over the pinned universe. When ON the engine is progressively
+    # load-bearing (S7: scanner detection frames via EngineScannerFeed; S8: the tick's spot
+    # enrichment via set_live_spot_engine below) — always gated, OFF stays byte-identical, and a
+    # start failure degrades (logged), never sinks the loop.
     if os.environ.get("HUNT_ENGINE_COEXIST", "").strip().lower() in {"1", "true", "yes", "on"}:
         try:
             eng_fut, eng_spot = _engine_universe(PINNED_SYMBOLS, cli_symbols)
             market_runtime = build_market_runtime(eng_fut, spot_symbols=eng_spot)
             await market_runtime.start()
+            # S8 first cut: source market.spot_* from the engine SpotEngine at the tick seam
+            # (tick_assembly.snapshot_symbol) instead of the legacy companion. None-safe: if spot
+            # is disabled the seam falls back to the companion.
+            set_live_spot_engine(market_runtime.spot)
             LOG.info("engine_coexist_started", futures=len(eng_fut), spot=len(eng_spot))
         except Exception:
             LOG.exception("engine_coexist_start_failed")  # additive/non-load-bearing — degrade
             market_runtime = None
+            set_live_spot_engine(None)
 
     # ── exchange health check ──────────────────────────────────
     try:

@@ -41,6 +41,18 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
+def _to_spot_symbol(symbol: str) -> str:
+    """Map a linear-perp unified symbol to its spot sibling (``BASE/QUOTE:SETTLE`` → ``BASE/QUOTE``).
+
+    Consumers hold FUTURES symbols (e.g. ``BTC/USDT:USDT``) but this engine is keyed by SPOT symbols
+    (``BTC/USDT``). Stripping the settle suffix is the deterministic linear-perp→spot map; a symbol
+    already in spot form (no ``:`` settle part) is returned unchanged. Without this the consumer
+    surface silently returned ``{}``/``None`` for every symbol (a futures-keyed lookup never hit a
+    spot-keyed state) — the spot enrichment was dead.
+    """
+    return symbol.split(":", 1)[0]
+
+
 class SpotEngine:
     """Push-state spot data source for spot-vs-perp enrichment (public, own budget)."""
 
@@ -158,8 +170,9 @@ class SpotEngine:
 
         Mirrors the old ``enrichments_for``: omits any ``None`` field. Taker flow is always included
         when spot trades are streaming (WS makes it free — the old REST path gated it behind a flag).
+        Accepts a futures OR spot symbol (normalized to the spot key).
         """
-        st = self._states.get(symbol)
+        st = self._states.get(_to_spot_symbol(symbol))
         if st is None:
             return {}
         now = _now_ms()
@@ -200,14 +213,16 @@ class SpotEngine:
 
         ``limit=520`` ≈ 10 yr (the whole listed life of any Binance spot market) in one call; the
         forming week is dropped (I-5). Cached per symbol for 6h. ``None`` fail-loud on failure.
+        Accepts a futures OR spot symbol (normalized to the spot market for the REST fetch).
         """
-        cached = self._weekly.get(symbol)
+        spot_symbol = _to_spot_symbol(symbol)
+        cached = self._weekly.get(spot_symbol)
         if cached is not None and time.monotonic() - cached[1] <= _WEEKLY_TTL_S:
             return cached[0]
-        bars = await rest.seed_ohlcv(self._ex, symbol, "1w", limit=limit)
+        bars = await rest.seed_ohlcv(self._ex, spot_symbol, "1w", limit=limit)
         if not bars:
             return None
-        self._weekly[symbol] = (bars, time.monotonic())
+        self._weekly[spot_symbol] = (bars, time.monotonic())
         return bars
 
     async def close(self) -> None:

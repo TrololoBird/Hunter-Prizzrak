@@ -52,6 +52,19 @@ def test_spot_enrichments_full_payload() -> None:
     }
 
 
+def test_spot_enrichments_accepts_futures_symbol() -> None:
+    """Regression: consumers (build_market_view, the tick S8 seam) hold the FUTURES symbol
+    ``BTC/USDT:USDT`` while the engine is keyed by the spot symbol ``BTC/USDT``. The lookup must
+    normalize — before the fix it returned ``{}`` for every symbol (dead spot enrichment)."""
+    ticker = {"last": 100.0, "bid": 99.0, "ask": 101.0, "quoteVolume": 5000.0, "timestamp": 1}
+    eng = _engine_with_state("BTC/USDT", ticker=ticker, frame=None, trades=None)
+    out = eng.spot_enrichments("BTC/USDT:USDT", futures_mid=100.5)  # FUTURES symbol
+    assert out["spot_futures_spread_bps"] == 50.0
+    assert out["spot_quote_volume_24h"] == 5000.0
+    # identical to addressing it by the spot symbol:
+    assert out == eng.spot_enrichments("BTC/USDT", futures_mid=100.5)
+
+
 def test_spot_enrichments_empty_when_ticker_absent() -> None:
     eng = _engine_with_state("BTC/USDT", ticker=None, frame=None, trades=None)
     assert eng.spot_enrichments("BTC/USDT", futures_mid=100.0) == {}
