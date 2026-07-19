@@ -30,7 +30,7 @@ from hunt_core.features.research_plugins import enrich_research_columns, researc
 from hunt_core.toolkit.trend import legacy_trend_label, trend_from_snapshot
 from hunt_core.data.universe import PINNED_SYMBOLS
 from hunt_core.features.structure import detect_pp
-from hunt_core.market.client import depth_imbalance_from_book, microprice_bias_from_book
+from hunt_core.toolkit.book_math import depth_imbalance_from_book, microprice_bias_from_book
 
 LOG = structlog.get_logger("hunt_core.features.snapshot")
 WatchMode = Literal["short", "long", "both"]

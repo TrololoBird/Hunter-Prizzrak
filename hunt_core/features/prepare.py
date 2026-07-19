@@ -21,7 +21,7 @@ from hunt_core.toolkit.trend import bias_from_ema_row
 from hunt_core.features.pivots import _swing_points
 
 from ..domain.schemas import PreparedSymbol, SymbolFrames, UniverseSymbol
-from ..market.client import (
+from ..toolkit.book_math import (
     depth_imbalance_by_zone,
     depth_imbalance_from_book,
     detect_wall_clusters,
