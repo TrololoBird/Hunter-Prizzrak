@@ -13,10 +13,30 @@ from __future__ import annotations
 
 import polars as pl
 
-from hunt_core.features.models import FactorPanel, FeaturePanel, Frames, TfSummary
+from hunt_core.features.models import (
+    FactorPanel,
+    FeaturePanel,
+    Frames,
+    Regime,
+    TfSummary,
+    VolumeProfile,
+)
+from hunt_core.features.prepare import (
+    _bias_1h,
+    _bias_4h,
+    _market_regime,
+    _market_structure_1h,
+    _regime_1h_confirmed,
+    _regime_4h_confirmed,
+)
 from hunt_core.features.prepare_columns import resolve_prepare_groups_for_symbol
 from hunt_core.features.prepare_frame import _prepare_frame
 from hunt_core.features.summary import tf_summary
+from hunt_core.features.volume_profile import (
+    VP_BUCKETS_DEFAULT,
+    VP_LOOKBACK_15M,
+    volume_profile_with_direction,
+)
 from hunt_core.view.models import MarketView
 
 _TF_TO_FIELD: dict[str, str] = {
@@ -71,6 +91,45 @@ def _build_factors(
     )
 
 
+def _build_vp(frames: dict[str, pl.DataFrame]) -> dict[str, VolumeProfile]:
+    """Per-TF POC/VAH/VAL + direction (reuses ``volume_profile_with_direction``; empty → skip)."""
+    out: dict[str, VolumeProfile] = {}
+    for tf, field, lookback in (("1h", "h1", 48), ("15m", "m15", VP_LOOKBACK_15M)):
+        frame = frames.get(field)
+        if frame is None or frame.is_empty():
+            continue
+        poc, vah, val, direction = volume_profile_with_direction(
+            frame, lookback=lookback, buckets=VP_BUCKETS_DEFAULT
+        )
+        if poc is None and vah is None and val is None:
+            continue
+        out[tf] = VolumeProfile(poc=poc, vah=vah, val=val, poc_direction=direction)
+    return out
+
+
+def _nonempty(frame: pl.DataFrame | None) -> pl.DataFrame | None:
+    return frame if frame is not None and not frame.is_empty() else None
+
+
+def _build_regime(frames: dict[str, pl.DataFrame]) -> Regime:
+    """Derived regime labels from the prepared 4h/1h/15m frames (reuses the pure prepare helpers).
+
+    ``btc_*`` correlation + ``pump_cycle`` need a BTC reference frame (cross-symbol) not available in a
+    single-symbol build — left ``None`` here; threaded in at the tick where BTC's frame exists (tracked).
+    """
+    w4h, w1h, w15 = _nonempty(frames.get("h4")), _nonempty(frames.get("h1")), _nonempty(frames.get("m15"))
+    if w4h is None:
+        return Regime()
+    return Regime(
+        market_regime=_market_regime(w4h, work_1h=w1h, work_15m=w15),
+        bias_4h=_bias_4h(w4h),
+        bias_1h=_bias_1h(w1h) if w1h is not None else None,
+        structure_1h=_market_structure_1h(w1h) if w1h is not None else None,
+        regime_4h=_regime_4h_confirmed(w4h),
+        regime_1h=_regime_1h_confirmed(w1h) if w1h is not None else None,
+    )
+
+
 def compute_features(view: MarketView) -> FeaturePanel:
     """Pure ``MarketView → FeaturePanel``: prepared indicator frames + typed per-TF summaries."""
     frames: dict[str, pl.DataFrame] = {}
@@ -92,6 +151,8 @@ def compute_features(view: MarketView) -> FeaturePanel:
         now_ms=view.now_ms,
         frames=Frames(**frames),
         tf=summaries,
+        vp=_build_vp(frames),
+        regime=_build_regime(frames),
         factors=factors,
         not_ready=view.not_ready,
     )
