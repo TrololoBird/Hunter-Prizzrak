@@ -11,38 +11,52 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
+import polars as pl
 
 from hunt_core.prizrak.config import PrizrakConfig
+
+# The TA primitives below use Polars-native vectorized expressions (ewm_mean / rolling_*)
+# rather than python recurrence loops. They are bit-parity (<1e-12) with the previously
+# hand-rolled numpy loops that were validated live against real ONDO/BTC data — the seeding
+# is preserved exactly (EMA seeds out[0]=x[0]; Wilder seeds index=period with the SMA of the
+# first `period` deltas). polars_ta.RSI/EMA are deliberately NOT used: talib's SMA-of-period
+# warmup seed differs and would shift the validated values.
 
 
 def _closes(ohlcv: list[list[float]]) -> np.ndarray:
     return np.array([r[4] for r in ohlcv], dtype=float)
 
 
+def _wilder(vals: np.ndarray, period: int, n: int) -> np.ndarray:
+    """Wilder running average aligned to the n-length close array.
+
+    Index ``period`` is seeded with the SMA of ``vals[:period]``; from there it is
+    ``ewm_mean(alpha=1/period, adjust=False)`` — which is exactly the Wilder recurrence
+    ``avg[i] = (avg[i-1]*(period-1) + vals[i-1]) / period``.
+    """
+    seed = float(vals[:period].mean())
+    seq = np.concatenate([[seed], vals[period:]])
+    smoothed = pl.Series(seq).ewm_mean(alpha=1.0 / period, adjust=False).to_numpy()
+    out = np.zeros(n)
+    out[period:] = smoothed
+    return out
+
+
 def _rsi(close: np.ndarray, period: int = 14) -> np.ndarray:
+    n = len(close)
+    if n <= period:
+        return np.full(n, np.nan)
     delta = np.diff(close)
     gain = np.where(delta > 0, delta, 0.0)
     loss = np.where(delta < 0, -delta, 0.0)
-    ag = np.zeros(len(close))
-    al = np.zeros(len(close))
-    if len(close) <= period:
-        return np.full(len(close), np.nan)
-    ag[period] = gain[:period].mean()
-    al[period] = loss[:period].mean()
-    for i in range(period + 1, len(close)):
-        ag[i] = (ag[i - 1] * (period - 1) + gain[i - 1]) / period
-        al[i] = (al[i - 1] * (period - 1) + loss[i - 1]) / period
+    ag = _wilder(gain, period, n)
+    al = _wilder(loss, period, n)
     rs = np.divide(ag, al, out=np.full_like(ag, np.nan), where=al != 0)
     return 100 - 100 / (1 + rs)
 
 
 def _ema(x: np.ndarray, period: int) -> np.ndarray:
-    a = 2 / (period + 1)
-    out = np.zeros_like(x)
-    out[0] = x[0]
-    for i in range(1, len(x)):
-        out[i] = a * x[i] + (1 - a) * out[i - 1]
-    return out
+    return pl.Series(x).ewm_mean(alpha=2.0 / (period + 1), adjust=False).to_numpy()
 
 
 def _macd_hist(close: np.ndarray) -> np.ndarray:
@@ -53,10 +67,13 @@ def _macd_hist(close: np.ndarray) -> np.ndarray:
 def _bb_width_pctile(close: np.ndarray, *, period: int = 20, k: float = 2.0, lookback: int = 100) -> float | None:
     if len(close) < period + 5:
         return None
-    width = np.full(len(close), np.nan)
-    for i in range(period, len(close)):
-        seg = close[i - period:i]
-        width[i] = (2 * k * seg.std()) / seg.mean() * 100 if seg.mean() else np.nan
+    s = pl.Series(close)
+    # seg=close[i-period:i] is the trailing window EXCLUDING bar i → rolling then shift(1);
+    # ddof=0 is population std, matching numpy ndarray.std().
+    width_s = (
+        2 * k * s.rolling_std(window_size=period, ddof=0) / s.rolling_mean(window_size=period) * 100
+    ).shift(1)
+    width = width_s.to_numpy()
     win = width[max(period, len(close) - lookback):]
     win = win[~np.isnan(win)]
     if len(win) < 5:
