@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from hunt_core.market.streams import HuntCcxtStreams
 
 import polars as pl
+import polars_ols  # hard dep; module-level so btc_beta_1h needs no import-guard crutch
 
 from hunt_core.data.completeness import (
     REQUIRED_SIGNAL_KLINE_TFS,
@@ -186,8 +187,6 @@ def _series_ols_slope(values: Any, *, min_n: int = 8) -> float | None:
     if not isinstance(values, list) or len(values) < min_n:
         return None
     try:
-        import polars as pl
-
         from hunt_core.toolkit.robust_stats import ols_slope
 
         return ols_slope(pl.Series([float(x) for x in values]), min_n=min_n)
@@ -345,21 +344,16 @@ def _return_skew_kurt(values: list[float]) -> tuple[float | None, float | None]:
     arr = [float(x) for x in values if math.isfinite(x)]
     if len(arr) < 8:
         return None, None
-    try:
-        from scipy import stats as sp_stats
-
-        return float(sp_stats.skew(arr, bias=False)), float(sp_stats.kurtosis(arr, bias=False))
-    except ImportError:
-        pass
-    n = len(arr)
-    mean = sum(arr) / n
-    var = sum((x - mean) ** 2 for x in arr) / max(n - 1, 1)
-    if var <= 0:
+    # Polars-native, bias-corrected (Fisher). Replaces a scipy-or-hand-rolled split whose two
+    # branches returned DIFFERENT numbers depending on whether the optional (and undeclared)
+    # scipy happened to be installed — a non-determinism bug. skew/kurtosis(bias=False) match
+    # scipy's bias=False convention; a constant series → null → fail-loud None.
+    series = pl.Series(arr, dtype=pl.Float64)
+    skew = series.skew(bias=False)
+    kurt = series.kurtosis(fisher=True, bias=False)
+    if skew is None or kurt is None or not math.isfinite(skew) or not math.isfinite(kurt):
         return None, None
-    std = var**0.5
-    m3 = sum((x - mean) ** 3 for x in arr) / n
-    m4 = sum((x - mean) ** 4 for x in arr) / n
-    return m3 / (std**3), m4 / (std**4) - 3.0
+    return float(skew), float(kurt)
 
 
 def distribution_stats(df: Any, *, idx: int = -1) -> dict[str, float]:
@@ -476,11 +470,6 @@ def btc_corr_1h(sym_work_1h: Any, btc_work_1h: Any, *, lookback: int = 24) -> fl
 
 def btc_beta_1h(sym_work_1h: Any, btc_work_1h: Any, *, lookback: int = 48) -> float | None:
     """Rolling OLS beta of symbol vs BTC 1h returns via polars_ols."""
-    try:
-        import polars as pl
-        import polars_ols  # noqa: PLC0415
-    except ImportError:
-        return None
     if (
         sym_work_1h is None
         or btc_work_1h is None
