@@ -2,10 +2,11 @@
 Telegram-failure state-loss retry (Bug 2) in ``deliver_manipulation_setups``.
 
 The full delivery function fetches OHLCV + runs multi-scale pattern detection, which
-is heavy to construct. Instead we stub the function's own module-level collaborators
-(``_fetch_symbol_data``, ``advance_manipulation_scales``, ``load_scanner_state``,
-``save_scanner_state``, ``send_lane_html``, the tracker + cooldown helpers) so we can
-drive a *completed* setup deterministically and assert only the two buggy behaviors.
+is heavy to construct. Instead we pass a stub :class:`~hunt_core.scanner.feed.ScannerFeed`
+(``detection_data``) and stub the function's own module-level collaborators
+(``advance_manipulation_scales``, ``load_scanner_state``, ``save_scanner_state``,
+``send_lane_html``, the tracker + cooldown helpers) so we can drive a *completed* setup
+deterministically and assert only the two buggy behaviors.
 """
 from __future__ import annotations
 
@@ -77,8 +78,9 @@ async def _run(
     has_active = MagicMock(return_value=False)
     register_mock = MagicMock()
 
-    async def fake_fetch(client, s, sem):
-        return symbol, ohlcv_by_tf, None
+    class FakeFeed:
+        async def detection_data(self, s, *, now_ms):
+            return symbol, ohlcv_by_tf, None
 
     def fake_advance(sym, ohlcv, prior, *, now_ms, funding_ctx):
         return new_state, setup
@@ -88,8 +90,7 @@ async def _run(
             raise RuntimeError("tg down")
         return sent
 
-    with patch.object(md, "_fetch_symbol_data", fake_fetch), \
-         patch.object(md, "advance_manipulation_scales", fake_advance), \
+    with patch.object(md, "advance_manipulation_scales", fake_advance), \
          patch.object(md, "load_scanner_state", lambda p: {symbol: prior_state}), \
          patch.object(md, "save_scanner_state", lambda st, p: saved_holder.update(st)), \
          patch.object(md, "send_lane_html", fake_send), \
@@ -103,7 +104,7 @@ async def _run(
             gp.start()
         try:
             results = await md.deliver_manipulation_setups(
-                [symbol], object(), object(), tracker_state=tracker_state
+                [symbol], FakeFeed(), object(), tracker_state=tracker_state
             )
         finally:
             for gp in gate_patches:

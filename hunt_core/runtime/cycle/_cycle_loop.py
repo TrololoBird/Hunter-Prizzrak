@@ -12,6 +12,7 @@ from hunt_core import clock, serde
 from hunt_core.view.runtime import MarketRuntime, build_market_runtime
 from hunt_core.data.collect import TickBatchCache, safe_fetch
 from hunt_core.data.lake import FeatureLakeWriter, buffer_tick_rows, flush_lake
+from hunt_core.scanner.feed import EngineScannerFeed, LegacyScannerFeed, ScannerFeed
 from hunt_core.scanner.prescan import (
     PrescanDebounceQueue,
     PrescanEngine,
@@ -143,7 +144,7 @@ def _build_digest_candidates(
 
 async def _manipulation_scan_loop(
     cli_symbols: Sequence[str],
-    client: Any,
+    feed: ScannerFeed,
     broadcaster: Any | None,
     send_telegram: bool,
     *,
@@ -184,7 +185,7 @@ async def _manipulation_scan_loop(
             if send_telegram and broadcaster is not None and symbols:
                 ts = load_tracker_state()
                 delivered = await deliver_manipulation_setups(
-                    symbols, client, broadcaster, tracker_state=ts
+                    symbols, feed, broadcaster, tracker_state=ts
                 ) or []
                 buffer_tracker_state(ts)
                 flush_tracker_state()
@@ -395,13 +396,23 @@ async def run_loop(
 
     manipulation_task: asyncio.Task[None] | None = None
     if not once:
+        # ADR-0004 S7: the scanner's detection-frame read is cut off the legacy client onto the
+        # engine when coexistence is ON. OFF → LegacyScannerFeed (byte-identical to pre-cutover);
+        # ON → EngineScannerFeed on the primary engine's ccxt client (engine.exchange + engine.rest,
+        # the on-demand REST tail the engine serves for non-tracked symbols). The delivery path
+        # only knows the ScannerFeed interface.
+        scanner_feed: ScannerFeed = (
+            EngineScannerFeed(market_runtime.multi.primary)
+            if market_runtime is not None
+            else LegacyScannerFeed(client)
+        )
         # Pass the CLI seed only — the loop re-resolves watchlist ∪ cli minus pinned on
         # every pass, so freshly-prescanned coins are actually scanned (see docstring).
         manipulation_task = asyncio.create_task(
-            _manipulation_scan_loop(cli_symbols, client, broadcaster, send_telegram),
+            _manipulation_scan_loop(cli_symbols, scanner_feed, broadcaster, send_telegram),
             name="manipulation_scan_loop",
         )
-        LOG.info("manipulation_scan_loop_scheduled")
+        LOG.info("manipulation_scan_loop_scheduled", engine_fed=market_runtime is not None)
 
     from hunt_core.data.frame_cache import reset_frame_cache
 

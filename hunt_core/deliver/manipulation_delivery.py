@@ -20,6 +20,7 @@ from hunt_core.deliver.lab import send_lane_html
 from hunt_core.paths import SCANNER_STATE
 from hunt_core.scanner.detect.patterns import ManipulationSetup, advance_manipulation_scales
 from hunt_core.scanner.detect.state import load_scanner_state, save_scanner_state
+from hunt_core.scanner.feed import ScannerFeed
 from hunt_core.track._cooldowns import (
     global_confirm_burst_cap_reached,
     recent_stop_hit_cooldown,
@@ -83,31 +84,8 @@ _MAX_TARGET_PCT = 60.0  # floor for the fast frames (15m/5m) and unknown TFs
 def _max_target_pct(meso_tf: str | None) -> float:
     return _MAX_TARGET_PCT_BY_TF.get(str(meso_tf or ""), _MAX_TARGET_PCT)
 
-# 1w is fetched as the macro context of the (1w, 1d, 4h) ladder: the author's
-# biggest manipulations («восходящий канал начиная с февраля», ESPORTS 160%,
-# BSB 250% «в среднесроке») are DAILY-scale structures, and a 1d meso needs a
-# weekly frame above it.
-_TIMEFRAMES = ("1w", "1d", "4h", "1h", "15m", "5m")
-_LOOKBACK_BY_TF = {"1w": 160, "1d": 220, "4h": 120, "1h": 120, "15m": 700, "5m": 1000}
-_MAX_STALE_MS_BY_TF = {
-    "1w": 604800_000 * 2,  # 2 weeks
-    "1d": 86400_000 * 2,   # 2 days
-    "4h": 14400_000 * 2,   # 8 hours
-    "1h": 3600_000 * 2,    # 2 hours
-    "15m": 900_000 * 2,    # 30 minutes
-    "5m": 300_000 * 2,     # 10 minutes
-}
-# Bar duration per TF — used to drop the still-forming candle from the list path
-# (fetch_ohlcv_list bypasses finalize_kline_frame's incomplete-tail drop, so ccxt's
-# in-progress last kline would otherwise reach the detectors and repaint).
-_INTERVAL_MS = {
-    "1w": 604800_000,
-    "1d": 86400_000,
-    "4h": 14400_000,
-    "1h": 3600_000,
-    "15m": 900_000,
-    "5m": 300_000,
-}
+# The detection-frame fetch (TF ladder, per-TF lookback/staleness, forming-bar drop, funding
+# context) now lives in hunt_core.scanner.feed — the native ScannerFeed on the engine (ADR-0004 S7).
 
 
 # User's explicit correction: don't wait for the dump/pump to already be
@@ -404,86 +382,26 @@ def _tp_ladder_line(geo: dict[str, Any], setup: ManipulationSetup) -> str:
     return f"🎯 Тейки (пулы ликвидности): {tps}"
 
 
-_PARALLEL_SEMAPHORE = 10
-
-
-async def _funding_ctx(client: Any, symbol: str) -> dict[str, float] | None:
-    """Recent funding context for the manipulation-short conviction/timing signal.
-
-    Returns {"rate": last 8h funding, "peak": max over ~3 days}. Elevated positive
-    funding = crowded longs = squeeze-short fuel; a rollover from that peak times
-    the "основной слив" (see modeled EVAA/THE analysis + _funding_short_signal).
-    Cached 900s in the client, so per-scan cost is ~1 REST call per symbol."""
-    try:
-        hist = await client.fetch_funding_rate_history(symbol, limit=10)
-    except Exception:
-        _LOG.debug("manipulation_funding_failed sym=%s", symbol, exc_info=True)
-        return None
-    rates = [float(r.get("fundingRate") or 0.0) for r in (hist or [])]
-    if not rates:
-        return None
-    return {"rate": rates[-1], "peak": max(rates)}
-
-
-async def _fetch_symbol_data(
-    client: Any, symbol: str, sem: asyncio.Semaphore,
-) -> tuple[str, dict[str, list[list[float]]], dict[str, float] | None]:
-    """Parallel OHLCV + funding fetch for one symbol. CCXT Pro async REST."""
-    import time
-    ohlcv_by_tf: dict[str, list[list[float]]] = {}
-    now_ms = time.time() * 1000
-    async def _fetch(tf: str) -> tuple[str, list[list[float]] | None]:
-        try:
-            # Cached: the scanner re-runs every cycle; interval-aware TTL means a 1d
-            # frame is refetched ~hourly, not every cycle (was the dominant REST sink
-            # → 418 ban). Only 5m refreshes fast. WS-fed frames supersede this next.
-            bars = await client.fetch_ohlcv_list_cached(symbol, tf, limit=_LOOKBACK_BY_TF[tf])
-            if bars and len(bars) >= 2:
-                interval_ms = _INTERVAL_MS.get(tf)
-                if interval_ms is not None and int(bars[-1][0]) + interval_ms > now_ms:
-                    # Drop the still-forming candle (list path skips finalize_kline_frame)
-                    # so detect_impulse et al. never fire on an unclosed bar.
-                    bars = bars[:-1]
-            if bars and len(bars) > 0:
-                last_ts = int(bars[-1][0])
-                stale_ms = _MAX_STALE_MS_BY_TF.get(tf, 3600_000)
-                if now_ms - last_ts > stale_ms:
-                    return tf, None
-            return tf, bars
-        except Exception:
-            _LOG.debug("manipulation_fetch_failed sym=%s tf=%s", symbol, tf, exc_info=True)
-            return tf, None
-    # Parallel per-TF fetch + funding within symbol
-    async with sem:
-        tfs = await asyncio.gather(*[_fetch(tf) for tf in _TIMEFRAMES], return_exceptions=True)
-        funding = await _funding_ctx(client, symbol)
-    for item in tfs:
-        if isinstance(item, BaseException):
-            continue
-        tf, bars = item
-        if isinstance(tf, str) and bars:
-            ohlcv_by_tf[tf] = bars
-    return symbol, ohlcv_by_tf, funding
-
-
 async def deliver_manipulation_setups(
     symbols: list[str],
-    client: Any,
+    feed: ScannerFeed,
     broadcaster: Any,
     *,
     tracker_state: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Scan ``symbols`` for manipulation reversal setups — parallel REST + Polars detection.
+    """Scan ``symbols`` for manipulation reversal setups — engine-fed frames + Polars detection.
 
-    Uses asyncio.gather with semaphore for CCXT Pro async REST.
-    Detection runs on Polars DataFrames via scanner/detect/patterns.py.
+    Detection frames (closed-only OHLCV per TF + funding context) come from ``feed`` — the native
+    :class:`~hunt_core.scanner.feed.ScannerFeed` on the engine (ADR-0004 S7), or the legacy client
+    behind the same interface while the coexistence flag is OFF. Detection runs on Polars
+    DataFrames via ``scanner/detect/patterns.py``.
     """
     results: list[dict[str, Any]] = []
     now_dt = datetime.now(timezone.utc)
     now_ms = now_dt.timestamp() * 1000
-    sem = asyncio.Semaphore(_PARALLEL_SEMAPHORE)
-    fetch_tasks = [_fetch_symbol_data(client, s, sem) for s in symbols]
-    outcomes = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+    outcomes = await asyncio.gather(
+        *(feed.detection_data(s, now_ms=now_ms) for s in symbols), return_exceptions=True
+    )
 
     scanner_states = load_scanner_state(SCANNER_STATE)
     states_changed = False
