@@ -155,7 +155,7 @@ async def run_backfill_pass(client: Any, *, now_ms: int, max_rows: int = 200) ->
         # repaint — and the forward path is the ground truth every MFE/MAE and
         # first-passage stat is derived from, so an extreme that no closed bar
         # ever printed would be recorded as fact.
-        from hunt_core.market.factory import drop_unclosed_ohlcv_tail
+        from hunt_core.toolkit.ohlcv import drop_unclosed_ohlcv_tail
 
         ohlcv = drop_unclosed_ohlcv_tail(list(ohlcv), "1m", exchange=client.exchange)
         # fetch_ohlcv_list caps at 1500 bars/call; 24h@1m=1440 fits in one call.

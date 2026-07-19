@@ -24,7 +24,7 @@ from hunt_core.maps.liquidation import (
     realized_liq_clusters,
     realized_liq_magnet,
 )
-from hunt_core.market.client import WallCluster
+from hunt_core.toolkit.book_math import WallCluster
 from hunt_core.toolkit.forecast import (
     build_all_forecasts,
     build_dump_forecast,

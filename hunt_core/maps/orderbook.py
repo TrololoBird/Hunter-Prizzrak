@@ -8,7 +8,7 @@ from math import ceil, floor
 from typing import Any
 
 from hunt_core.maps.config import MapsConfig
-from hunt_core.market.client import (
+from hunt_core.toolkit.book_math import (
     WallCluster,
     aggregate_cross_exchange_walls,
     depth_imbalance_by_zone,
