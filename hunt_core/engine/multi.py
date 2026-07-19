@@ -34,6 +34,7 @@ from hunt_core.engine import exchanges, params, rest
 from hunt_core.engine.api import Engine, _DEFAULT_TFS
 from hunt_core.engine.liquidations import liquidation_notional, market_contract_size
 from hunt_core.engine.state import MarketSnapshot, PlaneStamp, Source, SymbolState
+from hunt_core.toolkit.book_math import depth_snapshot_from_book
 
 LOG = structlog.get_logger(__name__)
 
@@ -203,6 +204,55 @@ class MultiEngine:
             else:
                 size = market_contract_size(self._secondary_ex[venue], symbol)
             out[venue] = liquidation_notional(events, contract_size=size)
+        return out
+
+    async def cross_orderbook(self, symbol: str, *, limit: int = 100) -> dict[str, dict[str, Any]]:
+        """Per-venue depth snapshots (BASE-unit sizes) for cross-book aggregation — ``{venue: snap}``.
+
+        Primary Binance from the WS ``book`` plane (read-through); secondaries via REST
+        ``fetch_order_book``. Sizes are normalized ``×contractSize`` at the venue boundary — OKX's
+        ``BTC-USDT-SWAP`` has ``contractSize=0.01`` while linear USDT is ``1.0``, so treating raw sizes
+        as base units overstated OKX depth 100× and let the smallest book dominate the merged wall
+        (documented cross-DOM defect). Fail-loud: a venue that fails / lacks the market / can't be sized
+        is omitted (never a fabricated book), and each snapshot carries ``fetched_at_ms`` for the
+        time-alignment the maps aggregator applies.
+        """
+        out: dict[str, dict[str, Any]] = {}
+        prim = self._primary.snapshot(symbol, ("book",)).optional("book")
+        if isinstance(prim, dict):
+            bids = [(float(p), float(q)) for p, q in (prim.get("bids") or [])]
+            asks = [(float(p), float(q)) for p, q in (prim.get("asks") or [])]
+            if bids and asks:
+                snap = depth_snapshot_from_book(bids, asks)
+                snap["fetched_at_ms"] = float(int(time.time() * 1000))
+                out[_PRIMARY] = snap
+
+        async def _one(venue: str, ex: Any) -> tuple[str, dict[str, Any]] | None:
+            markets = getattr(ex, "markets", None) or {}
+            if symbol not in markets or not getattr(ex, "has", {}).get("fetchOrderBook"):
+                return None
+            try:
+                ob = await ex.fetch_order_book(symbol, limit=min(100, max(5, int(limit))))
+            except Exception as exc:  # noqa: BLE001 — a dead secondary must not sink the cross-book
+                LOG.warning("engine_cross_book_failed", venue=venue, symbol=symbol, err=str(exc))
+                return None
+            cs = market_contract_size(ex, symbol)
+            if cs is None or cs <= 0:
+                return None  # cannot size correctly → skip, never assume 1.0 (would re-open the OKX 100× bug)
+            bids = [(float(r[0]), float(r[1]) * cs) for r in (ob.get("bids") or []) if r]
+            asks = [(float(r[0]), float(r[1]) * cs) for r in (ob.get("asks") or []) if r]
+            if not bids or not asks:
+                return None
+            snap = depth_snapshot_from_book(bids, asks)
+            snap["fetched_at_ms"] = float(int(time.time() * 1000))
+            return venue, snap
+
+        results = await asyncio.gather(
+            *(_one(v, ex) for v, ex in self._secondary_ex.items()), return_exceptions=True
+        )
+        for r in results:
+            if isinstance(r, tuple):
+                out[r[0]] = r[1]
         return out
 
     async def close(self) -> None:
