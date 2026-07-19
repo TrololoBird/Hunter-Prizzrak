@@ -3,10 +3,10 @@ from __future__ import annotations
 
 
 
+import math
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Any, Literal, cast
 
-import numpy as np
 import polars as pl
 import polars_ols
 import polars_ols.least_squares as polars_ols_ls
@@ -122,7 +122,7 @@ def _as_optional_float(value: object) -> float | None:
         numeric = float(cast("Any", value)) if value is not None else None
     except (TypeError, ValueError):
         return None
-    if numeric is None or not np.isfinite(numeric):
+    if numeric is None or not math.isfinite(numeric):
         return None
     return numeric
 
@@ -333,7 +333,7 @@ def _ultimate_oscillator(df: pl.DataFrame, p1: int = 7, p2: int = 14, p3: int = 
 def _realized_volatility(df: pl.DataFrame, period: int = 20) -> pl.Series:
     log_returns = df["close"].log() - df["close"].shift(1).log()
     return _materialize_series(
-        (log_returns.rolling_std(window_size=period) * float(np.sqrt(period)) * 100.0).fill_nan(
+        (log_returns.rolling_std(window_size=period) * math.sqrt(period) * 100.0).fill_nan(
             0.0
         ),
         df=df,
@@ -366,7 +366,7 @@ def _add_session_features(work: pl.DataFrame, period: int = 20) -> pl.DataFrame:
             hour.is_between(13, 16, closed="left").cast(pl.Float64).alias("session_overlap"),
         ]
     )
-    scale = float(np.sqrt(period) * 100.0)
+    scale = math.sqrt(period) * 100.0
     return work.with_columns(
         [
             (
@@ -535,18 +535,17 @@ def _fisher_transform(df: pl.DataFrame, period: int = 10) -> tuple[pl.Series, pl
     ll = df["low"].rolling_min(window_size=period)
     width = (hh - ll).clip(lower_bound=1e-9)
     price_norm = ((df["close"] - ll) / width).fill_nan(0.5).fill_null(0.5)
-    raw_arr = (price_norm * 2.0 - 1.0).clip(-0.999, 0.999).to_numpy()
-    size = raw_arr.shape[0]
-    values = np.zeros(size, dtype=np.float64)
-    fisher = np.zeros(size, dtype=np.float64)
-    for i in range(size):
-        prev_v = values[i - 1] if i > 0 else 0.0
-        smoothed = 0.33 * float(raw_arr[i]) + 0.67 * prev_v
-        smoothed = float(np.clip(smoothed, -0.999, 0.999))
-        values[i] = smoothed
-        prev_f = fisher[i - 1] if i > 0 else 0.0
-        fisher[i] = 0.5 * np.log((1.0 + smoothed) / (1.0 - smoothed)) + 0.5 * prev_f
-    fisher_series = pl.Series("fisher", fisher, dtype=pl.Float64)
+    raw = (price_norm * 2.0 - 1.0).clip(-0.999, 0.999)
+    # Polars-native (was a python recurrence loop): `smoothed[i]=0.33*raw[i]+0.67*smoothed[i-1]`
+    # is a 0.33-alpha ewm seeded prev=0 (prepend-0 trick); its per-step clip is a no-op (a convex
+    # combination of values in [-.999,.999] stays in range). `fisher[i]=fisher_raw[i]+0.5*fisher[i-1]`
+    # is a 0.5-alpha IIR, i.e. 2×ewm_mean(alpha=0.5). Bit-parity with the loop (<1e-15).
+    zero = pl.Series([0.0], dtype=pl.Float64)
+    smoothed = pl.concat([zero, raw]).ewm_mean(alpha=0.33, adjust=False).slice(1).clip(-0.999, 0.999)
+    fisher_raw = 0.5 * ((1.0 + smoothed) / (1.0 - smoothed)).log()
+    fisher_series = (
+        2.0 * pl.concat([zero, fisher_raw]).ewm_mean(alpha=0.5, adjust=False).slice(1)
+    ).rename("fisher")
     fisher_signal = fisher_series.ewm_mean(span=5, adjust=False).rename("fisher_signal")
     return fisher_series, fisher_signal
 
@@ -636,14 +635,16 @@ def _kama(df: pl.DataFrame, period: int = 10, fast: int = 2, slow: int = 30) -> 
     slowest = 2.0 / (slow + 1.0)
     sc_raw = er * (fastest - slowest) + slowest
     sc = sc_raw**2
-    close_np = close.to_numpy()
-    sc_np = sc.to_numpy()
-    kama_np = np.empty_like(close_np)
-    if len(kama_np) > 0:
-        kama_np[0] = close_np[0]
-        for i in range(1, len(kama_np)):
-            kama_np[i] = kama_np[i - 1] + sc_np[i] * (close_np[i] - kama_np[i - 1])
-    return pl.Series("kama10", kama_np, dtype=pl.Float64).fill_nan(float("nan"))
+    # Variable-alpha recurrence (alpha=sc[i]) — no fixed-alpha ewm expresses it and plta.KAMA is
+    # broken on Py3.14, so the sequential step is irreducible; a python-list loop keeps it numpy-free.
+    close_list = close.to_list()
+    sc_list = sc.to_list()
+    if not close_list:
+        return pl.Series("kama10", [], dtype=pl.Float64)
+    kama: list[float] = [close_list[0]]
+    for i in range(1, len(close_list)):
+        kama.append(kama[-1] + sc_list[i] * (close_list[i] - kama[-1]))
+    return pl.Series("kama10", kama, dtype=pl.Float64)
 
 
 def _heikin_ashi(df: pl.DataFrame) -> pl.DataFrame:

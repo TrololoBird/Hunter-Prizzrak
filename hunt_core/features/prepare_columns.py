@@ -6,7 +6,6 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING, Any
 
-import numpy as np
 import polars as pl
 
 if TYPE_CHECKING:
@@ -309,21 +308,19 @@ def ichimoku_lines(
 
 
 def weighted_moving_average(series: pl.Series, period: int, *, name: str) -> pl.Series:
-    n = max(1, int(period))
-    values = series.to_numpy()
-    out: list[float | None] = [None] * int(values.size)
-    weights = np.arange(1, n + 1, dtype=float)
-    denom = float(weights.sum()) if weights.size else 1.0
+    """Linear-weighted MA via Polars ``rolling_mean(weights=…)`` (was a python window loop).
 
-    if values.size >= n:
-        for i in range(n - 1, values.size):
-            window = values[i - n + 1 : i + 1]
-            if np.isnan(window).any():
-                continue
-            weighted = float((window * weights).sum() / denom)
-            if math.isfinite(weighted):
-                out[i] = weighted
-    return pl.Series(name, out, dtype=pl.Float64)
+    Weights ``[1..n]`` give ``sum(w·x)/sum(w)`` per window — verified identical to the loop.
+    ``min_samples=n`` nulls the partial leading windows; ``fill_nan(None)`` nulls any NaN-input
+    window, matching the loop's skip-non-finite behaviour.
+    """
+    n = max(1, int(period))
+    weights = [float(j) for j in range(1, n + 1)]
+    return (
+        series.rolling_mean(window_size=n, weights=weights, min_samples=n)
+        .fill_nan(None)
+        .rename(name)
+    )
 
 
 def hull_moving_average(close: pl.Series, period: int = 21, *, name: str = "hma21") -> pl.Series:
