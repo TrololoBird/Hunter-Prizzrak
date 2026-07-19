@@ -93,7 +93,7 @@ def configure_script_logging(name: str) -> structlog.BoundLogger:
     # ccxt/aiohttp/urllib3 emit full HTTP request+response bodies at DEBUG (MBs of
     # noise per cycle, e.g. the exchangeInfo dump). Keep third-party transport
     # loggers at WARNING so HUNT_LOG_LEVEL=DEBUG surfaces only hunt's own events.
-    for noisy in ("ccxt", "urllib3", "aiohttp", "websockets"):
+    for noisy in ("ccxt", "urllib3", "aiohttp", "websockets", "aiogram"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
     logging.getLogger("ccxt.base.exchange").setLevel(logging.ERROR)
     logging.getLogger("asyncio").setLevel(logging.CRITICAL)

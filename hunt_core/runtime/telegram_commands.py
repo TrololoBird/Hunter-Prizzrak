@@ -1,35 +1,43 @@
-"""Hunt Telegram command loop — /signal <SYMBOL> on-demand probe."""
+"""Hunt Telegram command loop — /signal etc. on aiogram's Dispatcher (no raw-HTTP crutch).
+
+The command side runs on aiogram's ``Dispatcher``/``Router`` long-polling — the same library the
+outbound :class:`TelegramBroadcaster` already uses — instead of a hand-rolled ``getUpdates`` HTTP
+client. aiogram owns update delivery, offset tracking, the webhook clear, per-update task fan-out
+(``handle_as_tasks``) and polling backoff; this module keeps only the hunt-specific handler logic:
+the single-flight probe lock + depth-1 pending queue, the shared CCXT client, authorization, and the
+report builders.
+"""
 from __future__ import annotations
 
-
-
 import asyncio
+import contextlib
 import html
-import logging
 import os
 import re
 import time
 from typing import Any
 
-import aiohttp
 import structlog
+from aiogram import Bot, Dispatcher, Router
+from aiogram.types import Message
 
+from hunt_core.deliver.telegram import TelegramBroadcaster, _DnsCachedAiohttpSession
 from hunt_core.errors import DEFENSIVE_EXC, defensive_exc_types
-from hunt_core.secrets import load_secrets
-from hunt_core.deliver.telegram import TelegramBroadcaster
-
 from hunt_core.runtime.signals_report import deliver_signals_report
 from hunt_core.runtime.stats_report import deliver_stats_report
 from hunt_core.runtime.symbol_probe import deliver_signal_probe, normalize_symbol, parse_symbol_text
+from hunt_core.secrets import load_secrets
 
 LOG = structlog.get_logger("hunt.telegram_commands")
-_API = "https://api.telegram.org/bot{token}/{method}"
 _SYMBOL_RE = re.compile(r"^[A-Z0-9]{2,16}(USDT|USDC)?$")
 _SIGNAL_PROBE_TIMEOUT_S = 300.0
+_STALE_UPDATE_S = 900.0
+# The four update kinds this bot answers on (DMs/groups + channel admin posts + edits).
+_ALLOWED_UPDATES = ("message", "channel_post", "edited_message", "edited_channel_post")
 
 
 class HuntTelegramCommands:
-    """Long-poll /signal without blocking the hunt watch loop."""
+    """Long-poll /signal on aiogram without blocking the hunt watch loop."""
 
     def __init__(
         self,
@@ -46,35 +54,15 @@ class HuntTelegramCommands:
         self._proxy_url = proxy_url
         # Shared watch CCXT client — probes reuse it instead of spinning a 2nd plane.
         self._client = client
-        self._offset: int | None = None
-        self._session: aiohttp.ClientSession | None = None
         self._probe_lock = asyncio.Lock()
-        self._dispatch_tasks: set[asyncio.Task[None]] = set()
         # /signal while another probe is in flight used to reply "please wait"
         # and silently drop the request — user got no answer at all. Depth-1
         # queue: the latest request made while busy runs automatically once
         # the current probe finishes.
         self._pending_signal: tuple[int, str, bool] | None = None
-
-    async def _session_get(self) -> aiohttp.ClientSession:
-        if self._session is None or self._session.closed:
-            if self._proxy_url:
-                from aiohttp_socks import ProxyConnector
-                conn = ProxyConnector.from_url(self._proxy_url, rdns=True)
-                self._session = aiohttp.ClientSession(connector=conn, trust_env=False)
-            else:
-                self._session = aiohttp.ClientSession(trust_env=False)
-        return self._session
-
-    async def close(self) -> None:
-        if self._dispatch_tasks:
-            pending = list(self._dispatch_tasks)
-            for task in pending:
-                task.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
-            self._dispatch_tasks.clear()
-        if self._session is not None and not self._session.closed:
-            await self._session.close()
+        # Created lazily in run_forever (so construction stays network-free for tests).
+        self._bot: Bot | None = None
+        self._dp: Dispatcher | None = None
 
     def _authorized(self, chat_id: int, user_id: int | None) -> bool:
         # Any chat/group/channel where the bot is a member may use /signal.
@@ -262,69 +250,7 @@ class HuntTelegramCommands:
         else:
             await self._send(chat_id, f"⚠️ Неизвестная команда <code>{cmd}</code>. /help — список.")
 
-    def _extract_incoming(self, update: dict[str, Any]) -> tuple[int, int | None, str] | None:
-        """message (group/DM) or channel_post (channel admin posts)."""
-        for key in ("message", "channel_post", "edited_message", "edited_channel_post"):
-            message = update.get(key)
-            if not isinstance(message, dict):
-                continue
-            text = str(message.get("text") or message.get("caption") or "").strip()
-            if not text:
-                continue
-            _chat_raw = message.get("chat")
-            chat: dict[str, Any] = _chat_raw if isinstance(_chat_raw, dict) else {}
-            chat_id = int(chat.get("id") or 0)
-            _from_raw = message.get("from")
-            from_user: dict[str, Any] = _from_raw if isinstance(_from_raw, dict) else {}
-            user_id = int(from_user.get("id") or 0) or None
-            return chat_id, user_id, text
-        return None
-
-    async def _ensure_polling_mode(self) -> None:
-        """getUpdates fails while a webhook is active — clear it once at startup."""
-        drop_pending = os.environ.get("HUNT_TG_DROP_PENDING", "1") not in {
-            "0",
-            "false",
-            "False",
-        }
-        url = _API.format(token=self._token, method="deleteWebhook")
-        session = await self._session_get()
-        try:
-            async with session.get(
-                url,
-                params={"drop_pending_updates": str(drop_pending).lower()},
-            ) as resp:
-                data = await resp.json(content_type=None)
-            if isinstance(data, dict) and data.get("ok"):
-                LOG.info("hunt_tg_webhook_cleared", drop_pending=drop_pending)
-        except defensive_exc_types(Exception):
-            LOG.debug("hunt_tg_webhook_clear_failed", exc_info=True)
-
-    def _update_message_date(self, update: dict[str, Any]) -> float | None:
-        for key in ("message", "channel_post", "edited_message", "edited_channel_post"):
-            message = update.get(key)
-            if isinstance(message, dict):
-                try:
-                    return float(message.get("date") or 0) or None
-                except (TypeError, ValueError):
-                    return None
-        return None
-
-    def _schedule_dispatch(self, chat_id: int, user_id: int | None, text: str) -> None:
-        """Run heavy probe handlers off the long-poll loop (keep getUpdates alive)."""
-        task = asyncio.create_task(
-            self._dispatch_incoming(chat_id, user_id, text),
-            name=f"hunt_tg_dispatch:{text[:24]}",
-        )
-        self._dispatch_tasks.add(task)
-        task.add_done_callback(self._dispatch_tasks.discard)
-
-    async def _dispatch_incoming(
-        self,
-        chat_id: int,
-        user_id: int | None,
-        text: str,
-    ) -> None:
+    async def _dispatch_incoming(self, chat_id: int, user_id: int | None, text: str) -> None:
         try:
             if text.startswith("/"):
                 LOG.info("hunt_tg_cmd", chat_id=chat_id, user_id=user_id, text=text[:80])
@@ -341,59 +267,62 @@ class HuntTelegramCommands:
         except DEFENSIVE_EXC:
             LOG.exception("hunt_tg_dispatch_failed", chat_id=chat_id, text=text[:80])
 
-    async def _poll_once(self) -> None:
-        params: dict[str, Any] = {
-            "timeout": self._poll_timeout,
-            "allowed_updates": [
-                "message",
-                "channel_post",
-                "edited_message",
-                "edited_channel_post",
-            ],
-        }
-        if self._offset is not None:
-            params["offset"] = self._offset
-        url = _API.format(token=self._token, method="getUpdates")
-        session = await self._session_get()
-        async with session.get(url, params=params) as resp:
-            data = await resp.json(content_type=None)
-        if not isinstance(data, dict) or not data.get("ok"):
-            desc = data.get("description") if isinstance(data, dict) else None
-            LOG.warning("hunt_tg_poll_not_ok", description=desc)
-            await asyncio.sleep(2.0)
+    async def _on_message(self, message: Message) -> None:
+        """aiogram entrypoint for message/channel_post/edited_* — authorize, drop stale, route."""
+        text = str(message.text or message.caption or "").strip()
+        if not text:
             return
-        for update in data.get("result") or []:
-            if not isinstance(update, dict):
-                continue
-            self._offset = int(update.get("update_id", 0)) + 1
-            parsed = self._extract_incoming(update)
-            if parsed is None:
-                continue
-            chat_id, user_id, text = parsed
-            if not self._authorized(chat_id, user_id):
-                LOG.warning("hunt_tg_cmd_denied", chat_id=chat_id, user_id=user_id)
-                continue
-            msg_date = self._update_message_date(update)
-            if msg_date is not None and time.time() - msg_date > 900.0:
-                LOG.info("hunt_tg_skip_stale", chat_id=chat_id, text=text[:60])
-                continue
-            self._schedule_dispatch(chat_id, user_id, text)
+        chat_id = message.chat.id
+        user_id = message.from_user.id if message.from_user is not None else None
+        if not self._authorized(chat_id, user_id):
+            LOG.warning("hunt_tg_cmd_denied", chat_id=chat_id, user_id=user_id)
+            return
+        # getUpdates redelivers a backlog after downtime — a probe for a 20-min-old
+        # /signal is worse than none, so skip anything older than the window.
+        if message.date is not None and time.time() - message.date.timestamp() > _STALE_UPDATE_S:
+            LOG.info("hunt_tg_skip_stale", chat_id=chat_id, text=text[:60])
+            return
+        await self._dispatch_incoming(chat_id, user_id, text)
+
+    def _build_dispatcher(self) -> Dispatcher:
+        dp = Dispatcher()
+        router = Router(name="hunt_commands")
+        for observer in (
+            router.message,
+            router.channel_post,
+            router.edited_message,
+            router.edited_channel_post,
+        ):
+            observer.register(self._on_message)
+        dp.include_router(router)
+        return dp
 
     async def run_forever(self) -> None:
-        logging.getLogger("aiohttp").setLevel(logging.WARNING)
-        await self._ensure_polling_mode()
+        session = _DnsCachedAiohttpSession(proxy=self._proxy_url)
+        self._bot = Bot(token=self._token, session=session)
+        self._dp = self._build_dispatcher()
+        # getUpdates fails while a webhook is active — clear it once at startup.
+        drop_pending = os.environ.get("HUNT_TG_DROP_PENDING", "1") not in {"0", "false", "False"}
+        await self._bot.delete_webhook(drop_pending_updates=drop_pending)
         LOG.info("hunt_telegram_commands_started")
-        while True:
-            try:
-                await self._poll_once()
-            except asyncio.CancelledError:
-                raise
-            except defensive_exc_types(Exception):
-                LOG.debug("hunt_tg_poll_error", exc_info=True)
-                await asyncio.sleep(3.0)
-            except DEFENSIVE_EXC:
-                LOG.debug("hunt_tg_poll_error", exc_info=True)
-                await asyncio.sleep(3.0)
+        # handle_as_tasks (default) runs each update off the poll loop; aiogram owns
+        # offset, allowed_updates and polling backoff. handle_signals=False: the watch
+        # loop owns process signals. close_bot_session=False: close() owns the session.
+        await self._dp.start_polling(
+            self._bot,
+            polling_timeout=self._poll_timeout,
+            allowed_updates=list(_ALLOWED_UPDATES),
+            handle_signals=False,
+            close_bot_session=False,
+        )
+
+    async def close(self) -> None:
+        if self._dp is not None:
+            with contextlib.suppress(Exception):
+                await self._dp.stop_polling()
+        if self._bot is not None:
+            with contextlib.suppress(Exception):
+                await self._bot.session.close()
 
 
 def build_hunt_telegram_commands(
