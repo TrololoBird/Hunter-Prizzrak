@@ -1,11 +1,11 @@
 """Per-tick data-plane truth table — field / source / age (P0-A)."""
 from __future__ import annotations
 
-import json
 import os
 from datetime import UTC, datetime
 from typing import Any
 
+from hunt_core import serde
 from hunt_core.paths import DATA_PLANE_AUDIT_JSONL
 
 # REST cache TTL reference (seconds) — mirrors hunt_core.market.client._CACHE_TTL
@@ -372,7 +372,7 @@ def append_data_plane_audit(
         DATA_PLANE_AUDIT_JSONL.parent.mkdir(parents=True, exist_ok=True)
         append_jsonl_lines(
             DATA_PLANE_AUDIT_JSONL,
-            [json.dumps(record, separators=(",", ":"), default=str)],
+            [serde.dumps_str(record)],
         )
     except Exception:
         import structlog

@@ -1,11 +1,11 @@
 """V2.5 preview — pinned SignalQueue TOP3 + WAITING/ACTIVE lifecycle."""
 from __future__ import annotations
 
-import json
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
+from hunt_core import serde
 from hunt_core.prizrak.engines._helpers import clamp01
 from hunt_core.prizrak.engines.activation import assess_activation
 from hunt_core.paths import ANALYST_SIGNAL_QUEUE_JSON
@@ -295,7 +295,7 @@ def refresh_pinned_signal_queue(
     }
     ANALYST_SIGNAL_QUEUE_JSON.parent.mkdir(parents=True, exist_ok=True)
     ANALYST_SIGNAL_QUEUE_JSON.write_text(
-        json.dumps(payload, indent=2, ensure_ascii=False),
+        serde.dumps_str(payload, indent=True),
         encoding="utf-8",
     )
     return payload
@@ -305,8 +305,8 @@ def load_signal_queue() -> dict[str, Any]:
     if not ANALYST_SIGNAL_QUEUE_JSON.is_file():
         return {"top3": [], "registry": {}, "updated_at": None}
     try:
-        raw = json.loads(ANALYST_SIGNAL_QUEUE_JSON.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        raw = serde.loads(ANALYST_SIGNAL_QUEUE_JSON.read_text(encoding="utf-8"))
+    except (OSError, serde.JSONDecodeError):
         return {"top3": [], "registry": {}, "updated_at": None}
     return raw if isinstance(raw, dict) else {"top3": [], "registry": {}, "updated_at": None}
 

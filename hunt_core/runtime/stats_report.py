@@ -4,13 +4,13 @@ from __future__ import annotations
 
 
 import html
-import json
 from collections import defaultdict
 from datetime import UTC, datetime
 from typing import Any
 
 import polars as pl
 
+from hunt_core import serde
 from hunt_core.deliver.telegram import TelegramBroadcaster
 
 from hunt_core.regime.market_regime import active_params
@@ -80,7 +80,7 @@ def _format_tg_funnel(*, signals: dict[str, Any]) -> str:
     """Telegram volume vs tracker — prep/start vs confirm vs /stats scope."""
     tg: dict[str, str] = {}
     if TELEGRAM_COOLDOWN.is_file():
-        tg = json.loads(TELEGRAM_COOLDOWN.read_text(encoding="utf-8"))
+        tg = serde.loads(TELEGRAM_COOLDOWN.read_text(encoding="utf-8"))
 
     # xchan Telegram cooldowns only — ":lake_bar" keys are feature-lake bar
     # bookkeeping stored in the same file, not delivery cooldowns (G-57).
@@ -100,7 +100,7 @@ def _format_tg_funnel(*, signals: dict[str, Any]) -> str:
             if ln.strip()
         ][-400:]
         for ln in reversed(lines):
-            ev = json.loads(ln)
+            ev = serde.loads(ln)
             # Real early funnel stages (record_funnel_stage writes event="funnel_<stage>");
             # the old {prep,start,imminent} set matched no producer, so this section
             # never rendered. See track/events.py::FUNNEL_STAGES.
@@ -207,8 +207,8 @@ def _regime_block() -> str:
     if not MARKET_REGIME.is_file():
         return "<b>Regime:</b> нет snapshot"
     try:
-        snap = json.loads(MARKET_REGIME.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        snap = serde.loads(MARKET_REGIME.read_text(encoding="utf-8"))
+    except (OSError, serde.JSONDecodeError):
         return "<b>Regime:</b> read error"
     regime = active_params()
     eff = effective_hunt_params()
@@ -235,8 +235,8 @@ def _confirmed_events_count() -> int:
         if not ln.strip():
             continue
         try:
-            ev = json.loads(ln)
-        except json.JSONDecodeError:
+            ev = serde.loads(ln)
+        except serde.JSONDecodeError:
             continue
         # "funnel_deliver" is the delivered stage the funnel producer actually emits;
         # the old "confirmed" matched no producer, so this counter was always 0.

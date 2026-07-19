@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import hashlib
-import json
+import json  # noqa: TID251 — deliberate: stable content-hash canonical bytes (see _dedup_key), NOT I/O
 import structlog
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal
 
+from hunt_core import serde
 from hunt_core.paths import SESSION_DIR
 from hunt_core.signals.model import Signal, SignalModule, SignalState
 
@@ -43,6 +44,9 @@ def compute_setup_id(
         "anchor": _round_anchor(float(anchor_level or 0)),
         "direction": str(direction or "").lower(),
     }
+    # stdlib json (NOT the orjson serde seam) on purpose: this digest is the persisted setup_id.
+    # Its bytes must stay stable forever — re-serializing with different whitespace would rehash
+    # every open signal to a new id and re-emit each one once. A content-hash, not JSON I/O.
     digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
     return digest[:16]
 
@@ -95,7 +99,7 @@ class SignalLifecycleStore:
         if not path.exists():
             return cls()
         try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
+            raw = serde.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return cls()
         if not isinstance(raw, dict):
@@ -106,7 +110,7 @@ class SignalLifecycleStore:
     def save(self, path=_STORE_PATH) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
-            json.dumps({"entries": self.entries, "updated_at": datetime.now(UTC).isoformat()}, indent=2),
+            serde.dumps_str({"entries": self.entries, "updated_at": datetime.now(UTC).isoformat()}, indent=True),
             encoding="utf-8",
         )
 

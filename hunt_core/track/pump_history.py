@@ -3,12 +3,12 @@ from __future__ import annotations
 
 
 
-import json
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
+from hunt_core import serde
 from hunt_core.paths import PUMP_HISTORY, TICK_JSONL
 
 LegKind = Literal["pump", "dump"]
@@ -159,8 +159,8 @@ def load_pump_history(path: Path = PUMP_HISTORY) -> PumpHistoryStore:
     if not path.exists():
         return PumpHistoryStore()
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        raw = serde.loads(path.read_text(encoding="utf-8"))
+    except (OSError, serde.JSONDecodeError):
         return PumpHistoryStore()
     if not isinstance(raw, dict):
         return PumpHistoryStore()
@@ -169,7 +169,7 @@ def load_pump_history(path: Path = PUMP_HISTORY) -> PumpHistoryStore:
 
 def save_pump_history(store: PumpHistoryStore, path: Path = PUMP_HISTORY) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(store.to_dict(), indent=2), encoding="utf-8")
+    path.write_text(serde.dumps_str(store.to_dict(), indent=True), encoding="utf-8")
 
 
 def _stats(store: PumpHistoryStore, symbol: str) -> SymbolPumpStats:
@@ -425,8 +425,8 @@ def backfill_from_jsonl(
         if not line:
             continue
         try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
+            row = serde.loads(line)
+        except serde.JSONDecodeError:
             continue
         if not isinstance(row, dict):
             continue

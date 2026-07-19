@@ -3,7 +3,6 @@ from __future__ import annotations
 
 
 
-import json
 import math
 from dataclasses import asdict, dataclass, fields
 from functools import lru_cache
@@ -11,6 +10,8 @@ from pathlib import Path
 from typing import Any
 
 import polars as pl
+
+from hunt_core import serde
 
 _REGISTRY_PATH = Path(__file__).resolve().parents[1] / "domain" / "feature_registry.json"
 
@@ -97,7 +98,7 @@ class FeatureVector:
 @lru_cache(maxsize=1)
 def load_feature_registry() -> dict[str, Any]:
     raw = _REGISTRY_PATH.read_text(encoding="utf-8")
-    payload = json.loads(raw)
+    payload = serde.loads(raw)
     if not isinstance(payload, dict) or "features" not in payload:
         msg = f"invalid feature registry: {_REGISTRY_PATH}"
         raise FeatureExtractError(msg)

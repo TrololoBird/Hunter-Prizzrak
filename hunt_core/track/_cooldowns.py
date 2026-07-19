@@ -1,9 +1,10 @@
 """TG delivery cooldowns and symbol-level repeat-loser caps."""
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
+
+from hunt_core import serde
 
 POST_SL_REENTRY_COOLDOWN_MINUTES = 90
 SYMBOL_LOSS_STREAK_MIN = 2
@@ -184,8 +185,8 @@ def telegram_outcome_records(state: dict[str, Any]) -> list[dict[str, Any]]:
                 if not line.strip():
                     continue
                 try:
-                    rec = json.loads(line)
-                except json.JSONDecodeError:
+                    rec = serde.loads(line)
+                except serde.JSONDecodeError:
                     continue
                 if isinstance(rec, dict):
                     _add(rec)

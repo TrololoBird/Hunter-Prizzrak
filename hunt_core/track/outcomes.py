@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from hunt_core import serde
+
 WIN_REASONS = frozenset({"tp1", "tp2", "fix_profit_tp1", "fix_profit_tp2", "trailing_stop_profit"})
 LOSS_REASONS = frozenset(
     {
@@ -105,7 +107,6 @@ def outcome_archive_key(record: dict[str, Any]) -> tuple[str, str, str] | None:
 
 
 def _outcome_already_archived(path: Any, key: tuple[str, str, str]) -> bool:
-    import json
     from pathlib import Path
 
     p = Path(path)
@@ -119,8 +120,8 @@ def _outcome_already_archived(path: Any, key: tuple[str, str, str]) -> bool:
         if not line.strip():
             continue
         try:
-            rec = json.loads(line)
-        except json.JSONDecodeError:
+            rec = serde.loads(line)
+        except serde.JSONDecodeError:
             continue
         if outcome_archive_key(rec) == key:
             return True
@@ -129,7 +130,6 @@ def _outcome_already_archived(path: Any, key: tuple[str, str, str]) -> bool:
 
 def append_outcome_record(path: Any, record: dict[str, Any]) -> None:
     """Single-writer outcome log append (§8E / P10)."""
-    import json
     from pathlib import Path
 
     key = outcome_archive_key(record)
@@ -138,7 +138,7 @@ def append_outcome_record(path: Any, record: dict[str, Any]) -> None:
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     with p.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(record, default=str) + "\n")
+        fh.write(serde.dumps_str(record) + "\n")
 
 
 def kpi_bucket(record: dict[str, Any]) -> str:

@@ -1,11 +1,11 @@
 """Universe / prescan audit — leg_gain and energy at pipeline entry (P0-B)."""
 from __future__ import annotations
 
-import json
 import os
 from datetime import UTC, datetime
 from typing import Any
 
+from hunt_core import serde
 from hunt_core.paths import UNIVERSE_AUDIT_JSONL
 
 
@@ -42,7 +42,7 @@ def append_prescan_universe_audit(hit: Any, *, ts: datetime | None = None) -> No
         UNIVERSE_AUDIT_JSONL.parent.mkdir(parents=True, exist_ok=True)
         append_jsonl_lines(
             UNIVERSE_AUDIT_JSONL,
-            [json.dumps(record, separators=(",", ":"), default=str)],
+            [serde.dumps_str(record)],
         )
     except (OSError, TypeError, ValueError):
         pass
@@ -75,7 +75,7 @@ def append_prescan_merge_skip_audit(
         UNIVERSE_AUDIT_JSONL.parent.mkdir(parents=True, exist_ok=True)
         append_jsonl_lines(
             UNIVERSE_AUDIT_JSONL,
-            [json.dumps(record, separators=(",", ":"), default=str)],
+            [serde.dumps_str(record)],
         )
     except (OSError, TypeError, ValueError):
         pass
@@ -119,7 +119,7 @@ def append_tick_universe_audit(row: dict[str, Any]) -> None:
         UNIVERSE_AUDIT_JSONL.parent.mkdir(parents=True, exist_ok=True)
         append_jsonl_lines(
             UNIVERSE_AUDIT_JSONL,
-            [json.dumps(record, separators=(",", ":"), default=str)],
+            [serde.dumps_str(record)],
         )
     except (OSError, TypeError, ValueError):
         pass

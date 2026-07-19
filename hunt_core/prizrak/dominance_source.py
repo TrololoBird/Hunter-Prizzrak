@@ -20,13 +20,13 @@ Only used when ``PrizrakConfig.dominance_enabled`` is true.
 """
 from __future__ import annotations
 
-import json
 import os
 import time
 from typing import Any
 
 import structlog
 
+from hunt_core import serde
 from hunt_core.paths import DOMINANCE_CACHE
 
 log = structlog.get_logger(__name__)
@@ -45,7 +45,7 @@ def _read_snapshots() -> list[dict[str, Any]]:
     try:
         if not DOMINANCE_CACHE.exists():
             return []
-        data = json.loads(DOMINANCE_CACHE.read_text())
+        data = serde.loads(DOMINANCE_CACHE.read_text())
         return data if isinstance(data, list) else []
     except Exception:
         return []
@@ -54,7 +54,7 @@ def _read_snapshots() -> list[dict[str, Any]]:
 def _write_snapshots(snaps: list[dict[str, Any]]) -> None:
     try:
         DOMINANCE_CACHE.parent.mkdir(parents=True, exist_ok=True)
-        DOMINANCE_CACHE.write_text(json.dumps(snaps[-_MAX_SNAPSHOTS:]))
+        DOMINANCE_CACHE.write_text(serde.dumps_str(snaps[-_MAX_SNAPSHOTS:]))
     except Exception:
         pass  # best-effort
 

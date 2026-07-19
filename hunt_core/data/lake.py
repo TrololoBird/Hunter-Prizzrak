@@ -1,13 +1,13 @@
 """Batch tick JSONL + feature parquet lake + tracker flush off hot path (P9)."""
 from __future__ import annotations
 
-import json
 import threading
 from pathlib import Path
 from typing import Any
 
 import polars as pl
 
+from hunt_core import serde
 from hunt_core.paths import LAKE_PARQUET, SIGNAL_STATE, TICK_JSONL
 
 
@@ -86,8 +86,8 @@ def _merge_tracker_state(on_disk: dict[str, Any], buffered: dict[str, Any]) -> d
         combined: list[Any] = []
         for rec in list(disk_hist) + list(buf_hist):
             if isinstance(rec, dict):
-                ident: Any = outcome_archive_key(rec) or json.dumps(
-                    rec, sort_keys=True, default=str
+                ident: Any = outcome_archive_key(rec) or serde.dumps_str(
+                    rec, sort_keys=True
                 )
             else:
                 ident = str(rec)
@@ -111,11 +111,11 @@ def flush_tracker_state() -> bool:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.is_file():
         try:
-            on_disk = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            on_disk = serde.loads(path.read_text(encoding="utf-8"))
+        except (OSError, serde.JSONDecodeError):
             on_disk = {}
         state = _merge_tracker_state(on_disk, state)
-    path.write_text(json.dumps(state, indent=2, default=str), encoding="utf-8")
+    path.write_text(serde.dumps_str(state, indent=True), encoding="utf-8")
     _tracker_flush = None
     return True
 
@@ -126,7 +126,7 @@ def flush_cooldown_state() -> bool:
         return False
     state, path = _cooldown_flush
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    path.write_text(serde.dumps_str(state, indent=True), encoding="utf-8")
     _cooldown_flush = None
     return True
 

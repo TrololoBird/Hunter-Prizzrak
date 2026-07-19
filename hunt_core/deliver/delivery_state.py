@@ -6,9 +6,9 @@ removed in audit round 2 (chunk 7); reviving a delivery cooldown goes through th
 backtest gate."""
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
+from hunt_core import serde
 from hunt_core.paths import DELIVERY_STATE, LAB_OUTCOME_LEDGER
 
 STATE_PATH = DELIVERY_STATE
@@ -20,8 +20,8 @@ def load_delivery_state(path: Path | None = None) -> dict[str, str]:
     if not p.exists():
         return {}
     try:
-        raw = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        raw = serde.loads(p.read_text(encoding="utf-8"))
+    except (OSError, serde.JSONDecodeError):
         return {}
     return raw if isinstance(raw, dict) else {}
 
@@ -29,6 +29,6 @@ def load_delivery_state(path: Path | None = None) -> dict[str, str]:
 def save_delivery_state(state: dict[str, str], path: Path | None = None) -> None:
     p = path or STATE_PATH
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
+    p.write_text(serde.dumps_str(state, indent=True, sort_keys=True), encoding="utf-8")
 
 

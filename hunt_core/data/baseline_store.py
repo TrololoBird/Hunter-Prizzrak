@@ -5,14 +5,13 @@ restarts under ``data/baseline/{SYMBOL}.json``. Z-scores use ``shared.mathlib``.
 """
 from __future__ import annotations
 
-import json
 import math
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
 import polars as pl
 
-from hunt_core import clock
+from hunt_core import clock, serde
 from hunt_core.paths import BASELINE_DIR
 from hunt_core.toolkit.robust_stats import robust_z
 
@@ -76,8 +75,8 @@ def load_baseline(symbol: str) -> SymbolBaseline | None:
     if not p.is_file():
         return None
     try:
-        raw = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        raw = serde.loads(p.read_text(encoding="utf-8"))
+    except (OSError, serde.JSONDecodeError):
         return None
     if not isinstance(raw, dict):
         return None
@@ -88,7 +87,7 @@ def save_baseline(baseline: SymbolBaseline) -> None:
     BASELINE_DIR.mkdir(parents=True, exist_ok=True)
     baseline.updated_at = clock.now_utc().isoformat()
     _baseline_path(baseline.symbol).write_text(
-        json.dumps(baseline.to_dict(), indent=2),
+        serde.dumps_str(baseline.to_dict(), indent=True),
         encoding="utf-8",
     )
 

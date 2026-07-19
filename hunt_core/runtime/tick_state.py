@@ -1,10 +1,10 @@
 """Split tick row stores — hunt scan plane vs deep query plane."""
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
+from hunt_core import serde
 from hunt_core.paths import ANALYST_TICKS_JSONL, HUNT_SCAN_JSONL
 
 
@@ -58,8 +58,8 @@ class _TickStoreBase:
             if not line:
                 continue
             try:
-                row = json.loads(line)
-            except json.JSONDecodeError:
+                row = serde.loads(line)
+            except serde.JSONDecodeError:
                 continue
             if isinstance(row, dict) and str(row.get("symbol") or "").upper() == sym:
                 return row

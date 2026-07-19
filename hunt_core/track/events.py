@@ -3,11 +3,11 @@ from __future__ import annotations
 
 
 
-import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from hunt_core import serde
 from hunt_core.data.jsonl_io import append_jsonl_lines, rotate_jsonl_if_needed
 from hunt_core.params.store import effective_hunt_params
 from hunt_core.paths import DATA, SIGNAL_EVENTS, TICK_JSONL
@@ -51,7 +51,7 @@ def append_signal_event(
         "detail": detail,
         "payload": payload or {},
     }
-    _append_jsonl_line(path, json.dumps(row, default=str) + "\n")
+    _append_jsonl_line(path, serde.dumps_str(row) + "\n")
 
 
 def record_funnel_stage(
@@ -242,7 +242,7 @@ def audit_probe_row(row: dict[str, Any], *, source: str = "signal_cmd") -> dict[
 def append_audit_log(report: dict[str, Any], path: Path = AUDIT_LOG) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(report, default=str) + "\n")
+        fh.write(serde.dumps_str(report) + "\n")
 
 
 __all__ = [

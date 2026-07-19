@@ -24,9 +24,10 @@ tracker-state pattern.
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any, Literal
+
+from hunt_core import serde
 
 Direction = Literal["long", "short"]
 PatternType = Literal["A", "A3", "B", "C"]
@@ -72,15 +73,15 @@ def load_scanner_state(path: Path) -> dict[str, dict[str, Any]]:
     if not path.exists():
         return {}
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        raw = serde.loads(path.read_text(encoding="utf-8"))
+    except (OSError, serde.JSONDecodeError):
         return {}
     return raw if isinstance(raw, dict) else {}
 
 
 def save_scanner_state(states: dict[str, dict[str, Any]], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(states, indent=2, default=str), encoding="utf-8")
+    path.write_text(serde.dumps_str(states, indent=True), encoding="utf-8")
 
 
 __all__ = [

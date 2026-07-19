@@ -26,7 +26,6 @@ per-candidate decision path.
 from __future__ import annotations
 
 import gzip
-import json
 import shutil
 import uuid
 from datetime import UTC, datetime
@@ -35,6 +34,7 @@ from typing import Any
 
 import structlog
 
+from hunt_core import serde
 from hunt_core.paths import DATA
 
 LOG = structlog.get_logger("hunt_core.track.candidate_ledger")
@@ -115,7 +115,7 @@ def record_candidate_decision(
     p = path or CANDIDATE_LEDGER_PATH
     p.parent.mkdir(parents=True, exist_ok=True)
     with p.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(row, default=str) + "\n")
+        fh.write(serde.dumps_str(row) + "\n")
 
 
 def record_candidate_forward_path(
@@ -150,7 +150,7 @@ def record_candidate_forward_path(
     p = path or CANDIDATE_LEDGER_PATH
     p.parent.mkdir(parents=True, exist_ok=True)
     with p.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(row, default=str) + "\n")
+        fh.write(serde.dumps_str(row) + "\n")
 
 
 _ROTATE_BYTES = 1_000_000_000  # 1 GB
@@ -238,8 +238,8 @@ def load_pending_backfill(
             if not line:
                 continue
             try:
-                row = json.loads(line)
-            except json.JSONDecodeError:
+                row = serde.loads(line)
+            except serde.JSONDecodeError:
                 continue
             cid = row.get("candidate_id")
             if not cid:

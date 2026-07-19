@@ -3,10 +3,10 @@ from __future__ import annotations
 
 
 
-import json
 from pathlib import Path
 from typing import Any, Literal
 
+from hunt_core import serde
 from hunt_core.domain.config import BotSettings
 from hunt_core.paths import WATCHLIST as WATCHLIST_PATH
 
@@ -88,8 +88,8 @@ def load_watchlist_rows(path: Path = WATCHLIST_PATH) -> list[dict[str, Any]]:
         log.warning("watchlist_unreadable", path=str(path), error=str(exc))
         return []
     try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as exc:
+        payload = serde.loads(raw)
+    except serde.JSONDecodeError as exc:
         log.warning(
             "watchlist_corrupt", path=str(path), bytes=len(raw), error=str(exc)
         )
@@ -217,8 +217,8 @@ def load_watchlist_payload(path: Path = WATCHLIST) -> dict[str, Any]:
     if not path.exists():
         return {"watchlist": [], "updated_at": None}
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        payload = serde.loads(path.read_text(encoding="utf-8"))
+    except (OSError, serde.JSONDecodeError):
         return {"watchlist": [], "updated_at": None}
     if not isinstance(payload, dict):
         return {"watchlist": [], "updated_at": None}
@@ -288,7 +288,7 @@ def add_to_watchlist(
             payload["watchlist"] = rows
             payload["updated_at"] = now
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            path.write_text(serde.dumps_str(payload, indent=True), encoding="utf-8")
             return False
     rows.append(
         {
@@ -307,7 +307,7 @@ def add_to_watchlist(
     payload["watchlist"] = rows
     payload["updated_at"] = now
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    path.write_text(serde.dumps_str(payload, indent=True), encoding="utf-8")
     return True
 
 

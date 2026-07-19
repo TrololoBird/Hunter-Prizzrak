@@ -1,12 +1,12 @@
 """Verdict V2 calibration rollup — gate stats from deep ticks (no emission quota)."""
 from __future__ import annotations
 
-import json
 from collections import Counter, defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from hunt_core import serde
 from hunt_core.paths import ANALYST_TICKS_JSONL, ANALYST_CALIBRATION_JSON
 
 CALIBRATION_JSON = ANALYST_CALIBRATION_JSON
@@ -17,8 +17,8 @@ def _parse_jsonl_line(line: str) -> dict[str, Any] | None:
     if not line:
         return None
     try:
-        row = json.loads(line)
-    except json.JSONDecodeError:
+        row = serde.loads(line)
+    except serde.JSONDecodeError:
         return None
     return row if isinstance(row, dict) else None
 
@@ -190,7 +190,7 @@ def write_calibration_rollup(*, limit: int = 500) -> Path:
     summaries = load_deep_tick_summaries(limit=limit)
     report = aggregate_calibration(summaries)
     CALIBRATION_JSON.parent.mkdir(parents=True, exist_ok=True)
-    CALIBRATION_JSON.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    CALIBRATION_JSON.write_text(serde.dumps_str(report, indent=True), encoding="utf-8")
     return CALIBRATION_JSON
 
 

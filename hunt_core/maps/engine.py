@@ -1,7 +1,6 @@
 """Maps engine — time-series store, bundle builder, scalar feature derivation."""
 from __future__ import annotations
 
-import json
 import structlog
 import threading
 import time
@@ -12,6 +11,7 @@ from typing import Any
 import polars as pl
 from pydantic import BaseModel, ConfigDict, Field
 
+from hunt_core import serde
 from hunt_core.maps.config import MapsConfig, load_maps_config
 from hunt_core.maps.liquidation import (
     LiqEvent,
@@ -182,7 +182,7 @@ class MapTimeSeriesStore:
             self._vp_snapshots[sym].append(snap)
 
     def enqueue_lake(self, bundle: MapBundle) -> None:
-        self._map_lake_buf.append(json.dumps(bundle.to_dict(), default=str))
+        self._map_lake_buf.append(serde.dumps_str(bundle.to_dict()))
 
     def flush_lake(self, path: Path) -> int:
         if not self._map_lake_buf:

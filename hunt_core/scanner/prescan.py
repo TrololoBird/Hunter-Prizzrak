@@ -509,11 +509,11 @@ def change_24h_tier(_store, _symbol, change_24h: float):
 from hunt_core.track.pump_history import score_bonus
 
 import contextlib
-import json
 from datetime import UTC, datetime
 
 import structlog
 
+from hunt_core import serde
 from hunt_core.domain.config import load_settings
 from hunt_core.market import HuntCcxtClient
 def load_adaptive_store(*_a, **_k) -> dict: return {}
@@ -914,7 +914,7 @@ async def run_scan(
         # the next start. tmp + os.replace makes readers see either the old file or the
         # new one, never a partial.
         tmp_path = WATCHLIST.with_suffix(WATCHLIST.suffix + ".tmp")
-        tmp_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        tmp_path.write_text(serde.dumps_str(summary, indent=True), encoding="utf-8")
         os.replace(tmp_path, WATCHLIST)
         LOG.info(
             "hunt_scan_done",

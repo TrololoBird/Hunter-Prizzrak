@@ -7,6 +7,7 @@ from typing import Any
 
 import structlog
 
+from hunt_core import serde
 from hunt_core.data.universe import PINNED_SYMBOLS
 from hunt_core.market import HuntCcxtClient
 from hunt_core.paths import ANALYST_TICKS_JSONL
@@ -342,12 +343,10 @@ async def assemble_analyst_tick(
         summary = row.get("prizrak_summary")
         if isinstance(summary, dict):
             if CALIBRATION_JSON.is_file():
-                import json as _json
-
-                report = _json.loads(CALIBRATION_JSON.read_text(encoding="utf-8"))
+                report = serde.loads(CALIBRATION_JSON.read_text(encoding="utf-8"))
                 report = merge_live_sample(report, summary, sym)
                 CALIBRATION_JSON.write_text(
-                    _json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
+                    serde.dumps_str(report, indent=True), encoding="utf-8"
                 )
             else:
                 write_calibration_rollup(limit=200)

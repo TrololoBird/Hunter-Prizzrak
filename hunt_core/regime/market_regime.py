@@ -7,7 +7,6 @@ from __future__ import annotations
 
 
 
-import json
 import time
 from dataclasses import asdict, dataclass, field
 
@@ -17,6 +16,7 @@ from typing import Any, Literal
 
 import structlog
 
+from hunt_core import serde
 from hunt_core.paths import MARKET_REGIME
 
 # structlog, not stdlib: the refresh log call passes kwargs — with a stdlib
@@ -265,7 +265,7 @@ def calibrate_from_cross_section(
 def save_regime_file(snapshot: MarketRegimeSnapshot, path: Any = MARKET_REGIME) -> None:
     path = path or MARKET_REGIME
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(snapshot.to_dict(), indent=2, default=str), encoding="utf-8")
+    path.write_text(serde.dumps_str(snapshot.to_dict(), indent=True), encoding="utf-8")
 
 
 def load_regime_file(path: Any = MARKET_REGIME) -> MarketRegimeSnapshot | None:
@@ -273,8 +273,8 @@ def load_regime_file(path: Any = MARKET_REGIME) -> MarketRegimeSnapshot | None:
     if not path.exists():
         return None
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        raw = serde.loads(path.read_text(encoding="utf-8"))
+    except (OSError, serde.JSONDecodeError):
         return None
     if not isinstance(raw, dict):
         return None

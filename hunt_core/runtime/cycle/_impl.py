@@ -5,10 +5,10 @@ import structlog
 
 
 import asyncio
-import json
 import os
 from typing import Any
 
+from hunt_core import serde
 from hunt_core.domain.config import SYMBOL_TICK_TIMEOUT_S
 
 logger = structlog.get_logger(__name__)
@@ -66,10 +66,10 @@ def _load_state() -> dict[str, str]:
     state: dict[str, str] = {}
     if STATE_PATH.exists():
         try:
-            raw = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+            raw = serde.loads(STATE_PATH.read_text(encoding="utf-8"))
             if isinstance(raw, dict):
                 state.update({str(k): str(v) for k, v in raw.items()})
-        except json.JSONDecodeError:
+        except serde.JSONDecodeError:
             pass
     try:
         from hunt_core.deliver.delivery_state import load_delivery_state

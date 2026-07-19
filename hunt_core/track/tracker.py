@@ -3,8 +3,7 @@ from __future__ import annotations
 
 
 
-from hunt_core import clock
-import json
+from hunt_core import clock, serde
 import structlog
 import os
 from dataclasses import dataclass
@@ -342,20 +341,20 @@ def load_tracker_state(path: Path = STATE_PATH) -> dict[str, Any]:
     if not path.exists():
         return {"signals": {}, "followup_sent": {}}
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw = serde.loads(path.read_text(encoding="utf-8"))
         if isinstance(raw, dict) and "signals" in raw:
             for sig in (raw.get("signals") or {}).values():
                 if isinstance(sig, dict):
                     _backfill_signal_geometry(sig)
             return raw
-    except (OSError, json.JSONDecodeError):
+    except (OSError, serde.JSONDecodeError):
         pass
     return {"signals": {}, "followup_sent": {}}
 
 
 def save_tracker_state(state: dict[str, Any], path: Path = STATE_PATH) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(state, indent=2, default=str), encoding="utf-8")
+    path.write_text(serde.dumps_str(state, indent=True), encoding="utf-8")
 
 
 def iter_active_tracker_symbols(state: dict[str, Any]) -> list[tuple[str, str]]:

@@ -6,13 +6,13 @@ from __future__ import annotations
 
 
 
-import json
 import os
 from dataclasses import replace
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from hunt_core import serde
 from hunt_core.regime.market_regime import HuntCalibratedParams, active_params
 from hunt_core.paths import ADAPTIVE_THRESHOLDS, EWMA_THRESHOLDS, HUNT_CALIBRATION
 
@@ -118,8 +118,8 @@ def migrate_calibration_split(*, force: bool = False) -> bool:
     if not ADAPTIVE_THRESHOLDS.exists():
         return False
     try:
-        raw = json.loads(ADAPTIVE_THRESHOLDS.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        raw = serde.loads(ADAPTIVE_THRESHOLDS.read_text(encoding="utf-8"))
+    except (OSError, serde.JSONDecodeError):
         return False
     if not isinstance(raw, dict) or not any(k in raw for k in _CALIBRATION_KEYS):
         return False
@@ -127,20 +127,20 @@ def migrate_calibration_split(*, force: bool = False) -> bool:
     cal_payload = {k: raw[k] for k in _CALIBRATION_KEYS if k in raw}
     if HUNT_CALIBRATION.exists() and force:
         try:
-            existing = json.loads(HUNT_CALIBRATION.read_text(encoding="utf-8"))
+            existing = serde.loads(HUNT_CALIBRATION.read_text(encoding="utf-8"))
             if isinstance(existing, dict):
                 for key in _CALIBRATION_KEYS:
                     if key not in cal_payload and key in existing:
                         cal_payload[key] = existing[key]
-        except (OSError, json.JSONDecodeError):
+        except (OSError, serde.JSONDecodeError):
             pass
     save_calibration_payload(cal_payload, path=HUNT_CALIBRATION)
 
     symbols = raw.get("symbols") if isinstance(raw.get("symbols"), dict) else {}
     ewma_doc = {"symbols": symbols}
     EWMA_THRESHOLDS.parent.mkdir(parents=True, exist_ok=True)
-    EWMA_THRESHOLDS.write_text(json.dumps(ewma_doc, indent=2), encoding="utf-8")
-    ADAPTIVE_THRESHOLDS.write_text(json.dumps(ewma_doc, indent=2), encoding="utf-8")
+    EWMA_THRESHOLDS.write_text(serde.dumps_str(ewma_doc, indent=True), encoding="utf-8")
+    ADAPTIVE_THRESHOLDS.write_text(serde.dumps_str(ewma_doc, indent=True), encoding="utf-8")
     invalidate_calibration_cache()
     return True
 
@@ -149,18 +149,18 @@ def migrate_calibration_split(*, force: bool = False) -> bool:
 def load_calibration(path: Path = HUNT_CALIBRATION) -> dict[str, Any]:
     if path.exists():
         try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
+            raw = serde.loads(path.read_text(encoding="utf-8"))
             if isinstance(raw, dict):
                 return _parse_calibration_raw(raw)
-        except (OSError, json.JSONDecodeError):
+        except (OSError, serde.JSONDecodeError):
             pass
     if ADAPTIVE_THRESHOLDS.exists():
         try:
-            raw = json.loads(ADAPTIVE_THRESHOLDS.read_text(encoding="utf-8"))
+            raw = serde.loads(ADAPTIVE_THRESHOLDS.read_text(encoding="utf-8"))
             if isinstance(raw, dict) and any(k in raw for k in _CALIBRATION_KEYS):
                 migrate_calibration_split()
                 return load_calibration(path)
-        except (OSError, json.JSONDecodeError):
+        except (OSError, serde.JSONDecodeError):
             pass
     return _parse_calibration_raw({})
 
@@ -452,10 +452,10 @@ def save_maps_calibration(
     existing: dict[str, Any] = {}
     if path.exists():
         try:
-            existing = json.loads(path.read_text(encoding="utf-8"))
+            existing = serde.loads(path.read_text(encoding="utf-8"))
             if not isinstance(existing, dict):
                 existing = {}
-        except (OSError, json.JSONDecodeError):
+        except (OSError, serde.JSONDecodeError):
             existing = {}
     oc = existing.setdefault("outcome_calibration", {})
     if not isinstance(oc, dict):
@@ -472,7 +472,7 @@ def save_maps_calibration(
             if isinstance(payload, dict):
                 maps_oc[str(sym).upper()] = {k: float(v) for k, v in payload.items()}
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+    path.write_text(serde.dumps_str(existing, indent=True), encoding="utf-8")
     invalidate_calibration_cache()
 
 
@@ -495,15 +495,15 @@ def save_calibration_payload(payload: dict[str, Any], path: Path = HUNT_CALIBRAT
     existing: dict[str, Any] = {}
     if path.exists():
         try:
-            existing = json.loads(path.read_text(encoding="utf-8"))
+            existing = serde.loads(path.read_text(encoding="utf-8"))
             if not isinstance(existing, dict):
                 existing = {}
-        except (OSError, json.JSONDecodeError):
+        except (OSError, serde.JSONDecodeError):
             existing = {}
     merged = dict(existing)
     for key in _CALIBRATION_KEYS:
         if key in payload:
             merged[key] = payload[key]
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(merged, indent=2), encoding="utf-8")
+    path.write_text(serde.dumps_str(merged, indent=True), encoding="utf-8")
     invalidate_calibration_cache()

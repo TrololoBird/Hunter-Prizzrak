@@ -1,8 +1,9 @@
 """JSONL tick row prepare — fusion lifecycle + MTF must survive replay."""
 from __future__ import annotations
 
-import json
 from typing import Any
+
+from hunt_core import serde
 
 _JSONL_DROP_KEYS = frozenset({"_prepared"})
 
@@ -152,7 +153,7 @@ def prepare_tick_row_for_jsonl(row: dict[str, Any]) -> dict[str, Any]:
 
 def serialize_tick_row(row: dict[str, Any]) -> str:
     """JSONL line — normalized lifecycle/MTF, no ``default=str`` on dataclasses."""
-    return json.dumps(prepare_tick_row_for_jsonl(row), default=str)
+    return serde.dumps_str(prepare_tick_row_for_jsonl(row))
 
 
 __all__ = [

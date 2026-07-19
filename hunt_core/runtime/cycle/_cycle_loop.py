@@ -3,13 +3,12 @@ from __future__ import annotations
 
 import asyncio
 import faulthandler
-import json
 import os
 import time
 from collections.abc import Sequence
 from typing import Any
 
-from hunt_core import clock
+from hunt_core import clock, serde
 from hunt_core.data.collect import TickBatchCache, safe_fetch
 from hunt_core.data.lake import FeatureLakeWriter, buffer_tick_rows, flush_lake
 from hunt_core.scanner.prescan import (
@@ -1078,7 +1077,7 @@ async def run_loop(
                     except Exception:
                         LOG.exception("hunt_tick_rotate_periodic_failed")
                 if once:
-                    print(json.dumps(rows, indent=2, default=str))
+                    print(serde.dumps_str(rows, indent=True))
                     break
             except Exception:
                 LOG.exception("dump_watch_tick_error")

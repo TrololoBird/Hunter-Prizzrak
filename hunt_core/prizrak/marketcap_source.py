@@ -17,13 +17,13 @@ entirely and no request is ever made.
 """
 from __future__ import annotations
 
-import json
 import os
 import time
 from typing import Any
 
 import structlog
 
+from hunt_core import serde
 from hunt_core.paths import MARKETCAP_CACHE
 
 log = structlog.get_logger(__name__)
@@ -78,7 +78,7 @@ def _read_cache(symbol: str) -> dict[str, Any] | None:
     try:
         if not path.exists():
             return None
-        return json.loads(path.read_text())
+        return serde.loads(path.read_text())
     except Exception:
         return None
 
@@ -87,7 +87,7 @@ def _write_cache(symbol: str, days: int, series: list[list[float]]) -> None:
     try:
         MARKETCAP_CACHE.mkdir(parents=True, exist_ok=True)
         payload = {"fetched_ms": int(time.time() * 1000), "days": days, "series": series}
-        _cache_path(symbol).write_text(json.dumps(payload))
+        _cache_path(symbol).write_text(serde.dumps_str(payload))
     except Exception:
         pass  # cache write is best-effort; never fatal
 

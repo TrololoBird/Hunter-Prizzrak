@@ -2,13 +2,12 @@
 from __future__ import annotations
 
 import contextvars
-import json
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
-from hunt_core import clock
+from hunt_core import clock, serde
 from hunt_core.data.universe import DEFAULT_MODES
 from hunt_core.deliver.readiness import SniperConfig
 from hunt_core.paths import SESSION_DIR, TELEGRAM_COOLDOWN, TICK_JSONL
@@ -73,8 +72,8 @@ def load_session(symbol: str, *, root: Path = SESSION_DIR) -> SymbolSession | No
     if not p.exists():
         return None
     try:
-        raw = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        raw = serde.loads(p.read_text(encoding="utf-8"))
+    except (OSError, serde.JSONDecodeError):
         return None
     if not isinstance(raw, dict):
         return None
@@ -97,7 +96,7 @@ def save_session(sess: SymbolSession, *, root: Path = SESSION_DIR) -> None:
     root.mkdir(parents=True, exist_ok=True)
     sess.updated_at = clock.now_utc().isoformat()
     _session_path(sess.symbol, root).write_text(
-        json.dumps(sess.to_dict(), indent=2),
+        serde.dumps_str(sess.to_dict(), indent=True),
         encoding="utf-8",
     )
 
@@ -290,7 +289,7 @@ def save_session_checkpoint(state: SymbolStateStore | None = None) -> Path | Non
     json_dst = SESSION_DIR / "session_checkpoint.json"
     try:
         tmp = SESSION_DIR / "_checkpoint.json.tmp"
-        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+        tmp.write_text(serde.dumps_str(data, indent=True), encoding="utf-8")
         tmp.rename(json_dst)
         saved = json_dst
     except OSError:
@@ -324,10 +323,10 @@ def load_session_checkpoint() -> dict[str, Any] | None:
     # Prefer JSON (portable across Python versions).
     if json_dst.exists():
         try:
-            raw = json.loads(json_dst.read_text(encoding="utf-8"))
+            raw = serde.loads(json_dst.read_text(encoding="utf-8"))
             if isinstance(raw, dict):
                 return raw
-        except (OSError, json.JSONDecodeError):
+        except (OSError, serde.JSONDecodeError):
             LOG.exception("session_checkpoint_json_load_failed, falling back to pickle")
 
     # Fall back to gzip pickle.
