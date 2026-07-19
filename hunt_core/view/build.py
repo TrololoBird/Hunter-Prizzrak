@@ -83,11 +83,19 @@ def _build_book(snap: MarketSnapshot) -> Book:
 
 
 def _build_derivs(snap: MarketSnapshot, mark: dict[str, Any] | None) -> Derivs:
-    scalars = {name: _num(snap.optional(name)) for name in _SCALAR_PLANES}
+    # Explicit float fields (not **dict unpacking): the typed model is the whole point — a dict
+    # splat would let a float value reach the str `funding_trend` field. funding_zscore/
+    # funding_trend are deferred to features/ (they need funding history, not a per-tick plane).
     return Derivs(
         mark=_num(mark.get("markPrice")) if mark else None,
         index=_num(mark.get("indexPrice")) if mark else None,
-        **scalars,  # funding_zscore/funding_trend deferred to features/ (need history, not per-tick)
+        funding=_num(snap.optional("funding")),
+        oi=_num(snap.optional("oi")),
+        basis=_num(snap.optional("basis")),
+        taker_5m=_num(snap.optional("taker_5m")),
+        global_ls_5m=_num(snap.optional("global_ls_5m")),
+        top_ls_acct_5m=_num(snap.optional("top_ls_acct_5m")),
+        top_ls_pos_5m=_num(snap.optional("top_ls_pos_5m")),
     )
 
 
