@@ -24,6 +24,7 @@ from hunt_core.engine.state import MarketSnapshot, Plane, PlaneStamp, Source, Sy
 LOG = structlog.get_logger(__name__)
 
 _DEFAULT_TFS: tuple[str, ...] = ("1m", "5m", "15m", "1h", "4h", "1d", "1w")  # incl macro tier (Prizrak)
+_SEED_CONCURRENCY = 8  # bound on concurrent REST OHLCV seeds at startup (latency-bound, not rate-bound)
 
 
 def _last_float(rows: list[dict[str, object]] | None, key: str) -> float | None:
@@ -112,15 +113,25 @@ class Engine:
     async def _seed(self) -> None:
         now = int(time.time() * 1000)
         ex = self._ingest.exchange
-        for symbol in self._symbols:
-            st = self._ingest.state_for(symbol)
-            for tf in self._timeframes:
+        states = {symbol: self._ingest.state_for(symbol) for symbol in self._symbols}
+        sem = asyncio.Semaphore(_SEED_CONCURRENCY)
+
+        async def _seed_one(symbol: str, tf: str) -> None:
+            async with sem:
                 bars = await rest.seed_ohlcv(ex, symbol, tf, limit=params.OHLCV_LIMIT)
-                if bars:
-                    bound = int(params.fresh_kline_s(ex.parse_timeframe(tf)) * 1000.0)
-                    st.seed_frame(
-                        f"kline.{tf}", bars, PlaneStamp(Source.REST_SEED, now, int(bars[-1][0]), bound)
-                    )
+            if bars:
+                bound = int(params.fresh_kline_s(ex.parse_timeframe(tf)) * 1000.0)
+                states[symbol].seed_frame(
+                    f"kline.{tf}", bars, PlaneStamp(Source.REST_SEED, now, int(bars[-1][0]), bound)
+                )
+
+        # Concurrent (bounded) seeding: 7 symbols × 7 TFs used to be ~49 SEQUENTIAL round-trips
+        # (~40s startup). The fetches are latency-bound, not rate-limited (~245 weight ≪ 2400/min),
+        # so overlapping them cuts startup to a few seconds. State creation stays sequential (above,
+        # no race); seed_frame writes distinct kline.{tf} keys so concurrent writes never collide.
+        await asyncio.gather(
+            *(_seed_one(symbol, tf) for symbol in self._symbols for tf in self._timeframes)
+        )
 
     # The complete /futures/data statistic set (implicit method, response key, plane) — same
     # {symbol, period, limit} shape. basis differs (pair + contractType) and is handled separately.
