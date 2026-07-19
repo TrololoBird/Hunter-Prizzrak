@@ -24,11 +24,16 @@ _maybe = st.one_of(st.none(), _finite, st.just(float("nan")), st.just(float("inf
 _bar = st.lists(_finite, min_size=6, max_size=6)
 
 
+# contracts/price are a real quantity + price on a ccxt liquidation → positive (or absent/garbage to
+# exercise the fail-loud skip). A NEGATIVE notional is not physical and is out of the function's domain.
+_pos_or_bad = st.one_of(st.none(), _pos, st.just(float("nan")), st.just(float("inf")), st.text(max_size=3))
+
+
 def _liq_event() -> st.SearchStrategy[dict[str, Any]]:
     return st.fixed_dictionaries(
         {
-            "contracts": _maybe,
-            "price": _maybe,
+            "contracts": _pos_or_bad,
+            "price": _pos_or_bad,
             "contractSize": st.one_of(st.none(), _pos),
             "side": st.sampled_from(["buy", "sell", None, "unknown"]),
         }
@@ -43,10 +48,11 @@ def test_liq_notional_finite_and_split_bounded(events: list[dict[str, Any]]) -> 
     out = liquidation_notional(events, contract_size=1.0)
     assert set(out) == {"long", "short", "total"}
     assert all(math.isfinite(v) for v in out.values())  # never NaN/inf (I-6)
-    # long/short are side-attributions of the counted total; each is one signed subset
-    assert math.isclose(out["long"] + out["short"], out["total"], rel_tol=1e-9) or (
-        out["long"] + out["short"] <= out["total"] + 1e-6
-    )
+    # long/short attribute a subset of the counted total (positive-notional domain) — never exceed it
+    # (magnitude-aware float tolerance: summation order differs between total and the side subsets).
+    tol = 1e-6 + 1e-9 * abs(out["total"])
+    assert out["long"] + out["short"] <= out["total"] + tol
+    assert out["long"] >= -tol and out["short"] >= -tol
 
 
 def test_liq_notional_empty_is_zero_not_absent() -> None:

@@ -14,7 +14,7 @@ from collections.abc import Awaitable, Callable
 
 import structlog
 
-from hunt_core.engine import params
+from hunt_core.engine import metrics, params
 
 LOG = structlog.get_logger(__name__)
 
@@ -38,10 +38,12 @@ class Watchdog:
         *,
         on_silent: Callable[[], Awaitable[None]],
         on_rotate: Callable[[], Awaitable[None]],
+        venue: str = "binance",
     ) -> None:
         self._last = last_frame_ms
         self._on_silent = on_silent
         self._on_rotate = on_rotate
+        self._venue = venue
         self._stop = asyncio.Event()
         self._started_ms = int(time.time() * 1000)
 
@@ -54,15 +56,19 @@ class Watchdog:
                 pass
             now = int(time.time() * 1000)
             silence = feed_silence_s(self._last, now)
+            # Fail-loud gauge: climbs unbounded on a silent blackout (the alertable signal).
+            metrics.set_feed_silence(self._venue, silence if silence is not None else 0.0)
             if silence is not None and silence > params.NO_MESSAGE_WATCHDOG_S:
                 LOG.error(
                     "engine_feed_silent_force_reconnect",
                     silent_s=round(silence, 1),
                     bound_s=params.NO_MESSAGE_WATCHDOG_S,
                 )
+                metrics.record_reconnect(self._venue, "silence")
                 await self._on_silent()
             if (now - self._started_ms) / 1000.0 > params.WS_ROTATE_S:
                 LOG.info("engine_ws_scheduled_rotate")
+                metrics.record_reconnect(self._venue, "rotate")
                 await self._on_rotate()
                 self._started_ms = now
 

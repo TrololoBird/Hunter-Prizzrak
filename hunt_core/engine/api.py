@@ -15,7 +15,7 @@ from typing import Any
 
 import structlog
 
-from hunt_core.engine import exchanges, params, rest
+from hunt_core.engine import exchanges, metrics, params, rest
 from hunt_core.engine.health import Watchdog
 from hunt_core.engine.ingest import Ingest
 from hunt_core.engine.liquidations import market_contract_size
@@ -103,6 +103,7 @@ class Engine:
             self._ingest.last_frame_ms,
             on_silent=self._ingest.reconnect,
             on_rotate=self._ingest.reconnect,
+            venue=str(getattr(self._ingest.exchange, "id", "binance")),
         )
         self._bg.append(asyncio.create_task(self._watchdog.run(), name="engine_watchdog"))
         self._bg.append(asyncio.create_task(self._poll_positioning(), name="engine_positioning"))
@@ -187,6 +188,7 @@ class Engine:
                 continue
             if stamp.stale_by(now) is not None:
                 not_ready.append(f"{name}: stale {now - stamp.received_ms}ms>{stamp.bound_ms}ms")
+                metrics.record_staleness_reject(name)
                 continue
             value = _resolve(ex, st, symbol, name)
             if value is None:

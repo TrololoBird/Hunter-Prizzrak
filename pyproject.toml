@@ -36,6 +36,7 @@ dependencies = [
     # Hard floor 4.5.44: older ccxt silently loses kline/markPrice/forceOrder WS
     # after Binance's 2026-04-23 fstream split (docs/HUNTER_TARGET_SPEC.md).
     "ccxt>=4.5.44",
+    "prometheus-client>=0.25.0",
 ]
 
 [project.urls]
