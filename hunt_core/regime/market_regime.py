@@ -97,17 +97,15 @@ def _clamp(value: float, lo: float, hi: float) -> float:
 
 
 def _pctile(values: list[float], p: float) -> float:
+    """Linear-interpolated percentile via Polars (was a hand-rolled sorted-list interp).
+
+    ``pl.Series.quantile(interpolation="linear")`` is bit-for-bit identical to the old
+    manual formula; empty → 0.0 fail-loud (Polars would return ``None``).
+    """
     if not values:
         return 0.0
-    if len(values) == 1:
-        return values[0]
-    ranked = sorted(values)
-    k = (len(ranked) - 1) * (p / 100.0)
-    f = int(k)
-    c = min(f + 1, len(ranked) - 1)
-    if f == c:
-        return ranked[f]
-    return ranked[f] + (ranked[c] - ranked[f]) * (k - f)
+    q = pl.Series(values).quantile(p / 100.0, interpolation="linear")
+    return float(q) if q is not None else 0.0
 
 
 def _classify_regime(

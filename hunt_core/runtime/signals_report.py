@@ -7,11 +7,12 @@ from __future__ import annotations
 
 
 
-import asyncio
 import html
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
+
+from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt, wait_incrementing
 
 from hunt_core.deliver.telegram import TelegramBroadcaster
 
@@ -63,21 +64,21 @@ def _human_probe_error(exc: BaseException) -> str:
 
 
 async def _probe_with_retry(symbol: str) -> dict[str, Any]:
-    last_exc: BaseException | None = None
-    for attempt in range(_PROBE_RETRIES):
-        try:
-            row = await probe_symbol_signal(symbol, auto_watchlist=False, stagger_ms=120)
-            if row.get("error"):
-                return row
-            return row
-        except Exception as exc:  # noqa: BLE001
-            last_exc = exc
-            if attempt + 1 < _PROBE_RETRIES:
-                await asyncio.sleep(_PROBE_RETRY_DELAY_S * (attempt + 1))
-    return {
-        "symbol": symbol,
-        "error": _human_probe_error(last_exc or RuntimeError("probe_failed")),
-    }
+    # tenacity owns the retry: 3 attempts, linear 1.5s→3.0s backoff, only on a raised
+    # exception (an error-dict row is a success and returns immediately). On exhaustion the
+    # last exception is reraised → converted to a human message here.
+    try:
+        async for attempt in AsyncRetrying(
+            stop=stop_after_attempt(_PROBE_RETRIES),
+            wait=wait_incrementing(start=_PROBE_RETRY_DELAY_S, increment=_PROBE_RETRY_DELAY_S),
+            retry=retry_if_exception_type(Exception),
+            reraise=True,
+        ):
+            with attempt:
+                return await probe_symbol_signal(symbol, auto_watchlist=False, stagger_ms=120)
+    except Exception as exc:  # noqa: BLE001
+        return {"symbol": symbol, "error": _human_probe_error(exc)}
+    return {"symbol": symbol, "error": _human_probe_error(RuntimeError("probe_failed"))}
 
 
 def resolve_signals_universe(explicit: list[str] | None = None) -> list[str]:
