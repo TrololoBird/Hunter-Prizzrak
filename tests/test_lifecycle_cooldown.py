@@ -18,6 +18,7 @@ from hunt_core.signals.lifecycle import (
     compute_setup_id,
     process_lifecycle_tick,
 )
+from _deep_fixtures import native_from_row
 
 
 def _row() -> dict[str, object]:
@@ -50,24 +51,24 @@ def _store_after_emit() -> SignalLifecycleStore:
 
 
 def test_first_emission_passes(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("hunt_core.signals.price_sanity.price_sanity_check", lambda row, **k: (True, "ok"))
-    t = process_lifecycle_tick(_row(), store=SignalLifecycleStore(entries={}), commit=False)
+    monkeypatch.setattr("hunt_core.signals.price_sanity.price_sanity_check", lambda price, **k: (True, "ok"))
+    t = process_lifecycle_tick(native_from_row(_row()), store=SignalLifecycleStore(entries={}), commit=False)
     assert t.event == "signal"
     assert t.signal is not None and t.signal.symbol == "BTCUSDT"
 
 
 def test_already_emitted_setup_is_suppressed(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("hunt_core.signals.price_sanity.price_sanity_check", lambda row, **k: (True, "ok"))
-    t = process_lifecycle_tick(_row(), store=_store_after_emit(), commit=False)
+    monkeypatch.setattr("hunt_core.signals.price_sanity.price_sanity_check", lambda price, **k: (True, "ok"))
+    t = process_lifecycle_tick(native_from_row(_row()), store=_store_after_emit(), commit=False)
     assert t.event == "none"
     assert t.suppress_reason == "no_state_advance"
 
 
 def test_activation_advance_still_emits(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("hunt_core.signals.price_sanity.price_sanity_check", lambda row, **k: (True, "ok"))
+    monkeypatch.setattr("hunt_core.signals.price_sanity.price_sanity_check", lambda price, **k: (True, "ok"))
     row = _row()
     summary = row["prizrak_summary"]
     assert isinstance(summary, dict)
     summary["activation"] = "in_entry_zone"
-    t = process_lifecycle_tick(row, store=_store_after_emit(), commit=False)
+    t = process_lifecycle_tick(native_from_row(row), store=_store_after_emit(), commit=False)
     assert t.event == "activated"

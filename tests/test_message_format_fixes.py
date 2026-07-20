@@ -23,6 +23,7 @@ import asyncio
 from typing import Any
 
 from hunt_core.prizrak.build import AnalystReport
+from _deep_fixtures import make_native, native_from_row, report_from_row
 
 
 # ── FIX 1 — the fallback card must actually be returned ───────────────────────
@@ -37,8 +38,8 @@ def test_report_build_failure_returns_fallback_card(monkeypatch: Any) -> None:
     monkeypatch.setattr("hunt_core.prizrak.build.build_deep_report", _boom)
 
     q = qs.build_query_result(
-        symbol="BTCUSDT",
-        row={"symbol": "BTCUSDT", "price": 60000.0},
+        make_native(symbol="BTCUSDT", price=60000.0),
+        "BTCUSDT",
         source="analyst_assembly",
         from_store=False,
         age_s=None,
@@ -62,7 +63,7 @@ def _zones_report(action: str) -> AnalystReport:
         "prizrak_structure": {"htf_bias": {"bias": "long"}},
         "prizrak_summary": {"action": action},
     }
-    return AnalystReport(symbol="BTCUSDT", row=row, fusion={}, forecasts={}, would_deliver=False)
+    return report_from_row(row)
 
 
 def test_active_signal_zone_block_makes_no_wait_claim() -> None:
@@ -109,7 +110,7 @@ def _send_pinned(row: dict[str, Any]) -> str:
     from hunt_core.runtime.analyst_assembly import send_analyst_change_telegram
 
     bc = _StubBroadcaster()
-    ok = asyncio.run(send_analyst_change_telegram(bc, row, lifecycle_event="activated"))
+    ok = asyncio.run(send_analyst_change_telegram(bc, native_from_row(row), lifecycle_event="activated"))
     assert ok, "stub broadcaster should have accepted the card"
     return bc.sent[0]
 
@@ -229,9 +230,7 @@ def test_invalidation_and_drivers_are_escaped() -> None:
             "confluence_drivers": [{"name": "OI > 5%", "delta": 0.1}],
         },
     }
-    report = AnalystReport(
-        symbol="BTCUSDT", row=row, fusion={}, forecasts={}, would_deliver=False
-    )
+    report = report_from_row(row)
     txt = report.prizrak_text()
     assert "close &gt; 61000 &amp; vol &lt; 1M" in txt
     assert "OI &gt; 5%" in txt

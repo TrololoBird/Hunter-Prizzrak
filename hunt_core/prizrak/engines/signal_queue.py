@@ -3,14 +3,22 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from hunt_core import serde
 from hunt_core.prizrak.engines._helpers import clamp01
 from hunt_core.prizrak.engines.activation import assess_activation
 from hunt_core.paths import ANALYST_SIGNAL_QUEUE_JSON
 
+if TYPE_CHECKING:
+    from hunt_core.runtime.native_assembly import NativeAnalystView
+
 Lifecycle = Literal["active", "waiting"]
+
+
+def _compact_symbol(symbol: str) -> str:
+    """Unified ``BTC/USDT:USDT`` → compact ``BTCUSDT``."""
+    return symbol.split(":", 1)[0].replace("/", "").upper()
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,8 +77,8 @@ def _prune_registry(
     return out
 
 
-def _summary_from_row(row: dict[str, Any]) -> dict[str, Any]:
-    summary = row.get("prizrak_summary")
+def _summary_from_row(native: NativeAnalystView) -> dict[str, Any]:
+    summary = native.prizrak.summary
     return summary if isinstance(summary, dict) else {}
 
 
@@ -105,19 +113,19 @@ def compute_opportunity_score(summary: dict[str, Any], *, activation_state: str 
 
 
 def opportunity_from_row(
-    row: dict[str, Any],
+    native: NativeAnalystView,
     *,
     rank: int = 0,
     promoted: bool = False,
     for_ranking: bool = False,
 ) -> QueuedOpportunity | None:
-    sym = str(row.get("symbol") or "").upper()
-    if not sym or row.get("error"):
+    sym = _compact_symbol(native.view.symbol)
+    if not sym:
         return None
-    summary = _summary_from_row(row)
+    summary = _summary_from_row(native)
     if not summary:
         return None
-    activation = assess_activation(row, summary)
+    activation = assess_activation(float(native.view.last_price or 0), summary)
     act_state = str(activation.get("state") or "idle")
     score = compute_opportunity_score(summary, activation_state=act_state)
     if score <= 0 and for_ranking:
@@ -151,26 +159,26 @@ def opportunity_from_row(
         catalyst_level=cat,
         gates_failed=[str(g) for g in (summary.get("gates_failed") or [])],
         promoted=promoted,
-        ts=str(row.get("ts") or datetime.now(UTC).isoformat()),
+        ts=str(native.freshness.get("as_of") or datetime.now(UTC).isoformat()),
     )
 
 
-def build_top3(rows: dict[str, dict[str, Any]], *, top_n: int = 3) -> list[QueuedOpportunity]:
+def build_top3(rows: dict[str, NativeAnalystView], *, top_n: int = 3) -> list[QueuedOpportunity]:
     """Deterministic global TOP-N over pinned snapshot (R11)."""
     from hunt_core.data.universe import PINNED_SYMBOLS, collapse_equivalent_opportunities
 
     candidates: list[QueuedOpportunity] = []
     for sym in PINNED_SYMBOLS:
-        row = rows.get(sym)
-        if not isinstance(row, dict):
+        native = rows.get(sym)
+        if native is None:
             continue
-        opp = opportunity_from_row(row, for_ranking=True)
+        opp = opportunity_from_row(native, for_ranking=True)
         if opp is not None:
             candidates.append(opp)
-    for sym, row in rows.items():
-        if sym in PINNED_SYMBOLS or not isinstance(row, dict):
+    for sym, native in rows.items():
+        if sym in PINNED_SYMBOLS:
             continue
-        opp = opportunity_from_row(row, for_ranking=True)
+        opp = opportunity_from_row(native, for_ranking=True)
         if opp is not None:
             candidates.append(opp)
     candidates.sort(key=lambda o: (-o.opportunity_score, o.symbol))
@@ -182,7 +190,7 @@ def build_top3(rows: dict[str, dict[str, Any]], *, top_n: int = 3) -> list[Queue
 
 
 def build_queue_peers(
-    rows: dict[str, dict[str, Any]],
+    rows: dict[str, NativeAnalystView],
     top_symbols: set[str],
     *,
     min_score: float = 0.45,
@@ -200,10 +208,10 @@ def build_queue_peers(
         eq = asset_equivalence_key(sym)
         if eq in seen_equiv:
             continue
-        row = rows.get(sym)
-        if not isinstance(row, dict):
+        native = rows.get(sym)
+        if native is None:
             continue
-        opp = opportunity_from_row(row, for_ranking=True)
+        opp = opportunity_from_row(native, for_ranking=True)
         if opp is None:
             continue
         if opp.activation in {"in_entry_zone", "at_catalyst"} or opp.opportunity_score >= min_score:
@@ -214,13 +222,13 @@ def build_queue_peers(
 
 
 def _update_registry(
-    rows: dict[str, dict[str, Any]],
+    rows: dict[str, NativeAnalystView],
     prev_registry: dict[str, Any],
 ) -> dict[str, Any]:
     registry: dict[str, Any] = dict(prev_registry or {})
     now = datetime.now(UTC).isoformat()
-    for sym, row in rows.items():
-        summary = _summary_from_row(row)
+    for sym, native in rows.items():
+        summary = _summary_from_row(native)
         if not summary:
             continue
         action = str(summary.get("action") or "wait")
@@ -230,7 +238,7 @@ def _update_registry(
         promoted_at = prev.get("promoted_at")
         if str(prev.get("lifecycle") or "") == "waiting" and lifecycle == "active":
             promoted_at = now
-        activation = assess_activation(row, summary)
+        activation = assess_activation(float(native.view.last_price or 0), summary)
         registry[sym] = {
             "lifecycle": lifecycle,
             "action": action,
@@ -243,12 +251,12 @@ def _update_registry(
 
 def refresh_pinned_signal_queue(
     updated_symbol: str,
-    row: dict[str, Any],
+    native: NativeAnalystView,
     *,
     top_n: int = 3,
     ttl_hours: float | None = None,
 ) -> dict[str, Any]:
-    """Rebuild TOP3 from deep query store + latest tick."""
+    """Rebuild TOP3 from the deep query store + the latest typed tick."""
     from hunt_core.data.universe import PINNED_SYMBOLS
     from hunt_core.prizrak.engines.config import load_analyst_config
     from hunt_core.runtime.tick_state import deep_query_store
@@ -257,13 +265,13 @@ def refresh_pinned_signal_queue(
     ttl = v2cfg.signal_queue_ttl_hours if ttl_hours is None else float(ttl_hours)
     prev = load_signal_queue()
     store = deep_query_store()
-    rows: dict[str, dict[str, Any]] = {}
+    rows: dict[str, NativeAnalystView] = {}
     for sym in PINNED_SYMBOLS:
         if sym == updated_symbol.upper():
-            rows[sym] = row
+            rows[sym] = native
         else:
             cached = store.get(sym)
-            if isinstance(cached, dict) and not cached.get("error"):
+            if cached is not None:
                 rows[sym] = cached
     prev_registry_raw = prev.get("registry")
     prev_registry = prev_registry_raw if isinstance(prev_registry_raw, dict) else {}

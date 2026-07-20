@@ -10,6 +10,8 @@
 """
 from __future__ import annotations
 
+from _deep_fixtures import report_from_row
+
 import re
 from collections import deque
 
@@ -74,7 +76,6 @@ def test_iceberg_straddle_bucket_skipped() -> None:
 
 
 def test_interest_zone_bias_warning_fires_for_counter_trend_long() -> None:
-    from hunt_core.prizrak.build import AnalystReport
 
     row = {
         "symbol": "BTCUSDT",
@@ -87,7 +88,7 @@ def test_interest_zone_bias_warning_fires_for_counter_trend_long() -> None:
             "long_ladder": [{"lo": 58955.0, "hi": 60634.0, "touches": 8}],
         },
     }
-    r = AnalystReport(symbol="BTCUSDT", row=row, fusion={}, forecasts={}, would_deliver=False)
+    r = report_from_row(row)
     text = _strip(r.interest_zones_text())
     assert "против HTF-bias" in text  # the previously-dead warning now fires
 
@@ -96,7 +97,6 @@ def test_mtf_header_names_scored_tfs_and_separates_intraday() -> None:
     # #1: the HTF-bias header must name the scored set (1w·1d·4h·1h) and the
     # 5m/15m row must sit under an explicit "не в HTF-балле" sub-label so it is
     # not read as an HTF input.
-    from hunt_core.prizrak.build import AnalystReport
 
     row = {
         "symbol": "BTCUSDT",
@@ -109,7 +109,7 @@ def test_mtf_header_names_scored_tfs_and_separates_intraday() -> None:
             "tf_trends": {"1w": "bear", "1d": "bear", "4h": "neutral", "1h": "bear"},
         },
     }
-    r = AnalystReport(symbol="BTCUSDT", row=row, fusion={}, forecasts={}, would_deliver=False)
+    r = report_from_row(row)
     text = _strip(r.mtf_text())
     assert "HTF-bias (1w·1d·4h·1h)" in text
     assert "не в HTF-балле" in text
@@ -121,7 +121,6 @@ def test_mtf_surfaces_bias_microstructure_conflict_on_wait_tick() -> None:
     # #7: no active candidate (summary=None), HTF-bias=SHORT, but the bot's own
     # microstructure is bullish → the МТФ block must surface the conflict, not
     # print bias and microstructure side by side unresolved.
-    from hunt_core.prizrak.build import AnalystReport
 
     row = {
         "symbol": "BTCUSDT",
@@ -138,7 +137,7 @@ def test_mtf_surfaces_bias_microstructure_conflict_on_wait_tick() -> None:
             "evidence": ["DOM:покупатели(+0.45)", "liq:шорт-сквиз↑"],
         },
     }
-    r = AnalystReport(symbol="BTCUSDT", row=row, fusion={}, forecasts={}, would_deliver=False)
+    r = report_from_row(row)
     text = _strip(r.mtf_text())
     assert "против текущей микроструктуры" in text
     assert "покупатели" in text
@@ -163,7 +162,6 @@ def test_bias_conflict_computed_only_when_no_candidate() -> None:
 
 
 def test_interest_zone_no_warning_when_zone_aligns_with_bias() -> None:
-    from hunt_core.prizrak.build import AnalystReport
 
     row = {
         "symbol": "BTCUSDT",
@@ -174,7 +172,7 @@ def test_interest_zone_no_warning_when_zone_aligns_with_bias() -> None:
             "short_ladder": [{"lo": 66000.0, "hi": 67000.0, "touches": 5}],
         },
     }
-    r = AnalystReport(symbol="BTCUSDT", row=row, fusion={}, forecasts={}, would_deliver=False)
+    r = report_from_row(row)
     text = _strip(r.interest_zones_text())
     assert "против HTF-bias" not in text  # short zone + short bias = aligned
 

@@ -136,26 +136,40 @@ class HuntTelegramCommands:
                 await broadcaster.send_html(
                     f"⏳ <b>/analyze {sym_label}</b> — сценарий + уровни…"
                 )
-                from hunt_core.runtime.analyst_assembly import assemble_analyst_tick
+                from hunt_core.maps.engine import get_map_store
                 from hunt_core.prizrak.build import build_deep_report as _build_deep_report
                 from hunt_core.prizrak.format_telegram import format_deep_analysis_telegram as _fmt_deep
+                from hunt_core.runtime.analyst_assembly import assemble_analyst_tick
+                from hunt_core.runtime.tick_state import live_market_runtime
 
-                row = await assemble_analyst_tick(sym, self._client, stagger_ms=250)
-                if row.get("error"):
+                rt = live_market_runtime()
+                if rt is None:
                     await broadcaster.send_html(
-                        f"⚠️ /analyze {sym_label}\n<code>{row['error']}</code>",
+                        f"⚠️ /analyze {sym_label}\n<i>движок недоступен</i>",
                         no_split=True,
                     )
                     return
-                analysis = _build_deep_report(row, include_watch_appendix=False)
+                native = await assemble_analyst_tick(sym, rt, store=get_map_store())
+                if native is None:
+                    await broadcaster.send_html(
+                        f"⚠️ /analyze {sym_label}\n"
+                        "<i>символ не отслеживается движком (вне warm-set)</i>",
+                        no_split=True,
+                    )
+                    return
+                analysis = _build_deep_report(native, include_watch_appendix=False)
                 blocks = [_fmt_deep(analysis)]
-                _prizrak_action = str((row.get("prizrak_summary") or {}).get("action") or "").upper()
+                _prizrak_action = str((native.prizrak.summary or {}).get("action") or "").upper()
                 if _prizrak_action in {"LONG", "SHORT"} or not _prizrak_action:
-                    from hunt_core.deliver.confluence_grid import build_confluence_grid, format_grid_telegram
+                    from hunt_core.deliver.confluence_grid import (
+                        build_confluence_grid_native,
+                        format_grid_telegram,
+                    )
 
-                    grid = build_confluence_grid(row)
+                    price = float(native.view.last_price or 0)
+                    grid = build_confluence_grid_native(native.prizrak, native.features, price=price)
                     if grid:
-                        blocks.extend(["", format_grid_telegram(grid, price=float(row.get('price') or 0))])
+                        blocks.extend(["", format_grid_telegram(grid, price=price)])
                 await broadcaster.send_html("\n".join(blocks))
             except Exception as exc:
                 LOG.exception("hunt_analyze_cmd_failed", symbol=sym)

@@ -115,6 +115,6 @@ def test_g71_dead_pre_gate_fields_removed() -> None:
     # pre_gate is never written; pre_gate_open/energy were constant + read by nobody.
     from hunt_core.track.outcome_ledger import build_authority_snapshot
 
-    row = build_authority_snapshot(setup={}, row={}, blockers=None, delivered=False)
+    row = build_authority_snapshot(setup={}, fusion={}, lifecycle={}, blockers=None, delivered=False)
     assert "pre_gate_open" not in row
     assert "pre_gate_energy" not in row

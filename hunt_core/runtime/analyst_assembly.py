@@ -1,23 +1,32 @@
-"""Module 1 Deep tick orchestrator — pinned continuous + on-demand query plane."""
+"""Module 1 Deep tick orchestrator — pinned continuous + on-demand query plane (typed native).
+
+ADR-0004 Phase 9: the deep lane consumes the typed :class:`NativeAnalystView` end-to-end. There is
+no row dict here any more — ``assemble_native_analyst`` composes the view/features/maps/prizrak +
+side-channels, and every function below reads those typed handles. The on-disk deep-tick JSONL is a
+calibration/diagnostics serializer (allowed disk format), not a transport for a legacy row.
+"""
 from __future__ import annotations
 
 import os
-from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
 from hunt_core import serde
 from hunt_core.data.universe import PINNED_SYMBOLS
-from hunt_core.market import HuntCcxtClient
 from hunt_core.paths import ANALYST_TICKS_JSONL
-from hunt_core.data.tick_jsonl import serialize_tick_row
 from hunt_core.prizrak.engines.config import load_analyst_config
 from hunt_core.prizrak.engines.delivery_policy import pick_hero_row
 from hunt_core.prizrak.engines.signal_queue import load_signal_queue
 from hunt_core.runtime.emitter import SignalEmitter
 
+if TYPE_CHECKING:
+    from hunt_core.maps.engine import MapTimeSeriesStore
+    from hunt_core.runtime.native_assembly import NativeAnalystView
+    from hunt_core.view.runtime import MarketRuntime
+
 LOG = structlog.get_logger("hunt.analyst_assembly")
+
 
 def analyst_pinned_interval_s() -> float:
     return float(os.getenv("HUNT_DEEP_PINNED_INTERVAL", "300") or 300)
@@ -31,28 +40,50 @@ def deep_tg_on_change() -> bool:
     }
 
 
-def append_deep_tick_jsonl(row: dict[str, Any]) -> None:
-    from hunt_core.data.jsonl_io import append_jsonl_lines
-    from hunt_core.diagnostics.tick_diagnostics import append_tick_diagnostics
+def _compact_symbol(symbol: str) -> str:
+    """Unified ``BTC/USDT:USDT`` → compact ``BTCUSDT`` for display/logging/cooldown keys."""
+    return symbol.split(":", 1)[0].replace("/", "").upper()
 
-    append_tick_diagnostics(row)
+
+def _serialize_native_tick(native: NativeAnalystView) -> dict[str, Any]:
+    """Project the typed view onto the minimal deep-tick JSONL dict (disk format, not a bridge).
+
+    Emits exactly the keys ``calibration.load_deep_tick_summaries`` reads back off disk
+    (``symbol``/``ts``/``prizrak_summary``/``prizrak_abstain``) plus ``price`` for context. NOT a
+    legacy-row reconstruction: no market/timeframes/lifecycle/mtf keys — those had no consumer here.
+    """
+    return {
+        "symbol": _compact_symbol(native.view.symbol),
+        "ts": native.freshness.get("as_of"),
+        "price": native.view.last_price,
+        "plane": "deep",
+        "tick_path": "analyst_assembly",
+        "prizrak_summary": native.prizrak.summary,
+        "prizrak_abstain": list(native.prizrak.abstain),
+    }
+
+
+def append_deep_tick_jsonl(native: NativeAnalystView) -> None:
+    """Append one deep tick to the calibration/diagnostics JSONL (serialized from typed handles)."""
+    from hunt_core.data.jsonl_io import append_jsonl_lines
+
     ANALYST_TICKS_JSONL.parent.mkdir(parents=True, exist_ok=True)
-    append_jsonl_lines(ANALYST_TICKS_JSONL, [serialize_tick_row(row)])
+    append_jsonl_lines(ANALYST_TICKS_JSONL, [serde.dumps_str(_serialize_native_tick(native))])
 
 
 def material_deep_change(
     symbol: str,
-    row: dict[str, Any],
+    cur: NativeAnalystView,
     *,
-    prev: dict[str, Any] | None,
+    prev: NativeAnalystView | None,
 ) -> bool:
     """True when verdict action/path changed — telemetry only (TG uses lifecycle spine)."""
     _ = symbol
     if prev is None:
         return True
-    _p = prev.get("prizrak_summary")
+    _p = prev.prizrak.summary
     prev_summary = _p if isinstance(_p, dict) else {}
-    _s = row.get("prizrak_summary")
+    _s = cur.prizrak.summary
     summary = _s if isinstance(_s, dict) else {}
     if str(prev_summary.get("action") or "wait") != str(summary.get("action") or "wait"):
         return True
@@ -61,383 +92,136 @@ def material_deep_change(
 
 async def assemble_analyst_tick(
     symbol: str,
-    client: HuntCcxtClient,
+    rt: MarketRuntime,
     *,
-    stagger_ms: int = 200,
-    ws_feed: Any | None = None,
-    allow_low_liquidity: bool = False,
-    snap_tier: str = "full",
-) -> dict[str, Any]:
-    """Full deep snapshot — no hunt fusion, structure-first enrichments.
+    store: MapTimeSeriesStore,
+) -> NativeAnalystView | None:
+    """Full deep snapshot for one pinned/tracked symbol — typed native, fail-loud.
 
-    ``snap_tier="probe_lite"`` — QoS-trimmed REST pack for interactive probes of
-    cold out-of-universe symbols (skips fapi-data series; probe_qos / ADR-0001).
+    Composes the :class:`NativeAnalystView` off the engine runtime (``assemble_native_analyst``),
+    persists it to the in-memory deep store + the calibration JSONL, merges the live calibration
+    sample, and refreshes the pinned signal queue. Returns ``None`` when the symbol has no live
+    view (not in the engine warm-set, or no price) — never a fabricated view.
     """
-    import asyncio
-
-    from hunt_core.prizrak.build import _enrich_analyst_row
-    from hunt_core.domain.config import load_settings
-    from hunt_core.features.prepare import _prepare_frame
-    from hunt_core.features.prepare import min_required_bars
-    from hunt_core.runtime.tick_assembly import snapshot_symbol
-    from hunt_core.data.collect import safe_fetch
+    from hunt_core.runtime.native_assembly import assemble_native_analyst
 
     sym = str(symbol or "").upper()
-    settings = load_settings()
-    minimums = min_required_bars(
-        min_bars_15m=settings.filters.min_bars_15m,
-        min_bars_1h=settings.filters.min_bars_1h,
-        min_bars_4h=settings.filters.min_bars_4h,
-    )
-    owned_plane = None
-    if client is None:
-        from hunt_core.market import create_hunt_market_plane_from_settings
-
-        owned_plane = await create_hunt_market_plane_from_settings(settings)
-        client = owned_plane.client
-    if not getattr(client, "_markets_loaded", False):
-        await client.load_markets()
-
-    premium_all = await safe_fetch(client.fetch_premium_index_all(), context="premium_index_all") or {}
-    await asyncio.sleep(stagger_ms / 1000.0)
-    funding_info_all = await safe_fetch(client.fetch_funding_info_all(), context="funding_info_all") or {}
-    await asyncio.sleep(stagger_ms / 1000.0)
-    exchange_list = await safe_fetch(client.fetch_exchange_symbols(), context="exchange_symbols") or []
-    exchange_by_sym = {r.symbol: r for r in exchange_list}
-    await asyncio.sleep(stagger_ms / 1000.0)
-    ticker_raw = await safe_fetch(client.fetch_ticker_24h(), context="ticker_24h") or []
-    ticker_by_sym = {str(t.get("symbol")): t for t in ticker_raw if t.get("symbol")}
-
-    # Spot companion — reuse the live plane's instance (registered by the watch
-    # loop) or the plane we own; separate 6000/min spot budget, never fapi's.
-    from hunt_core.runtime.tick_state import live_spot_companion
-
-    spot_companion = live_spot_companion()
-    if spot_companion is None and owned_plane is not None:
-        spot_companion = owned_plane.spot
-    if spot_companion is not None:
-        _fut_mid = float((ticker_by_sym.get(sym) or {}).get("last_price") or 0) or None
-        try:
-            # with_taker_flow: the deep/pinned path is per-symbol and low-frequency, so it
-            # can afford the extra spot aggTrades call that the universe tick cannot — this
-            # is the only place the spot taker-flow line is fetched.
-            await spot_companion.refresh_symbols(
-                [sym], futures_mid_by_symbol={sym: _fut_mid}, with_taker_flow=True
-            )
-        except Exception as exc:
-            LOG.debug("deep_spot_refresh_failed", symbol=sym, error=repr(exc))
-
-    btc_work_1h = None
-    btc_work_4h = None
-    btc_work_1m = None
-    btc_df = await safe_fetch(client.fetch_klines_cached("BTCUSDT", "1h", limit=500), context="btc_klines_1h")
-    if btc_df is not None and not btc_df.is_empty():
-        btc_work_1h = _prepare_frame(btc_df)
-    btc_4h = await safe_fetch(client.fetch_klines_cached("BTCUSDT", "4h", limit=250), context="btc_klines_4h")
-    if btc_4h is not None and not btc_4h.is_empty():
-        btc_work_4h = _prepare_frame(btc_4h)
-    btc_1m = await safe_fetch(client.fetch_klines_cached("BTCUSDT", "1m", limit=999), context="btc_klines_1m")
-    if btc_1m is not None and not btc_1m.is_empty():
-        btc_work_1m = _prepare_frame(btc_1m)
-
-    old_full = os.environ.get("HUNT_FULL_PREPARE")
-    os.environ["HUNT_FULL_PREPARE"] = "1"
-    try:
-        row = await snapshot_symbol(
-            client,
-            settings,
-            minimums,
-            sym,
-            watch_mode="both",
-            prev_oi=None,
-            premium_all=premium_all,
-            funding_info_all=funding_info_all,
-            btc_work_1h=btc_work_1h,
-            btc_work_1m=btc_work_1m,
-            exchange_by_sym=exchange_by_sym,
-            ticker_by_sym=ticker_by_sym,
-            ws_feed=ws_feed,
-            spot_companion=spot_companion,
-            stagger_klines_ms=stagger_ms,
-            tier=snap_tier,  # type: ignore[arg-type]  # "probe_lite" = QoS-trimmed cold probe
-            hunt_fusion=False,
-            allow_low_liquidity=allow_low_liquidity,
-        )
-    finally:
-        if old_full is None:
-            os.environ.pop("HUNT_FULL_PREPARE", None)
-        else:
-            os.environ["HUNT_FULL_PREPARE"] = old_full
-
-    if row.get("error"):
-        if owned_plane is not None:
-            await owned_plane.close()
-        return row
-
-    if btc_work_1h is not None:
-        from hunt_core.data.tick_jsonl import btc_market_context
-
-        row["btc_context"] = btc_market_context(btc_work_1h, btc_work_4h=btc_work_4h)
-
-    try:
-        from hunt_core.features.microstructure import build_microstructure_context
-
-        market = dict(row.get("market") or {})
-        market["symbol"] = sym
-        ms_by_dir: dict[str, Any] = {}
-        for direction in ("long", "short"):
-            try:
-                ms_by_dir[direction] = build_microstructure_context({**market, "direction": direction})
-            except Exception as exc:
-                LOG.warning("deep_microstructure_failed", symbol=sym, direction=direction, error=repr(exc))
-        if ms_by_dir:
-            row["microstructure_by_direction"] = ms_by_dir
-    except Exception as exc:
-        LOG.warning("deep_microstructure_pack_failed", symbol=sym, error=repr(exc))
-
-    prizrak_ohlcv_by_tf: dict[str, list[list[float]]] = {}
-    # PrizrakConfig.load() is HOISTED OUT of the try below: a config ValidationError (e.g. a
-    # bad ТФ now rejected by the LadderTF Literal) is not an "ohlcv prep" failure and must not
-    # be swallowed under that log name once per symbol — it should surface loudly. The load is
-    # cached (_instance), so this costs nothing after the first symbol.
-    from hunt_core.prizrak.config import PrizrakConfig
-
-    pcfg = PrizrakConfig.load()
-    try:
-        for tier in (pcfg.intraday, pcfg.meso, pcfg.macro):
-            for tf_name in tier.timeframes:
-                if tf_name in prizrak_ohlcv_by_tf:
-                    continue
-                try:
-                    # Fetch ≥130 bars: candidate/structure logic slices raw[-lookback:]
-                    # (tier.lookback_bars=60 for meso) so this does NOT change their
-                    # behaviour, but interest-zone detection needs ~120 bars to see BOTH
-                    # the support-below and resistance-above structural boxes.
-                    fetch_limit = max(int(tier.lookback_bars), 130)
-                    bars = await safe_fetch(
-                        client.fetch_ohlcv_list_cached(sym, tf_name, limit=fetch_limit),
-                        context=f"prizrak_ohlcv_{tf_name}",
-                    )
-                except Exception as exc:
-                    LOG.warning("prizrak_ohlcv_fetch_failed", symbol=sym, tf=tf_name, error=repr(exc))
-                    bars = None
-                if bars:
-                    # No-lookahead: the list path bypasses finalize_kline_frame's
-                    # incomplete-tail drop, so ccxt's in-progress candle would reach
-                    # the Prizrak detectors (detect_pereprior / confirmation_bodies /
-                    # BOS-CHoCH read bars[-1].close as a CLOSED body) and repaint —
-                    # a mid-bar break counts as a слом, then the bar closes back.
-                    from hunt_core.toolkit.ohlcv import drop_unclosed_ohlcv_tail
-
-                    bars = drop_unclosed_ohlcv_tail(
-                        list(bars), tf_name, exchange=client.exchange
-                    )
-                if bars:
-                    prizrak_ohlcv_by_tf[tf_name] = bars
-                await asyncio.sleep(stagger_ms / 1000.0)
-    except Exception:
-        LOG.exception("prizrak_ohlcv_prep_failed", symbol=sym)
-
-    # Spot weekly ladder — the full-history macro levels Prizrak reads off the
-    # weekly SPOT chart (POL/MATIC разбор: futures window is too short for them).
-    # Context/render only: never feeds prizrak gating. Lazy + 6h-cached in the
-    # companion, so pinned deep ticks re-charge the spot budget ~4x/day/symbol.
-    if spot_companion is not None:
-        try:
-            weekly = await spot_companion.fetch_weekly_ohlcv(sym)
-            if weekly:
-                from hunt_core.prizrak.structure import spot_weekly_ladder
-
-                ladder = spot_weekly_ladder(weekly, price=float(row.get("price") or 0))
-                if ladder.get("below") or ladder.get("above"):
-                    row["spot_weekly_ladder"] = ladder
-        except Exception as exc:
-            LOG.debug("deep_spot_ladder_failed", symbol=sym, error=repr(exc))
-
-    row = _enrich_analyst_row(row, ohlcv_by_tf=prizrak_ohlcv_by_tf or None)
-    LOG.info(
-        "prizrak_enrich_done",
-        symbol=sym,
-        tfs_fetched=sorted(prizrak_ohlcv_by_tf.keys()),
-        summary_action=(row.get("prizrak_summary") or {}).get("action"),
-        candidates=len(row.get("prizrak_signals") or []),
-    )
-    try:
-        from hunt_core.toolkit.manipulation_fusion import stamp_fusion_on_row
-
-        stamp_fusion_on_row(row)
-    except Exception as exc:
-        LOG.debug("deep_manipulation_fusion_skipped", symbol=sym, error=repr(exc))
-
-    # PrizrakTrade (hunt_core/prizrak/, wired in _enrich_analyst_row above) is the
-    # sole decision authority.
-    row["plane"] = "deep"
-    row["_analyst"] = True
-    row["tick_path"] = "analyst_assembly"
-
-
-    now = datetime.now(UTC)
-    row["as_of"] = now.isoformat()
-    dom_ts = None
-    _cx = row.get("cross_microstructure")
-    cx = _cx if isinstance(_cx, dict) else {}
-    _book = cx.get("book_walls")
-    walls = _book if isinstance(_book, dict) else row.get("book_walls")
-    if isinstance(walls, dict) and walls.get("fetched_at"):
-        dom_ts = walls.get("fetched_at")
-    row_ts = row.get("ts")
-    try:
-        tick_dt = datetime.fromisoformat(str(row_ts).replace("Z", "+00:00")) if row_ts else now
-        if tick_dt.tzinfo is None:
-            tick_dt = tick_dt.replace(tzinfo=UTC)
-    except (TypeError, ValueError):
-        LOG.warning("analyst_tick_dt_parse_failed", symbol=sym, row_ts=row_ts)
-        tick_dt = now
-    dom_age_s: float | None = None
-    if dom_ts:
-        try:
-            dom_dt = datetime.fromisoformat(str(dom_ts).replace("Z", "+00:00"))
-            if dom_dt.tzinfo is None:
-                dom_dt = dom_dt.replace(tzinfo=UTC)
-            dom_age_s = (now - dom_dt).total_seconds()
-        except (TypeError, ValueError):
-            LOG.warning("analyst_dom_ts_parse_failed", symbol=sym, dom_ts=dom_ts)
-            dom_age_s = (now - tick_dt).total_seconds()
-    else:
-        dom_age_s = (now - tick_dt).total_seconds()
-    row["freshness"] = {
-        "as_of": row["as_of"],
-        "tick_age_s": round((now - tick_dt).total_seconds(), 1),
-        "dom_age_s": round(dom_age_s, 1) if dom_age_s is not None else None,
-    }
-    # Telemetry for the DOM actionability-staleness calibration (#6). This is the
-    # SAME dom_age_s that _sections.py flags against HUNT_DOM_ACTIONABLE_MAX_AGE_S,
-    # so the observed distribution here is exactly the population the threshold
-    # governs. has_dom_ts=1 marks a genuine microstructure fetched_at (the only
-    # rows where staleness is meaningful); =0 is the tick-age fallback (fresh DOM,
-    # no carried snapshot). Greppable as `dom_age_obs` → feed a percentile (p95),
-    # filtered to has_dom_ts=1, into the default. Line kept out of the hot path.
-    if dom_age_s is not None:
-        LOG.info(
-            "dom_age_obs | symbol=%s dom_age_s=%.1f has_dom_ts=%d",
-            sym,
-            dom_age_s,
-            1 if dom_ts else 0,
-        )
-
-    from hunt_core.toolkit.forecast import stamp_forecasts_on_row
-
-    stamp_forecasts_on_row(row)
+    native = await assemble_native_analyst(rt, sym, store=store)
+    if native is None:
+        return None
 
     from hunt_core.runtime.tick_state import deep_query_store
 
-    deep_query_store().put(sym, row)
-    append_deep_tick_jsonl(row)
-    try:
-        from hunt_core.prizrak.engines.calibration import (
-            CALIBRATION_JSON,
-            merge_live_sample,
-            write_calibration_rollup,
-        )
+    deep_query_store().put(sym, native)
+    append_deep_tick_jsonl(native)
 
-        summary = row.get("prizrak_summary")
-        if isinstance(summary, dict):
+    summary = native.prizrak.summary
+    if isinstance(summary, dict):
+        try:
+            from hunt_core.prizrak.engines.calibration import (
+                CALIBRATION_JSON,
+                merge_live_sample,
+                write_calibration_rollup,
+            )
+
             if CALIBRATION_JSON.is_file():
                 report = serde.loads(CALIBRATION_JSON.read_text(encoding="utf-8"))
                 report = merge_live_sample(report, summary, sym)
-                CALIBRATION_JSON.write_text(
-                    serde.dumps_str(report, indent=True), encoding="utf-8"
-                )
+                CALIBRATION_JSON.write_text(serde.dumps_str(report, indent=True), encoding="utf-8")
             else:
                 write_calibration_rollup(limit=200)
-    except Exception as exc:
-        LOG.debug("prizrak_calibration_skip", symbol=sym, error=repr(exc))
+        except Exception as exc:
+            LOG.debug("prizrak_calibration_skip", symbol=sym, error=repr(exc))
+
     try:
-        from hunt_core.prizrak.engines.config import load_analyst_config
         from hunt_core.prizrak.engines.signal_queue import refresh_pinned_signal_queue
 
         v2cfg = load_analyst_config()
         if getattr(v2cfg, "signal_queue_enabled", True):
-            row["signal_queue"] = refresh_pinned_signal_queue(sym, row, top_n=v2cfg.signal_queue_top_n)
+            refresh_pinned_signal_queue(sym, native, top_n=v2cfg.signal_queue_top_n)
     except Exception as exc:
         LOG.debug("prizrak_signal_queue_skip", symbol=sym, error=repr(exc))
-    if owned_plane is not None:
-        await owned_plane.close()
-    return row
+
+    LOG.info(
+        "prizrak_enrich_done",
+        symbol=sym,
+        summary_action=(summary or {}).get("action") if isinstance(summary, dict) else None,
+        candidates=len(native.prizrak.signals),
+    )
+    return native
 
 
 async def send_analyst_change_telegram(
     broadcaster: Any,
-    row: dict[str, Any],
+    native: NativeAnalystView,
     *,
-    cycle_peers: list[dict[str, Any]] | None = None,
+    cycle_peers: list[NativeAnalystView] | None = None,
     lifecycle_event: str = "signal",
 ) -> bool:
-    """Send deep analysis TG when material change detected."""
+    """Send the deep-analysis Telegram card for an emitted setup (LONG/SHORT only)."""
     import html
 
-    from hunt_core.deliver.confluence_grid import build_confluence_grid, format_grid_telegram
     from hunt_core.deliver._sections import format_intraday_maps_telegram
+    from hunt_core.deliver.confluence_grid import build_confluence_grid_native, format_grid_telegram
 
-    sym = str(row.get("symbol") or "").upper()
-    if row.get("error"):
-        return False
-    _summ = row.get("prizrak_summary")
+    sym = _compact_symbol(native.view.symbol)
+    _summ = native.prizrak.summary
     summary = _summ if isinstance(_summ, dict) else {}
     action = str(summary.get("action") or "wait").lower()
     if action not in {"long", "short"}:
         LOG.info("analyst_pinned_tg_skipped_wait", symbol=sym, action=action)
         return False
+
     from hunt_core.prizrak.arbiter import evaluate_deep_delivery
 
-    verdict = summary if summary else {}
-    ok, blockers = evaluate_deep_delivery(symbol=sym, verdict=verdict)
+    ok, blockers = evaluate_deep_delivery(symbol=sym, verdict=summary)
     if not ok:
         LOG.info("analyst_pinned_tg_skipped_arbiter", symbol=sym, blockers=blockers)
         return False
+
+    price = float(native.view.last_price or 0)
     blocks: list[str] = []
     if lifecycle_event == "activated":
-        sym_label = str(row.get("symbol") or "").upper().replace("USDT", "-USDT")
-        _summ2 = row.get("prizrak_summary")
-        summary = _summ2 if isinstance(_summ2, dict) else {}
-        # rr_primary is None whenever geometry is incomplete (orchestrator.py:653),
-        # so an unguarded f-string put a literal «R:R (от входа) None» at the top of
-        # the most action-inducing message. Drop the clause instead.
+        sym_label = sym.replace("USDT", "-USDT")
+        # rr_primary is None whenever geometry is incomplete (orchestrator.py:653), so an
+        # unguarded f-string put a literal «R:R (от входа) None» at the top of the most
+        # action-inducing message. Drop the clause instead.
         rr = summary.get("rr_primary")
         head = f"✅ <b>Активация</b> · {html.escape(sym_label)}"
         if isinstance(rr, (int, float)):
             head += f" · R:R (от входа) <code>{float(rr):.2f}</code>"
         blocks.append(head)
-    from hunt_core.prizrak.build import build_deep_report as _build_deep_report
-    from hunt_core.prizrak.format_telegram import format_deep_analysis_telegram as _fmt_deep
 
-    analysis = _build_deep_report(row, include_watch_appendix=False)
-    blocks.append(_fmt_deep(analysis))
-    grid = build_confluence_grid(row)
+    from hunt_core.prizrak.build import build_deep_report
+    from hunt_core.prizrak.format_telegram import format_deep_analysis_telegram
+
+    analysis = build_deep_report(native, include_watch_appendix=False)
+    blocks.append(format_deep_analysis_telegram(analysis))
+
+    grid = build_confluence_grid_native(native.prizrak, native.features, price=price)
     if grid:
-        blocks.extend(["", format_grid_telegram(grid, price=float(row.get('price') or 0))])
-    maps_block = format_intraday_maps_telegram(row)
+        blocks.extend(["", format_grid_telegram(grid, price=price)])
+    maps_block = format_intraday_maps_telegram(native)
     if maps_block:
         blocks.extend(["", maps_block])
-    from hunt_core.prizrak.engines.config import load_analyst_config
+
     from hunt_core.prizrak.engines.delivery_policy import format_cycle_peers_footer
     from hunt_core.prizrak.engines.signal_queue import format_queue_telegram
     from hunt_core.runtime.query_service import format_row_freshness_footer
 
     v2cfg = load_analyst_config()
     if cycle_peers:
-        peer_block = format_cycle_peers_footer(row, cycle_peers)
+        peer_block = format_cycle_peers_footer(native, cycle_peers)
         if peer_block:
             blocks.extend(["", peer_block])
     if v2cfg.signal_queue_tg_footer:
-        qblock = format_queue_telegram(row.get("signal_queue"))
+        # No arg → reads the freshest persisted queue (refresh_pinned_signal_queue wrote it).
+        qblock = format_queue_telegram()
         if qblock:
             blocks.extend(["", qblock])
-    # As-of stamp, last line. The broadcaster buffers on circuit-open and replays
-    # later, so a pinned card can land long after it was built — without this the
-    # reader has no way to tell. (The probe path appends its own footer via
-    # format_freshness_footer and never reaches this code, so no duplication.)
-    blocks.append(format_row_freshness_footer(row, source="analyst tick"))
+    # As-of stamp, last line. The broadcaster buffers on circuit-open and replays later, so a
+    # pinned card can land long after it was built — without this the reader can't tell.
+    blocks.append(format_row_freshness_footer(native, source="analyst tick"))
     result = await broadcaster.send_html("\n".join(blocks))
     if result.status == "sent":
         LOG.info("analyst_pinned_tg_sent", symbol=sym, message_id=result.message_id, plane="deep")
@@ -446,22 +230,21 @@ async def send_analyst_change_telegram(
     return False
 
 
-def _prizrak_row_variants(row: dict[str, Any]) -> list[tuple[dict[str, Any], str]]:
-    """Expand a pinned row into one lifecycle variant per Prizrak setup_kind.
+def _prizrak_row_variants(native: NativeAnalystView) -> list[tuple[NativeAnalystView, str]]:
+    """Expand a pinned view into one lifecycle variant per Prizrak setup_kind.
 
-    Prizrak produces 0..N independent candidates per tick (``prizrak_signals``);
-    each setup_kind (level_core / pp_break / trap_flip / level_intraday_scalp /
-    zone_target_deep …) is a distinct thesis and should get its own Telegram
-    message — the lifecycle spine dedups by setup_id so re-runs don't spam. Each
-    variant is a shallow copy of the row with ``prizrak_summary`` swapped to the
-    strongest candidate of that setup_kind. Falls back to the row as-is when
-    there are no candidates (single-summary behavior preserved).
+    Prizrak produces 0..N independent candidates per tick (``prizrak.signals``); each setup_kind
+    (level_core / pp_break / trap_flip / level_intraday_scalp / zone_target_deep …) is a distinct
+    thesis and should get its own Telegram message — the lifecycle spine dedups by setup_id so
+    re-runs don't spam. Each variant swaps ``prizrak.summary`` to the strongest candidate of that
+    setup_kind (``PrizrakOutput`` is frozen → ``model_copy``; the view is a NamedTuple → ``_replace``).
+    Falls back to the view as-is when there is ≤1 candidate (single-summary behaviour preserved).
     """
-    sigs = row.get("prizrak_signals")
-    if not isinstance(sigs, list) or len(sigs) <= 1:
-        _summ3 = row.get("prizrak_summary")
-        summary = _summ3 if isinstance(_summ3, dict) else {}
-        return [(row, str(summary.get("setup_kind") or "deep"))]
+    sigs = native.prizrak.signals
+    if len(sigs) <= 1:
+        _summ = native.prizrak.summary
+        summary = _summ if isinstance(_summ, dict) else {}
+        return [(native, str(summary.get("setup_kind") or "deep"))]
     best_by_kind: dict[str, dict[str, Any]] = {}
     for c in sigs:
         if not isinstance(c, dict):
@@ -470,47 +253,51 @@ def _prizrak_row_variants(row: dict[str, Any]) -> list[tuple[dict[str, Any], str
         cur = best_by_kind.get(kind)
         if cur is None or float(c.get("strength") or 0) > float(cur.get("strength") or 0):
             best_by_kind[kind] = c
-    variants: list[tuple[dict[str, Any], str]] = []
+    variants: list[tuple[NativeAnalystView, str]] = []
     for kind, cand in best_by_kind.items():
-        variant = dict(row)
-        variant["prizrak_summary"] = cand
+        variant = native._replace(prizrak=native.prizrak.model_copy(update={"summary": cand}))
         variants.append((variant, kind))
     return variants
 
 
 async def analyst_pinned_loop(
-    client: HuntCcxtClient,
+    rt: MarketRuntime | None,
     broadcaster: Any | None,
     *,
     interval_s: float | None = None,
     send_telegram: bool = True,
-    ws_feed: Any | None = None,
+    store: MapTimeSeriesStore | None = None,
 ) -> None:
-    """Background continuous deep analysis for pinned anchors."""
-    from hunt_core.runtime.state import should_stop
-
+    """Background continuous deep analysis for pinned anchors (engine-native transport)."""
     import asyncio
+
+    from hunt_core.maps.engine import get_map_store
+    from hunt_core.runtime.state import should_stop
+    from hunt_core.runtime.tick_state import live_market_runtime
+
+    rt = rt or live_market_runtime()
+    if rt is None:
+        LOG.error("analyst_pinned_loop_disabled | engine runtime unavailable")
+        return
+    store = store or get_map_store()
 
     interval = interval_s if interval_s is not None else analyst_pinned_interval_s()
     LOG.info("analyst_pinned_loop_start", symbols=list(PINNED_SYMBOLS), interval_s=interval)
     while not should_stop():
         v2cfg = load_analyst_config()
         emitter = SignalEmitter()
-        lifecycle_candidates: list[tuple[dict[str, Any], Any, str]] = []
+        lifecycle_candidates: list[tuple[NativeAnalystView, Any, str]] = []
         for sym in PINNED_SYMBOLS:
             if should_stop():
                 break
             try:
-                row = await assemble_analyst_tick(sym, client, ws_feed=ws_feed)
-                if row.get("error"):
-                    LOG.info("analyst_pinned_tick_error", symbol=sym, error=row.get("error"))
+                native = await assemble_analyst_tick(sym, rt, store=store)
+                if native is None:
+                    LOG.info("analyst_pinned_tick_not_ready", symbol=sym)
                     continue
                 # Lifecycle spine is the SOLE emission gate — dedup/cooldown/silence all live in
-                # process_lifecycle_tick. No legacy fingerprint pre-gate: it would suppress real
-                # forming→activated advances (price entering the zone without a fingerprint flip).
-                # A7: one lifecycle candidate per Prizrak setup_kind (independent
-                # signals), not just the single best summary.
-                for variant, kind in _prizrak_row_variants(row):
+                # process_lifecycle_tick. A7: one lifecycle candidate per Prizrak setup_kind.
+                for variant, kind in _prizrak_row_variants(native):
                     transition = emitter.preview_deep_row(variant)
                     if transition.event != "none":
                         lifecycle_candidates.append((variant, transition, kind))
@@ -521,25 +308,28 @@ async def analyst_pinned_loop(
             from hunt_core.prizrak.arbiter import deep_cooldown_ok, mark_deep_sent
 
             queue = load_signal_queue()
-            rows_only = [r for r, _, _ in lifecycle_candidates]
+            natives_only = [n for n, _, _ in lifecycle_candidates]
             if v2cfg.signal_queue_tg_batch and len(lifecycle_candidates) > 1:
-                # Batch mode: collapse to a single hero message (config-controlled,
-                # unchanged). Multi-emission (one message per setup_kind) is the
-                # non-batch path below.
-                hero = pick_hero_row(rows_only, queue)
-                to_send = [(hero, tr, k) for r, tr, k in lifecycle_candidates if r is hero] if hero else lifecycle_candidates[:1]
+                # Batch mode: collapse to a single hero message (config-controlled). Multi-emission
+                # (one message per setup_kind) is the non-batch path below.
+                hero = pick_hero_row(natives_only, queue)
+                to_send = (
+                    [(hero, tr, k) for n, tr, k in lifecycle_candidates if n is hero]
+                    if hero is not None
+                    else lifecycle_candidates[:1]
+                )
             else:
                 to_send = lifecycle_candidates
-            for row, transition, kind in to_send:
-                sym = str(row.get("symbol") or "").upper()
-                # Per-(symbol, setup_kind) cooldown so distinct theses on one
-                # symbol each get through, but the same thesis can't spam.
+            for native, transition, kind in to_send:
+                sym = _compact_symbol(native.view.symbol)
+                # Per-(symbol, setup_kind) cooldown so distinct theses on one symbol each get
+                # through, but the same thesis can't spam.
                 cooldown_key = f"{sym}:{kind}"
                 if deep_cooldown_ok(cooldown_key):
                     if await emitter.emit_deep(
                         broadcaster,
-                        row,
-                        cycle_peers=rows_only,
+                        native,
+                        cycle_peers=natives_only,
                         transition=transition,
                     ):
                         mark_deep_sent(cooldown_key)
@@ -551,9 +341,10 @@ async def analyst_pinned_loop(
 
 
 __all__ = [
-    "append_deep_tick_jsonl",
-    "assemble_analyst_tick",
     "analyst_pinned_interval_s",
     "analyst_pinned_loop",
+    "append_deep_tick_jsonl",
+    "assemble_analyst_tick",
     "material_deep_change",
+    "send_analyst_change_telegram",
 ]

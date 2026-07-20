@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from hunt_core import serde
-from hunt_core.paths import ANALYST_TICKS_JSONL, HUNT_SCAN_JSONL
+from hunt_core.paths import HUNT_SCAN_JSONL
+
+if TYPE_CHECKING:
+    from hunt_core.runtime.native_assembly import NativeAnalystView
 
 
 class _TickStoreBase:
@@ -81,21 +84,49 @@ class HuntScanStore(_TickStoreBase):
         super().__init__(jsonl_path=HUNT_SCAN_JSONL)
 
 
-class DeepQueryStore(_TickStoreBase):
-    """Module 1 Deep — pinned continuous + on-demand rows (plane=deep)."""
+class DeepQueryStore:
+    """Module 1 Deep — pinned continuous + on-demand typed views (plane=deep).
+
+    ADR-0004 Phase 9: holds the typed :class:`NativeAnalystView` in memory, NOT the untyped
+    row dict. There is deliberately NO JSONL fallback here: the on-disk deep-tick JSONL
+    (``append_deep_tick_jsonl``) is a calibration/diagnostics serializer read by
+    ``calibration.load_deep_tick_summaries`` — it cannot be faithfully rehydrated back into the
+    typed handles (that would be a banned legacy-row reconstruction), so a cold ``get`` after a
+    restart returns ``None`` and the caller re-derives a live view (fail-loud, no stale replay).
+    """
 
     def __init__(self) -> None:
-        super().__init__(jsonl_path=ANALYST_TICKS_JSONL)
+        self._views: dict[str, NativeAnalystView] = {}
+
+    def put(self, symbol: str, native: NativeAnalystView) -> None:
+        sym = str(symbol or "").upper()
+        if sym:
+            self._views[sym] = native
+
+    def get(self, symbol: str) -> NativeAnalystView | None:
+        return self._views.get(str(symbol or "").upper())
+
+    def resolve(self, symbol: str, *, jsonl_fallback: bool = True) -> NativeAnalystView | None:
+        """In-memory typed view for ``symbol`` (``jsonl_fallback`` is inert — see class docstring)."""
+        _ = jsonl_fallback
+        return self.get(symbol)
 
 
 class LastTickStore:
-    """Facade — routes by plane; hunt resolve for legacy callers on dynamic symbols."""
+    """Facade — routes by plane; hunt resolve for legacy callers on dynamic symbols.
+
+    A pinned symbol resolves to the typed deep :class:`NativeAnalystView`; a dynamic symbol
+    resolves to the Module-2 scanner dict row. Legacy callers guard with ``isinstance(x, dict)``,
+    so a typed deep hit reads as "not a legacy row" and they fall through to their live path.
+    """
 
     def __init__(self) -> None:
         self.hunt = HuntScanStore()
         self.deep = DeepQueryStore()
 
-    def resolve(self, symbol: str, *, jsonl_fallback: bool = True) -> dict[str, Any] | None:
+    def resolve(
+        self, symbol: str, *, jsonl_fallback: bool = True
+    ) -> dict[str, Any] | NativeAnalystView | None:
         from hunt_core.data.universe import PINNED_SYMBOLS
 
         sym = symbol.upper()

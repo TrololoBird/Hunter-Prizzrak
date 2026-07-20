@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import TYPE_CHECKING
 
 import structlog
 
@@ -15,6 +15,10 @@ from hunt_core.runtime.analyst_assembly import (
 )
 from hunt_core.runtime.tick_state import deep_query_store
 
+if TYPE_CHECKING:
+    from hunt_core.maps.engine import MapTimeSeriesStore
+    from hunt_core.view.runtime import MarketRuntime
+
 LOG = structlog.get_logger("hunt.pinned_brief")
 
 
@@ -26,22 +30,32 @@ def pinned_startup_brief_enabled() -> bool:
 async def deliver_pinned_startup_brief(
     broadcaster: TelegramBroadcaster,
     *,
-    client: Any,
-    stagger_ms: int = 250,
+    rt: MarketRuntime | None = None,
+    store: MapTimeSeriesStore | None = None,
 ) -> int:
-    """Legacy startup burst — disabled by default; use analyst_pinned_loop instead."""
+    """Legacy startup burst — disabled by default; use ``analyst_pinned_loop`` instead."""
     if not pinned_startup_brief_enabled():
         LOG.info("pinned_startup_brief_skipped", reason="disabled")
         return 0
+
+    from hunt_core.maps.engine import get_map_store
+    from hunt_core.runtime.tick_state import live_market_runtime
+
+    rt = rt or live_market_runtime()
+    if rt is None:
+        LOG.info("pinned_startup_brief_skipped", reason="engine_unavailable")
+        return 0
+    store = store or get_map_store()
+
     sent = 0
     for sym in PINNED_SYMBOLS:
         try:
             prev = deep_query_store().get(sym)
-            row = await assemble_analyst_tick(sym, client, stagger_ms=stagger_ms)
-            if row.get("error"):
+            native = await assemble_analyst_tick(sym, rt, store=store)
+            if native is None:
                 continue
-            if material_deep_change(sym, row, prev=prev):
-                if await send_analyst_change_telegram(broadcaster, row):
+            if material_deep_change(sym, native, prev=prev):
+                if await send_analyst_change_telegram(broadcaster, native):
                     sent += 1
         except Exception as exc:
             LOG.warning("pinned_brief_probe_failed", symbol=sym, error=repr(exc))

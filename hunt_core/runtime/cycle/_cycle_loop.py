@@ -504,14 +504,19 @@ async def run_loop(
         LOG.info("hunt_telegram_commands_scheduled")
 
     deep_task: asyncio.Task[None] | None = None
-    if not once and os.getenv("HUNT_DEEP_PINNED_LOOP", "1").strip().lower() not in {"0", "false", "no"}:
+    _deep_enabled = os.getenv("HUNT_DEEP_PINNED_LOOP", "1").strip().lower() not in {"0", "false", "no"}
+    if not once and _deep_enabled and market_runtime is not None:
+        # ADR-0004 Phase 9: the deep/analyst lane runs on the engine-native MarketRuntime (typed
+        # MarketView per symbol), not the legacy client/ws_feed. No engine → the loop is skipped.
         from hunt_core.runtime.analyst_assembly import analyst_pinned_loop
 
         deep_task = asyncio.create_task(
-            analyst_pinned_loop(client, broadcaster, send_telegram=send_telegram, ws_feed=ws_feed),
+            analyst_pinned_loop(market_runtime, broadcaster, send_telegram=send_telegram),
             name="analyst_pinned_loop",
         )
         LOG.info("analyst_pinned_loop_scheduled")
+    elif not once and _deep_enabled and market_runtime is None:
+        LOG.error("analyst_pinned_loop_disabled | engine runtime unavailable")
 
     path_backfill_task: asyncio.Task[None] | None = None
     if not once:
@@ -1063,7 +1068,7 @@ async def run_loop(
                     if pinned_startup_brief_enabled():
                         try:
                             n_brief = await deliver_pinned_startup_brief(
-                                broadcaster, client=client
+                                broadcaster, rt=market_runtime
                             )
                             LOG.info("watch_pinned_startup_brief", sent=n_brief)
                         except Exception:

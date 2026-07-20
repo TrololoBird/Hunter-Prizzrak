@@ -6,11 +6,14 @@ import json  # noqa: TID251 — deliberate: stable content-hash canonical bytes 
 import structlog
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from hunt_core import serde
 from hunt_core.paths import SESSION_DIR
 from hunt_core.signals.model import Signal, SignalModule, SignalState
+
+if TYPE_CHECKING:
+    from hunt_core.runtime.native_assembly import NativeAnalystView
 
 # Lifecycle phases that count as "mid-move" (already running, not forming). Spine-owned:
 # levels/ read this from scanner/detect/delivery_support, a spine→strategy inversion.
@@ -51,18 +54,23 @@ def compute_setup_id(
     return digest[:16]
 
 
-def _thesis_from_row(row: dict[str, Any], summary: dict[str, Any]) -> tuple[str, str, float]:
+def _compact_symbol(symbol: str) -> str:
+    """Unified ``BTC/USDT:USDT`` → compact ``BTCUSDT``."""
+    return symbol.split(":", 1)[0].replace("/", "").upper()
+
+
+def _thesis_from_summary(summary: dict[str, Any], last_price: float) -> tuple[str, str, float]:
     direction = str(summary.get("action") or "wait").lower()
     thesis_kind = ""
     anchor = summary.get("catalyst_level")
     if anchor is None:
         lo = float(summary.get("entry_lo") or 0)
         hi = float(summary.get("entry_hi") or 0)
-        anchor = (lo + hi) / 2 if lo > 0 and hi > 0 else float(row.get("price") or 0)
+        anchor = (lo + hi) / 2 if lo > 0 and hi > 0 else float(last_price or 0)
     try:
         anchor_f = float(anchor)
     except (TypeError, ValueError):
-        anchor_f = float(row.get("price") or 0)
+        anchor_f = float(last_price or 0)
     thesis = str(summary.get("path") or thesis_kind or direction)
     return direction, thesis_kind or thesis, anchor_f
 
@@ -130,28 +138,37 @@ class SignalLifecycleStore:
 
 
 def process_lifecycle_tick(
-    row: dict[str, Any],
+    native: NativeAnalystView,
     *,
     module: SignalModule = 1,
     store: SignalLifecycleStore | None = None,
     commit: bool = True,
 ) -> LifecycleTransition:
-    """Evaluate one tick — emit only on real setup state advance; WAIT → silence."""
-    summary_raw = row.get("prizrak_summary")
+    """Evaluate one typed tick — emit only on real setup state advance; WAIT → silence."""
+    summary_raw = native.prizrak.summary
     summary: dict[str, Any] = summary_raw if isinstance(summary_raw, dict) else {}
     action = str(summary.get("action") or "wait").lower()
-    sym = str(row.get("symbol") or "").upper()
+    sym = _compact_symbol(native.view.symbol)
+    last_price = float(native.view.last_price or 0)
 
     if action not in {"long", "short"}:
         return LifecycleTransition(event="none", suppress_reason="wait_or_no_setup")
 
     from hunt_core.signals.price_sanity import price_sanity_check
 
-    ok_price, price_reason = price_sanity_check(row)
+    # Independent quote sanity: the VP POC (typed ``MapBundle.volume_profile.primary_poc``) is the
+    # one structural reference that ever resolved on this lane; absent → the gate is inert (no
+    # fabricated reference, I-6).
+    refs: list[float] = []
+    if native.maps is not None and native.maps.volume_profile is not None:
+        poc = native.maps.volume_profile.primary_poc
+        if isinstance(poc, (int, float)) and poc > 0:
+            refs.append(float(poc))
+    ok_price, price_reason = price_sanity_check(last_price, refs=refs)
     if not ok_price:
         return LifecycleTransition(event="none", suppress_reason=f"price_sanity:{price_reason}")
 
-    direction, thesis_kind, anchor = _thesis_from_row(row, summary)
+    direction, thesis_kind, anchor = _thesis_from_summary(summary, last_price)
     setup_id = compute_setup_id(thesis_kind=thesis_kind, anchor_level=anchor, direction=direction)
     store = store or SignalLifecycleStore.load()
 
@@ -194,20 +211,8 @@ def process_lifecycle_tick(
         state=now_state,
         provenance={"path": summary.get("path"), "strength": summary.get("strength")},
     )
-    # Attach scenario metadata when available
-    scenario = row.get("scenario")
-    if scenario is not None:
-        sc_setup_id = getattr(scenario, "setup_id", "")
-        sc_lifecycle = getattr(scenario, "lifecycle", "")
-        if sc_setup_id:
-            signal.provenance["scenario_setup_id"] = sc_setup_id
-        if sc_lifecycle:
-            signal.provenance["scenario_lifecycle"] = sc_lifecycle
-        _LOG.info(
-            "signal %s/%s: scenario attached (setup_id=%s, lifecycle=%s)",
-            sym, setup_id, sc_setup_id, sc_lifecycle,
-        )
-
+    # Scenario metadata: no typed native producer yet (ADR-0004 gap) → not attached (I-6: a
+    # missing scenario stays absent, never fabricated).
     if commit:
         store.record_emit(signal, event=event)
         store.save()

@@ -64,23 +64,24 @@ def test_no_sink_installed_is_noop() -> None:
 
 
 def test_reason_line_rr_is_human_readable() -> None:
-    row = {"prizrak_abstain": [{"reason": "rr_below_floor", "rr": 2.3, "min_rr": 3.0,
-                                "stop": 0.412, "tp1": 0.455, "buffer_pct": 1.8}]}
-    line = _abstain_reason_line(row)
+    # _abstain_reason_line takes the abstain reasons list directly (PrizrakOutput.abstain).
+    abstain = [{"reason": "rr_below_floor", "rr": 2.3, "min_rr": 3.0,
+                "stop": 0.412, "tp1": 0.455, "buffer_pct": 1.8}]
+    line = _abstain_reason_line(abstain)
     assert line is not None and "RR 2.3 < 3.0" in line and "TP1" in line
 
 
 def test_reason_line_priority_rr_over_veto() -> None:
     """RR (почти прошёл) информативнее вето — печатается он."""
-    row = {"prizrak_abstain": [
+    abstain = [
         {"reason": "htf_counter_trend_no_slom", "htf_bias": "short"},
         {"reason": "rr_below_floor", "rr": 2.8, "min_rr": 3.0, "stop": 1.0, "tp1": 1.2, "buffer_pct": 2.0},
-    ]}
-    assert "RR 2.8" in (_abstain_reason_line(row) or "")
+    ]
+    assert "RR 2.8" in (_abstain_reason_line(abstain) or "")
 
 
 def test_reason_line_empty_is_none() -> None:
-    assert _abstain_reason_line({}) is None
+    assert _abstain_reason_line([]) is None
 
 
 def test_calibration_revives_from_wait_ticks() -> None:

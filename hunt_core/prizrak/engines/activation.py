@@ -19,8 +19,8 @@ LOG = structlog.get_logger(__name__)
 ActivationState = Literal["idle", "near_entry", "in_entry_zone", "near_catalyst", "at_catalyst"]
 
 
-def assess_activation(row: dict[str, Any], summary: dict[str, Any]) -> dict[str, Any]:
-    price = safe_float(row.get("price"))
+def assess_activation(price: float, summary: dict[str, Any]) -> dict[str, Any]:
+    price = safe_float(price)
     if price <= 0:
         return {"state": "idle", "dist_catalyst_pct": None, "dist_entry_pct": None, "detail": ""}
 

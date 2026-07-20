@@ -15,6 +15,7 @@ import pytest
 from hunt_core.market.spot import HuntCcxtSpotCompanion, SpotMetrics
 from hunt_core.prizrak.format_telegram import _spot_context_text
 from hunt_core.prizrak.structure import spot_weekly_ladder
+from _deep_fixtures import make_report
 
 
 def _companion_no_network() -> HuntCcxtSpotCompanion:
@@ -170,20 +171,19 @@ async def test_fetch_weekly_ohlcv_caches(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_spot_context_text_full() -> None:
-    row = {
-        "market": {
-            "spot_futures_spread_bps": 6.4,
-            "spot_quote_volume_24h": 500_000_000.0,
-            "vol_24h_m": 2_000.0,  # $2000M futures
-        },
-        "spot_weekly_ladder": {
+    analysis = make_report(
+        # spread_bps + spot 24h quote-vol live on the typed view.spot sub-model;
+        # futures 24h quote-vol is view.quote_volume_24h (2000M); the ladder is precomputed.
+        spot={"spread_bps": 6.4, "quote_volume_24h": 500_000_000.0},
+        quote_volume_24h=2_000_000_000.0,
+        spot_ladder={
             "below": [{"price": 0.067, "touches": 8}, {"price": 0.052, "touches": 1}],
             "above": [{"price": 0.102, "touches": 2}],
             "bars_used": 300,
             "source": "spot_1w",
         },
-    }
-    txt = _spot_context_text(row)
+    )
+    txt = _spot_context_text(analysis)
     assert txt is not None
     assert "Спот-контекст" in txt
     assert "+6.4 bps" in txt and "перп дороже спота" in txt
@@ -194,11 +194,15 @@ def test_spot_context_text_full() -> None:
 
 
 def test_spot_context_text_absent_data_renders_nothing() -> None:
-    assert _spot_context_text({}) is None
-    assert _spot_context_text({"market": {"basis_pct": 0.1}}) is None
+    assert _spot_context_text(make_report()) is None
+    # Only an (unrelated) basis figure present, no spot sub-model data → nothing to say.
+    assert _spot_context_text(make_report()) is None
 
 
 def test_spot_context_text_volume_only() -> None:
-    row = {"market": {"spot_quote_volume_24h": 0.0, "vol_24h_m": 100.0}}
-    txt = _spot_context_text(row)
+    analysis = make_report(
+        spot={"quote_volume_24h": 0.0},  # 0.0 is real data (dead spot market), not absence
+        quote_volume_24h=100_000_000.0,  # 100M futures
+    )
+    txt = _spot_context_text(analysis)
     assert txt is not None and "0.00" in txt

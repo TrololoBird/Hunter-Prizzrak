@@ -7,6 +7,7 @@ reaction/добор with a WIDE stop behind the whole HTF structure — not a se
 from __future__ import annotations
 
 from hunt_core.prizrak.build import AnalystReport
+from _deep_fixtures import report_from_row
 
 
 def _report(bias: str) -> AnalystReport:
@@ -19,7 +20,7 @@ def _report(bias: str) -> AnalystReport:
         },
         "prizrak_structure": {"htf_bias": {"bias": bias}},
     }
-    return AnalystReport(symbol="BTCUSDT", row=row, fusion={}, forecasts={}, would_deliver=False)
+    return report_from_row(row)
 
 
 def test_counter_bias_long_framed_as_reaction_dobor() -> None:

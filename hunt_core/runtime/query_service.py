@@ -1,55 +1,42 @@
-"""Query plane — read materialized watch state and explain (QueryResult ≠ DeliveryGate).
+"""Query plane — read materialized deep state and explain (typed :class:`NativeAnalystView`).
 
-TG ``/signal`` and ``_dev/probe_delivery`` use this module. Delivery still runs
-``evaluate_delivery*`` only to answer *would deliver now*; blockers are always listed.
+TG ``/signal`` uses this module. ADR-0004 Phase 9: the deep verdict is the typed native view; the
+scanner ("Сканер") footer still reads the Module-2 ``hunt_scan_store`` dict. The old per-direction
+blocker apparatus (``DirectionQuery``) was removed — the fusion delivery engine is gone, so it only
+ever evaluated permanently-empty ``dump``/``long`` stubs (dead, G-41).
 """
 from __future__ import annotations
 
 import html
+import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
-from hunt_core.scanner.detect.delivery_support import GateResult
-from hunt_core.market.client import HuntCcxtClient
+if TYPE_CHECKING:
+    from hunt_core.runtime.native_assembly import NativeAnalystView
 
 STORE_FRESH_S = 180.0
 STORE_STALE_S = 600.0
-_MAX_BLOCKERS_SHOWN = 5
-# Strong references to fire-and-forget background refresh tasks. asyncio keeps
-# only a WEAK reference to a bare create_task result, so without this the task
-# could be garbage-collected mid-flight and the store refresh silently dropped
-# (MARKET-4). Tasks self-remove on completion.
+# Strong references to fire-and-forget background refresh tasks. asyncio keeps only a WEAK
+# reference to a bare create_task result, so without this the task could be garbage-collected
+# mid-flight and the store refresh silently dropped (MARKET-4). Tasks self-remove on completion.
 _BG_REFRESH_TASKS: set[Any] = set()
-
-
-@dataclass(frozen=True, slots=True)
-class DirectionQuery:
-    direction: Literal["short", "long"]
-    confirmed: bool  # always False since the fusion delivery engine was removed
-    formation: GateResult
-    blockers: tuple[GateResult, ...]
-    # (removed dead delivery machinery delivery_gate/delivery_tier/would_deliver — the
-    # fusion detection engine is gone, so they were permanent None/None/False and only
-    # read by unreachable branches — G-41.)
 
 
 @dataclass(frozen=True, slots=True)
 class QueryResult:
     symbol: str
-    row: dict[str, Any]
+    native: NativeAnalystView
     source: str
     from_store: bool
     age_s: float | None
-    short: DirectionQuery
-    long: DirectionQuery
     focus_direction: Literal["short", "long"]
-
-    def focus(self) -> DirectionQuery:
-        return self.short if self.focus_direction == "short" else self.long
 
 
 def row_age_seconds(row: dict[str, Any]) -> float | None:
+    """Age of a Module-2 scanner dict row from its ISO ``ts`` (deep views use planes, not ``ts``)."""
+    from datetime import UTC, datetime
+
     ts = row.get("ts")
     if not ts:
         return None
@@ -62,8 +49,16 @@ def row_age_seconds(row: dict[str, Any]) -> float | None:
         return None
 
 
-def _pick_focus(row: dict[str, Any]) -> Literal["short", "long"]:
-    summary = row.get("prizrak_summary")
+def _native_age_seconds(native: NativeAnalystView) -> float | None:
+    """Seconds since the typed view was built (``MarketView.now_ms`` is the tick epoch-ms)."""
+    now_ms = native.view.now_ms
+    if not now_ms:
+        return None
+    return max(0.0, (time.time() * 1000.0 - float(now_ms)) / 1000.0)
+
+
+def _pick_focus(native: NativeAnalystView) -> Literal["short", "long"]:
+    summary = native.prizrak.summary
     if isinstance(summary, dict):
         action = str(summary.get("action") or "")
         if action == "short":
@@ -73,87 +68,21 @@ def _pick_focus(row: dict[str, Any]) -> Literal["short", "long"]:
     return "short"
 
 
-def _dedupe_blockers(blockers: list[GateResult]) -> list[GateResult]:
-    seen: set[str] = set()
-    out: list[GateResult] = []
-    for item in blockers:
-        if item.code in seen:
-            continue
-        seen.add(item.code)
-        out.append(item)
-    return out
-
-
-def _evaluate_direction(
-    row: dict[str, Any],
-    *,
-    direction: Literal["short", "long"],
-    symbol: str,
-    lc: dict[str, Any],
-    from_store: bool,
-    sniper_config: Any,
-) -> DirectionQuery:
-    from hunt_core.scanner.detect.delivery_support import collect_report_blockers, evaluate_formation
-
-    # row["dump"]/row["long"] are permanently neutral stubs (impulse_confirmed
-    # always False) since the fusion detection engine was removed —
-    # manipulation.py is the only real Hunter signal source now and never
-    # populates these keys, so there is no delivery gate left to evaluate here.
-    setup = (row.get("dump") if direction == "short" else row.get("long")) or {}
-    confirmed = False
-    formation = evaluate_formation(
-        setup, direction=direction, symbol=symbol, lifecycle=lc
-    )
-    blockers = _dedupe_blockers(
-        collect_report_blockers(
-            setup,
-            direction=direction,
-            symbol=symbol,
-            lifecycle=lc,
-            row=row,
-            sniper_config=sniper_config,
-            fast_lane=from_store,
-        )
-    )
-    return DirectionQuery(
-        direction=direction,
-        confirmed=confirmed,
-        formation=formation,
-        blockers=tuple(blockers),
-    )
-
-
 def build_query_result(
-    row: dict[str, Any],
+    native: NativeAnalystView,
     symbol: str,
     *,
     source: str,
     from_store: bool,
     age_s: float | None,
-    sniper_config: Any = None,
 ) -> QueryResult:
-    sym = symbol.upper()
-    _lc = row.get("lifecycle")
-    lc: dict[str, Any] = _lc if isinstance(_lc, dict) else {}
-    if sniper_config is None:
-        from hunt_core.runtime.state import SNIPER_CONFIG
-
-        sniper_config = SNIPER_CONFIG
-    short_q = _evaluate_direction(
-        row, direction="short", symbol=sym, lc=lc, from_store=from_store, sniper_config=sniper_config
-    )
-    long_q = _evaluate_direction(
-        row, direction="long", symbol=sym, lc=lc, from_store=from_store, sniper_config=sniper_config
-    )
     return QueryResult(
-        symbol=sym,
-        row=row,
+        symbol=symbol.upper(),
+        native=native,
         source=source,
         from_store=from_store,
         age_s=age_s,
-        short=short_q,
-        long=long_q,
-        focus_direction=_pick_focus(row),
+        focus_direction=_pick_focus(native),
     )
 
 
@@ -161,73 +90,31 @@ async def resolve_query_row(
     symbol: str,
     *,
     live: bool = False,
-    stagger_ms: int = 200,
-    client: HuntCcxtClient | None = None,
-    allow_low_liquidity: bool = False,
-) -> tuple[dict[str, Any], str, bool, float | None]:
-    """Return ``(row, source, from_store, age_s)`` — DeepQueryStore first unless ``live``."""
+) -> tuple[NativeAnalystView | None, str, bool, float | None]:
+    """Return ``(native, source, from_store, age_s)`` — deep store first unless ``live``.
+
+    ADR-0004 Phase 9: the deep view is composed off the engine ``MarketRuntime``. A symbol NOT in
+    the engine warm-set (or with no live price) yields ``None`` — the probe reports "not tracked"
+    honestly rather than fabricating a REST snapshot (dynamic warm-set add is a later phase).
+    """
+    from hunt_core.maps.engine import get_map_store
     from hunt_core.runtime.analyst_assembly import assemble_analyst_tick
     from hunt_core.runtime.symbol_probe import normalize_symbol
-    from hunt_core.runtime.tick_state import deep_query_store
+    from hunt_core.runtime.tick_state import deep_query_store, live_market_runtime
 
     sym = normalize_symbol(symbol)
-    row: dict[str, Any] | None = None
-    from_store = False
-    age_s: float | None = None
-    source = "live_rest"
-    _client: HuntCcxtClient = client if client is not None else HuntCcxtClient(timeout_ms=45_000)
-
     if not live:
-        cached = deep_query_store().resolve(sym)
-        if isinstance(cached, dict) and not cached.get("error"):
-            age_s = row_age_seconds(cached)
+        cached = deep_query_store().get(sym)
+        if cached is not None:
+            age_s = _native_age_seconds(cached)
             if age_s is None or age_s <= STORE_FRESH_S:
-                row = cached
-                from_store = True
-                source = str(cached.get("tick_path") or "deep_store")
-            elif age_s is not None and age_s <= STORE_STALE_S:
-                # Between STORE_FRESH_S and STORE_STALE_S: force a fresh REST probe
-                # instead of sending stale data with an apology.
-                row = None
+                return cached, "deep_store", True, age_s
 
-    if row is None:
-        # Interactive live probe — the path behind the 2026-07-12 418 ban. QoS
-        # (probe_qos, ADR-0001): one live probe at a time, same-symbol requests
-        # coalesce, COLD out-of-universe symbols are spaced out and get the
-        # trimmed probe_lite REST pack instead of the full fapi-data series.
-        from hunt_core.data.universe import PINNED_SYMBOLS
-        from hunt_core.runtime.probe_qos import probe_qos
-        from hunt_core.runtime.tick_state import last_tick_store
-
-        qos = probe_qos()
-        in_tick_universe = isinstance(last_tick_store().resolve(sym), dict)
-        cold = not in_tick_universe and sym not in PINNED_SYMBOLS
-        if cold:
-            if qos.cold_wait_s() > 0:
-                return qos.throttled_row(sym), "probe_qos", False, None
-            qos.note_cold_probe()
-        tier = "probe_lite" if cold else "full"
-
-        async def _live_probe() -> dict[str, Any]:
-            return await assemble_analyst_tick(
-                sym,
-                _client,
-                stagger_ms=max(stagger_ms, 200),
-                allow_low_liquidity=allow_low_liquidity,
-                snap_tier=tier,
-            )
-
-        row = await qos.run_live_probe(sym, _live_probe)
-        if cold and not row.get("error"):
-            row["_probe_lite"] = True
-        source = "deep_live" if live else "analyst_assembly"
-
-    if row.get("maps") and not row.get("maps_forecast"):
-        from hunt_core.toolkit.forecast import stamp_forecasts_on_row
-
-        stamp_forecasts_on_row(row)
-
-    return row, source, from_store, age_s
+    rt = live_market_runtime()
+    if rt is None:
+        return None, "engine_unavailable", False, None
+    native = await assemble_analyst_tick(sym, rt, store=get_map_store())
+    return native, ("deep_live" if live else "analyst_assembly"), False, None
 
 
 def format_query_telegram(q: QueryResult, *, added_watch: bool = False) -> str:
@@ -237,12 +124,11 @@ def format_query_telegram(q: QueryResult, *, added_watch: bool = False) -> str:
     from hunt_core.runtime.tick_state import hunt_scan_store
 
     try:
-        analysis = _build_deep_report(q.row, include_watch_appendix=False)
+        analysis = _build_deep_report(q.native, include_watch_appendix=False)
     except Exception:
-        # Fail-loud: surface the real traceback to logs instead of swallowing it.
-        # User still gets a graceful card. Every section below dereferences
-        # `analysis`, so the fallback MUST return here — falling through raised
-        # NameError on exactly the path this handler exists for (no message at all).
+        # Fail-loud: surface the real traceback to logs instead of swallowing it. User still gets
+        # a graceful card. Every section below dereferences `analysis`, so the fallback MUST return
+        # here — falling through raised NameError on exactly the path this handler exists for.
         import structlog
 
         structlog.get_logger("hunt_core.runtime.query_service").exception(
@@ -257,11 +143,10 @@ def format_query_telegram(q: QueryResult, *, added_watch: bool = False) -> str:
 
     from hunt_core.data.universe import is_pinned_symbol
 
-    prizrak_action = str((analysis.row.get("prizrak_summary") or {}).get("action") or "").upper()
+    prizrak_action = str((q.native.prizrak.summary or {}).get("action") or "").upper()
 
-    # When analyst says WAIT, show opposite direction too
+    # When analyst says WAIT, show the opposite direction's scanner read too.
     if prizrak_action in {"WAIT", ""}:
-        from hunt_core.runtime.tick_state import hunt_scan_store
         opposite_dir = "long" if q.focus_direction == "short" else "short"
         dir_ru = "ЛОНГ" if opposite_dir == "long" else "ШОРТ"
         scan_row = hunt_scan_store().get(q.symbol)
@@ -269,17 +154,11 @@ def format_query_telegram(q: QueryResult, *, added_watch: bool = False) -> str:
         if isinstance(scan_row, dict):
             scan_setup = scan_row.get("dump" if opposite_dir == "short" else "long") or {}
             scan_has_setup = bool(scan_setup.get("impulse_confirmed"))
-        # (removed dead 'можно войти'/'сетап есть' branches — opposite_q.would_deliver /
-        # .confirmed are permanently False since the fusion engine was removed, and
-        # _format_blockers_section always returned [] — G-41.)
-        if scan_has_setup:
-            alt_label = "сетап в сканере (раннее обнаружение)"
-        else:
-            alt_label = "нет сетапа"
+        alt_label = "сетап в сканере (раннее обнаружение)" if scan_has_setup else "нет сетапа"
         if alt_label != "нет сетапа":
             parts.extend(["", "—", f"🔄 <b>Альтернатива: {dir_ru}</b> — {alt_label}"])
 
-    # Scanner section (always shown; independent from analyst verdict)
+    # Scanner section (always shown; independent from analyst verdict).
     if not is_pinned_symbol(q.symbol):
         watch_lines: list[str] = []
         if added_watch:
@@ -307,13 +186,10 @@ def format_query_telegram(q: QueryResult, *, added_watch: bool = False) -> str:
 
 
 def format_freshness_footer(q: QueryResult) -> str:
-    """Source/freshness tag — always the LAST line of the full reply (after any
-    level-map/DOM/liquidation sections appended by the caller), never in the middle.
-    A mid-message "🛰 source · timestamp" line visually reads as a second message's
-    header, which is confusing — this must be appended last, once, by the caller.
-    """
+    """Source/freshness tag — always the LAST line of the full reply (after any level-map/DOM
+    sections appended by the caller), never in the middle."""
     if q.from_store:
-        as_of = q.row.get("as_of") or (q.row.get("freshness") or {}).get("as_of")
+        as_of = (q.native.freshness or {}).get("as_of")
         as_of_txt = ""
         if as_of:
             as_of_txt = f" · снимок {html.escape(str(as_of)[:19].replace('T', ' '))} UTC"
@@ -322,52 +198,41 @@ def format_freshness_footer(q: QueryResult) -> str:
             f"\n<i>📊 из кэша ({age_txt}{as_of_txt}) · "
             f"/signal {q.symbol.replace('USDT', '')} --live для REST</i>"
         )
-    return format_row_freshness_footer(q.row, source=q.source)
+    return format_row_freshness_footer(q.native, source=q.source)
 
 
-def format_row_freshness_footer(row: dict[str, Any], *, source: str) -> str:
-    """Source/as-of stamp for a raw analyst row (no QueryResult in hand).
+def format_row_freshness_footer(native: NativeAnalystView, *, source: str) -> str:
+    """Source/as-of stamp for a typed deep view (no QueryResult in hand).
 
-    Used by the pinned push path, which has no ``QueryResult``. The stamp matters
-    there because ``TelegramBroadcaster`` buffers messages while its circuit is
-    open and replays them later — without an as-of line a stale card is
-    indistinguishable from a live one.
+    Used by the pinned push path. The stamp matters because ``TelegramBroadcaster`` buffers
+    messages while its circuit is open and replays them later — without an as-of line a stale card
+    is indistinguishable from a live one.
 
     Args:
-        row: Analyst tick row (reads ``as_of`` / ``freshness.as_of`` / ``ts``).
+        native: The typed deep view (reads ``freshness.as_of`` + ``view.now_ms``).
         source: Short provenance tag rendered after the satellite glyph.
 
     Returns:
         A leading-newline ``<i>…</i>`` footer line, appended last by the caller.
     """
-    as_of = row.get("as_of")
-    if not as_of:
-        _fresh = row.get("freshness")
-        as_of = (_fresh or {}).get("as_of") if isinstance(_fresh, dict) else None
+    as_of = (native.freshness or {}).get("as_of")
     tail = f" · {html.escape(str(as_of)[:19].replace('T', ' '))} UTC" if as_of else ""
-    age = row_age_seconds(row)
+    age = _native_age_seconds(native)
     age_txt = f" · тик {age:.0f}s назад" if age is not None else ""
     return f"\n<i>🛰 {html.escape(source)}{tail}{age_txt}</i>"
 
 
-def spawn_background_refresh(
-    symbol: str,
-    *,
-    client: HuntCcxtClient | None = None,
-    stagger_ms: int = 200,
-) -> None:
-    """Non-blocking REST refresh after a stale store hit — updates LastTickStore only."""
+def spawn_background_refresh(symbol: str) -> None:
+    """Non-blocking deep refresh after a stale store hit — updates the deep store only."""
     import asyncio
 
     from hunt_core.runtime.tick_state import deep_query_store
 
     async def _run() -> None:
         try:
-            row, _src, _store, _age = await resolve_query_row(
-                symbol, live=True, stagger_ms=stagger_ms, client=client
-            )
-            if isinstance(row, dict) and not row.get("error"):
-                deep_query_store().put(symbol.upper(), row)
+            native, _src, _store, _age = await resolve_query_row(symbol, live=True)
+            if native is not None:
+                deep_query_store().put(symbol.upper(), native)
         except Exception:
             import structlog
 
@@ -385,9 +250,9 @@ def spawn_background_refresh(
 
 
 __all__ = [
-    "DirectionQuery",
     "QueryResult",
     "STORE_FRESH_S",
+    "STORE_STALE_S",
     "build_query_result",
     "format_freshness_footer",
     "format_query_telegram",

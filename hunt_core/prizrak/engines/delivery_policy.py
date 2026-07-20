@@ -1,7 +1,15 @@
-"""Pinned TG delivery helpers — batch hero + peers footer."""
+"""Pinned TG delivery helpers — batch hero + peers footer (typed :class:`NativeAnalystView`)."""
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from hunt_core.runtime.native_assembly import NativeAnalystView
+
+
+def _compact_symbol(symbol: str) -> str:
+    """Unified ``BTC/USDT:USDT`` → compact ``BTCUSDT``."""
+    return symbol.split(":", 1)[0].replace("/", "").upper()
 
 
 def symbol_queue_rank(symbol: str, queue: dict[str, Any] | None) -> int:
@@ -15,17 +23,19 @@ def symbol_queue_rank(symbol: str, queue: dict[str, Any] | None) -> int:
     return 99
 
 
-def pick_hero_row(changed_rows: list[dict[str, Any]], queue: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Best row to represent a pinned cycle in Telegram."""
+def pick_hero_row(
+    changed_rows: list[NativeAnalystView], queue: dict[str, Any] | None
+) -> NativeAnalystView | None:
+    """Best typed view to represent a pinned cycle in Telegram."""
     if not changed_rows:
         return None
     if len(changed_rows) == 1:
         return changed_rows[0]
 
-    best: tuple[float, dict[str, Any]] | None = None
-    for row in changed_rows:
-        sym = str(row.get("symbol") or "").upper()
-        summary = row.get("prizrak_summary") or {}
+    best: tuple[float, NativeAnalystView] | None = None
+    for native in changed_rows:
+        sym = _compact_symbol(native.view.symbol)
+        summary = native.prizrak.summary or {}
         action = str(summary.get("action") or "wait")
         rank = symbol_queue_rank(sym, queue)
         score = float(summary.get("strength") or 0) + max(0, 4 - rank) * 0.15
@@ -36,41 +46,41 @@ def pick_hero_row(changed_rows: list[dict[str, Any]], queue: dict[str, Any] | No
         if isinstance(entry, dict) and entry.get("promoted_at"):
             score += 0.20
         if best is None or score > best[0]:
-            best = (score, row)
+            best = (score, native)
     return best[1] if best else changed_rows[0]
 
 
 def filter_notify_candidates(
-    changed_rows: list[dict[str, Any]],
+    changed_rows: list[NativeAnalystView],
     queue: dict[str, Any] | None,
     *,
     min_rank: int = 2,
-) -> list[dict[str, Any]]:
-    """Only LONG/SHORT rows reach pinned TG (WAIT is monitor-only)."""
-    _ = min_rank
-    out: list[dict[str, Any]] = []
-    for row in changed_rows:
-        summary = row.get("prizrak_summary") or {}
+) -> list[NativeAnalystView]:
+    """Only LONG/SHORT views reach pinned TG (WAIT is monitor-only)."""
+    _ = (queue, min_rank)
+    out: list[NativeAnalystView] = []
+    for native in changed_rows:
+        summary = native.prizrak.summary or {}
         action = str(summary.get("action") or "wait").lower()
         if action in {"long", "short"}:
-            out.append(row)
+            out.append(native)
     return out
 
 
 def format_cycle_peers_footer(
-    hero: dict[str, Any],
-    cycle_rows: list[dict[str, Any]],
+    hero: NativeAnalystView,
+    cycle_rows: list[NativeAnalystView],
 ) -> str:
     """Compact one-liner for other symbols updated in the same deep loop cycle."""
     import html
 
-    hero_sym = str(hero.get("symbol") or "").upper()
+    hero_sym = _compact_symbol(hero.view.symbol)
     peers: list[str] = []
-    for row in cycle_rows:
-        sym = str(row.get("symbol") or "").upper()
+    for native in cycle_rows:
+        sym = _compact_symbol(native.view.symbol)
         if not sym or sym == hero_sym:
             continue
-        _prizrak = row.get("prizrak_summary")
+        _prizrak = native.prizrak.summary
         summary: dict[str, Any] = _prizrak if isinstance(_prizrak, dict) else {}
         _ACTION_RU = {"LONG": "ЛОНГ", "SHORT": "ШОРТ", "WAIT": "ЖДЁМ"}
         _ACT_RU = {

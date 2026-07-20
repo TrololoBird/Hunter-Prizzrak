@@ -3,10 +3,13 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from hunt_core import serde
 from hunt_core.paths import DATA
+
+if TYPE_CHECKING:
+    from hunt_core.runtime.native_assembly import NativeAnalystView
 
 LEDGER_PATH = DATA / "hunt_outcome_ledger.jsonl"
 
@@ -33,20 +36,22 @@ def _any_prefix(codes: list[str], prefixes: tuple[str, ...]) -> bool:
 def build_authority_snapshot(
     *,
     setup: dict[str, Any] | None,
-    row: dict[str, Any] | None,
+    fusion: dict[str, Any] | None,
+    lifecycle: dict[str, Any] | None,
     blockers: list[str] | None,
     delivered: bool,
 ) -> dict[str, Any]:
-    """Per-boundary authority flags for invariant audits (fusion → delivery → TG)."""
+    """Per-boundary authority flags for invariant audits (fusion → delivery → TG).
+
+    Reads the typed-derived ``fusion`` (``NativeAnalystView.fusion``) + ``lifecycle`` dicts directly
+    rather than a row (ADR-0004 Phase 9).
+    """
     s = setup if isinstance(setup, dict) else {}
-    r = row if isinstance(row, dict) else {}
-    _lc = r.get("lifecycle")
-    lc = _lc if isinstance(_lc, dict) else {}
+    lc = lifecycle if isinstance(lifecycle, dict) else {}
     codes = _blocker_codes(blockers)
 
     fusion_gate_open = bool(s.get("impulse_confirmed"))
-    _mf = r.get("manipulation_fusion")
-    mf = _mf if isinstance(_mf, dict) else {}
+    mf = fusion if isinstance(fusion, dict) else {}
     req_n = mf.get("required_n")
     pass_n = mf.get("pass_count")
     if req_n is not None:
@@ -112,18 +117,23 @@ def build_ledger_record(
     symbol: str,
     direction: str,
     event: str,
-    row: dict[str, Any] | None = None,
+    native: NativeAnalystView | None = None,
     setup: dict[str, Any] | None = None,
     blockers: list[str] | None = None,
     delivered: bool = False,
 ) -> dict[str, Any]:
-    """Standard ledger row at confirm boundary."""
-    fusion = {}
-    if row and isinstance(row.get("manipulation_fusion"), dict):
-        fusion = row["manipulation_fusion"]
-    _lc = (row or {}).get("lifecycle")
-    lc = _lc if isinstance(_lc, dict) else {}
-    _forecast = (row or {}).get("maps_forecast")
+    """Standard ledger record at the confirm boundary, sourced from the typed view.
+
+    ADR-0004 Phase 9: reads ``native.fusion`` (manipulation-fusion display/journal block),
+    ``native.prizrak.summary`` (canonical verdict), ``native.forecasts["structural_up"]`` (the
+    structural forecast — the deep lane has no manipulation ``maps_forecast`` producer) and
+    ``native.view.last_price``. There is no typed lifecycle model on this lane yet → ``lc = {}``;
+    the native view is freshness-proven so ``price_stale`` is always ``False`` (I-6).
+    """
+    _mf = native.fusion if native is not None else None
+    fusion = _mf if isinstance(_mf, dict) else {}
+    lc: dict[str, Any] = {}  # no typed lifecycle model on the native deep lane (ADR-0004 gap)
+    _forecast = native.forecasts.get("structural_up") if native is not None else None
     forecast = _forecast if isinstance(_forecast, dict) else {}
     factors = fusion.get("factors") or []
     top5 = factors[:5] if isinstance(factors, list) else []
@@ -132,7 +142,8 @@ def build_ledger_record(
         quarantine = {}
     authority = build_authority_snapshot(
         setup=setup,
-        row=row,
+        fusion=fusion,
+        lifecycle=lc,
         blockers=blockers,
         delivered=delivered,
     )
@@ -140,9 +151,8 @@ def build_ledger_record(
     # bias↔liq reconciliation (WS-2M.2): record the risk flag + factor evidence so the
     # ±0.15 envelope / whether to gate can be calibrated from closed-outcome rows later,
     # rather than guessed. Canonical source is the summary.
-    _summary = (row or {}).get("prizrak_summary")
-    if not isinstance(_summary, dict):
-        _summary = setup if isinstance(setup, dict) else {}
+    _summary_raw = native.prizrak.summary if native is not None else None
+    _summary = _summary_raw if isinstance(_summary_raw, dict) else (setup if isinstance(setup, dict) else {})
     _liq_reconcile = _summary.get("liq_reconcile")
     return {
         "symbol": str(symbol).upper(),
@@ -151,7 +161,7 @@ def build_ledger_record(
         "delivered": delivered,
         "liq_conflict": bool(_summary.get("liq_conflict")),
         "liq_reconcile": _liq_reconcile if isinstance(_liq_reconcile, dict) else None,
-        "archetype": fusion.get("archetype") or row.get("entry_archetype") if row else None,
+        "archetype": fusion.get("archetype"),
         "fusion_score": fusion.get("primary_score") or (setup or {}).get("fusion_score"),
         "oi_regime": fusion.get("oi_regime"),
         "factors_top5": top5,
@@ -160,8 +170,8 @@ def build_ledger_record(
         "phase_fusion": lc.get("phase_fusion") or lc.get("phase"),
         "mission_ok": not bool(blockers and any("mission" in str(b) for b in blockers)),
         "forecast_json": forecast,
-        "mark_price_at_send": (row or {}).get("price"),
-        "price_stale": bool((row or {}).get("price_stale")),
+        "mark_price_at_send": native.view.last_price if native is not None else None,
+        "price_stale": False,
         "blockers": list(blockers or []),
         "playbook_pass": fusion.get("pass_count"),
         "playbook_required": fusion.get("required_n"),

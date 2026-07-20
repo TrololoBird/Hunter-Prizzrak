@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import html
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from hunt_core.deliver._labels import fmt_price
+
+if TYPE_CHECKING:
+    from hunt_core.runtime.native_assembly import NativeAnalystView
 
 
 
@@ -607,16 +610,54 @@ def format_liquidity_heatmap_section(row: dict[str, Any]) -> str:
     return "\n".join(lines) if len(lines) > 1 else ""
 
 
-def format_intraday_maps_telegram(row: dict[str, Any]) -> str:
-    """Three-map block for /signal: DOM · liquidity heatmap · liquidation map."""
+def _native_map_render_inputs(native: NativeAnalystView) -> dict[str, Any]:
+    """Narrow map-render input assembled purely from typed handles (NOT a legacy row).
+
+    The three map sub-sections (``format_book_walls_section`` / ``format_liquidity_heatmap_section``
+    / ``format_liquidation_map_section``) are dict-over-map-scalars renderers with their own unit
+    tests. This is the ADR-0004 Phase-9 "typed overload" entry point: every value comes from a
+    typed handle — the ``map_*``/``liq_*`` scalars from :func:`derive_map_features`, the ``maps``
+    sub-tree from ``MapBundle.to_dict()``, the DOM walls from the typed ``OrderbookMap`` (mirroring
+    ``apply_map_bundle_to_row``), price from ``MarketView.last_price``, and freshness from
+    ``NativeAnalystView.freshness``. It carries only map-render keys — no prizrak/view/features or
+    legacy-transport keys — so it is a purpose-built render slice, not a row reconstruction.
+    """
+    from hunt_core.maps.engine import derive_map_features
+
+    price = float(native.view.last_price or 0)
+    bundle = native.maps
+    market = derive_map_features(bundle, current_price=price) if bundle is not None else {}
+    maps = bundle.to_dict() if bundle is not None else {}
+    book_walls: dict[str, Any] = {}
+    if bundle is not None and bundle.orderbook is not None:
+        ob = bundle.orderbook
+        book_walls = {
+            "bid_levels": ob.bid_walls,
+            "ask_levels": ob.ask_walls,
+            "venues": ob.venues,
+            "depth_imbalance": ob.zone_imbalance.get("imb_1pct"),
+            "source": ob.source,
+        }
+    return {
+        "price": price,
+        "market": market,
+        "maps": maps,
+        "book_walls": book_walls,
+        "freshness": native.freshness,
+    }
+
+
+def format_intraday_maps_telegram(native: NativeAnalystView) -> str:
+    """Three-map block for /signal: DOM · liquidity heatmap · liquidation map (typed handles)."""
+    render = _native_map_render_inputs(native)
     blocks: list[str] = []
-    dom = format_book_walls_section(row)
+    dom = format_book_walls_section(render)
     if dom:
         blocks.append(dom)
-    heat = format_liquidity_heatmap_section(row)
+    heat = format_liquidity_heatmap_section(render)
     if heat:
         blocks.append(heat)
-    liq = format_liquidation_map_section(row)
+    liq = format_liquidation_map_section(render)
     if liq:
         blocks.append(liq)
     if not blocks:
@@ -937,16 +978,15 @@ def format_cross_microstructure_section(row: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def format_pinned_deep_analysis(row: dict[str, Any]) -> str:
-    """Deep /signal block via hunt_core.prizrak (Module 1 — not hunter lake_panel)."""
-    sym = str(row.get("symbol") or "")
-    if not sym:
+def format_pinned_deep_analysis(native: NativeAnalystView) -> str:
+    """Deep /signal block via hunt_core.prizrak (Module 1 — typed :class:`NativeAnalystView`)."""
+    if not native.view.symbol:
         return ""
     try:
         from hunt_core.prizrak.build import build_deep_report
         from hunt_core.prizrak.format_telegram import format_deep_analysis_telegram
 
-        analysis = build_deep_report(row, include_watch_appendix=False)
+        analysis = build_deep_report(native, include_watch_appendix=False)
         return format_deep_analysis_telegram(analysis)
     except Exception:
         return ""

@@ -7,6 +7,7 @@ and the deep/analyst loop call this instead of building a row. Fully typed, fail
 """
 from __future__ import annotations
 
+import time
 from typing import Any, NamedTuple
 
 import structlog
@@ -20,6 +21,17 @@ from hunt_core.maps.feed import build_map_bundle
 from hunt_core.maps.oi import oi_bars_from_frames
 from hunt_core.prizrak.assemble import assemble_prizrak
 from hunt_core.prizrak.models import PrizrakOutput
+from hunt_core.prizrak.structural_forecast_native import (
+    build_structural_down_forecast_native,
+    build_structural_up_forecast_native,
+)
+from hunt_core.runtime.native_producers import (
+    cross_walls_fetched_at_ms,
+    freshness_native,
+    session_stats_native,
+    spot_weekly_ladder_native,
+)
+from hunt_core.toolkit.manipulation_fusion_native import compute_manipulation_fusion_native
 from hunt_core.view.models import MarketView
 from hunt_core.view.runtime import MarketRuntime
 
@@ -27,12 +39,24 @@ LOG = structlog.get_logger("hunt.runtime.native_assembly")
 
 
 class NativeAnalystView(NamedTuple):
-    """The full typed native output for one symbol — replaces the ``dict[str, Any]`` row."""
+    """The full typed native output for one symbol — replaces the ``dict[str, Any]`` row.
+
+    ``view``/``features``/``maps``/``prizrak`` are the four core typed handles; the remaining fields
+    are the deep-tick enrichment side-channels that ``analyst_assembly`` used to stamp onto the row
+    (all natively derived, fail-loud): the structural forecasts, the manipulation-fusion assessment
+    (display/journal-only), the weekly-spot ladder, the intraday session stats, and the freshness
+    stamp. ``btc_context`` / ``microstructure_by_direction`` are deliberately absent — dead telemetry.
+    """
 
     view: MarketView
     features: FeaturePanel
     maps: MapBundle | None
     prizrak: PrizrakOutput
+    forecasts: dict[str, dict[str, Any] | None]
+    fusion: dict[str, Any]
+    spot_ladder: dict[str, Any] | None
+    session: dict[str, float | int | None] | None
+    freshness: dict[str, Any]
 
 
 def _binance_id(symbol: str) -> str:
@@ -82,7 +106,34 @@ async def assemble_native_analyst(
         cross_walls=cross_walls,
     )
     prizrak = assemble_prizrak(view, maps)
-    return NativeAnalystView(view=view, features=panel, maps=maps, prizrak=prizrak)
+
+    # ── Deep-tick enrichment side-channels (native, fail-loud) ──────────────────────────────
+    # These replace the analyst_assembly row stamps; each reads only typed handles.
+    session = session_stats_native(panel.frames.m1, last_price=view.last_price)
+    forecasts: dict[str, dict[str, Any] | None] = {
+        "structural_up": build_structural_up_forecast_native(view, maps),
+        "structural_down": build_structural_down_forecast_native(view, maps, session=session),
+    }
+    # Fusion is display/journal-only (no emission gate reads it). lifecycle/structure and OI-%change
+    # have no typed producer yet (tracked follow-up #38) → passed None, checks inert (not fabricated).
+    fusion = compute_manipulation_fusion_native(view, panel, maps, session=session)
+    spot_ladder = await spot_weekly_ladder_native(symbol, price=view.last_price, spot=rt.spot)
+    freshness = freshness_native(
+        now_ms=int(time.time() * 1000),
+        tick_ts_ms=int(view.now_ms),
+        dom_fetched_at_ms=cross_walls_fetched_at_ms(cross_walls),
+    )
+    return NativeAnalystView(
+        view=view,
+        features=panel,
+        maps=maps,
+        prizrak=prizrak,
+        forecasts=forecasts,
+        fusion=fusion,
+        spot_ladder=spot_ladder,
+        session=session,
+        freshness=freshness,
+    )
 
 
 __all__ = ["NativeAnalystView", "assemble_native_analyst"]

@@ -4,13 +4,13 @@ from __future__ import annotations
 import html
 from typing import Any
 
-from hunt_core.prizrak.build import AnalystReport, build_analyst_report_from_row
+from hunt_core.prizrak.build import AnalystReport
 from hunt_core.deliver._labels import fmt_price, format_symbol_telegram
 
 
 def format_analyst_telegram(analysis: AnalystReport) -> str:
     sym = format_symbol_telegram(analysis.symbol)
-    price = float(analysis.row.get("price") or 0)
+    price = float(analysis.view.last_price or 0)
     header = f"🔬 <b>Глубокий анализ</b> — <code>{sym}</code>"
     if price > 0:
         header += f" · <code>{fmt_price(price)}</code>"
@@ -37,7 +37,7 @@ def format_analyst_telegram(analysis: AnalystReport) -> str:
     if iz_txt:
         parts.extend(["", iz_txt])
     # Spot context — spot-perp basis, spot/fut 24h volume share, weekly spot ladder.
-    spot_txt = _spot_context_text(analysis.row)
+    spot_txt = _spot_context_text(analysis)
     if spot_txt:
         parts.extend(["", spot_txt])
     # Structural targets («куда цена может пойти») — shown on WAIT too, not only on an
@@ -81,7 +81,7 @@ def _limit_block(zone: dict[str, Any]) -> str:
     return "" if zone.get("limit_ok") is True else "unknown"
 
 
-def _nearest_zone(row: dict[str, Any], price: float) -> tuple[str, float, float, str] | None:
+def _nearest_zone(iz: dict[str, Any] | None, price: float) -> tuple[str, float, float, str] | None:
     """(side, near_edge, distance_pct, limit_block) for the interest zone price is nearest.
 
     ``limit_block`` is the course's per-zone ruling (see :func:`_limit_block` and
@@ -89,7 +89,6 @@ def _nearest_zone(row: dict[str, Any], price: float) -> tuple[str, float, float,
     they are off. A blocked zone is still worth WATCHING — стр.31 keeps looking at the
     level — it just must not be sold as a limit.
     """
-    iz = row.get("prizrak_interest_zones")
     if not isinstance(iz, dict) or price <= 0:
         return None
     best: tuple[str, float, float, str] | None = None
@@ -120,12 +119,11 @@ _ABSTAIN_PRIORITY = ("rr_below_floor", "no_structural_target", "htf_counter_tren
                      "degenerate_stop")
 
 
-def _abstain_reason_line(row: dict[str, Any]) -> str | None:
-    """Turn the structured reject-reasons (row["prizrak_abstain"]) into one human line, so a
+def _abstain_reason_line(reasons: tuple[dict[str, Any], ...] | list[dict[str, Any]]) -> str | None:
+    """Turn the structured reject-reasons (``PrizrakOutput.abstain``) into one human line, so a
     WAIT symbol explains «почему нет сделки» with numbers instead of falling silent. Picks the
     most informative reason (an RR that just missed the floor is more actionable than a veto)."""
-    reasons = row.get("prizrak_abstain")
-    if not isinstance(reasons, list) or not reasons:
+    if not reasons:
         return None
     by_reason = {r.get("reason"): r for r in reversed(reasons) if isinstance(r, dict)}
     pick = next((by_reason[k] for k in _ABSTAIN_PRIORITY if k in by_reason), None)
@@ -157,19 +155,17 @@ def _briefing_text(analysis: AnalystReport, price: float) -> str | None:
     the nearest actionable level were all derivable but none were stated. This states
     them, and states nothing the sections below do not already back up.
     """
-    row = analysis.row
-    _ps = row.get("prizrak_summary")
+    _ps = analysis.prizrak.summary
     ps = _ps if isinstance(_ps, dict) else {}
     action = str(ps.get("action") or "wait").strip().lower()
 
-    _struct = row.get("prizrak_structure")
-    struct = _struct if isinstance(_struct, dict) else {}
+    struct = analysis.prizrak.structure if isinstance(analysis.prizrak.structure, dict) else {}
     _htf = struct.get("htf_bias")
     htf = _htf if isinstance(_htf, dict) else {}
     regime = str(htf.get("regime") or "")
     bias = str(htf.get("bias") or "").lower()
 
-    near = _nearest_zone(row, price)
+    near = _nearest_zone(analysis.prizrak.interest_zones, price)
 
     lines: list[str] = []
     if action in ("long", "short"):
@@ -240,31 +236,32 @@ def _briefing_text(analysis: AnalystReport, price: float) -> str | None:
             )
     # WHY no trade — the structured reject-reason with numbers, so the reader sees «RR 2.3 < 3.0»
     # instead of an unexplained silence (the dominant sync-with-channel outcome).
-    _why = _abstain_reason_line(row)
+    _why = _abstain_reason_line(analysis.prizrak.abstain)
     if _why is not None:
         lines.append(_why)
     return "\n".join(lines) if lines else None
 
 
-def _spot_context_text(row: dict[str, Any]) -> str | None:
+def _spot_context_text(analysis: AnalystReport) -> str | None:
     """Spot block for the deep panel — data only, no verdicts.
 
     Method basis: «крупняк на споте покупает на наших зонах интереса» (Prizrak,
     BTC-squeeze разбор) — spot participation is his context read; a perp move the
     spot market does not join is derivatives-only. The weekly ladder mirrors his
-    macro levels off the full-history spot chart (POL/MATIC разбор).
+    macro levels off the full-history spot chart (POL/MATIC разбор). Reads the typed
+    ``view.spot`` sub-model + the precomputed ``analysis.spot_ladder`` — no row-dict.
     """
-    _m = row.get("market")
-    market = _m if isinstance(_m, dict) else {}
+    spot = analysis.view.spot
     lines: list[str] = []
 
-    spread = market.get("spot_futures_spread_bps")
+    spread = spot.spread_bps if spot is not None else None
     if isinstance(spread, (int, float)):
         rel = "перп дороже спота" if spread > 0 else "перп дешевле спота" if spread < 0 else "паритет"
         lines.append(f"базис спот-перп: <code>{spread:+.1f} bps</code> ({rel})")
 
-    spot_qv = market.get("spot_quote_volume_24h")
-    fut_qv_m = market.get("vol_24h_m")
+    spot_qv = spot.quote_volume_24h if spot is not None else None
+    fut_qv = analysis.view.quote_volume_24h
+    fut_qv_m = float(fut_qv) / 1e6 if isinstance(fut_qv, (int, float)) else None
     if (
         isinstance(spot_qv, (int, float))
         and isinstance(fut_qv_m, (int, float))
@@ -281,18 +278,18 @@ def _spot_context_text(row: dict[str, Any]) -> str | None:
     # of «крупняк на споте покупает на зонах»; labelled as taker flow, not literally
     # «крупные деньги», since it is not size-filtered. Absent → the line is simply omitted
     # (fail-loud: no fabricated balance).
-    taker_delta = market.get("spot_taker_delta_usd")
+    taker_delta = spot.taker_delta_usd if spot is not None else None
     if isinstance(taker_delta, (int, float)):
         d = float(taker_delta)
         lean = "покупатели агрессивнее" if d > 0 else "продавцы агрессивнее" if d < 0 else "баланс"
         amt = f"{d / 1e6:+.1f}M$" if abs(d) >= 1e6 else f"{d / 1e3:+.0f}K$"
-        _ratio = market.get("spot_taker_buy_ratio")
+        _ratio = spot.taker_buy_ratio if spot is not None else None
         r_s = f" · buy {float(_ratio) * 100:.0f}%" if isinstance(_ratio, (int, float)) else ""
         lines.append(
             f"спот-поток тейкеров (агрессивные сделки): <code>{amt}</code> ({lean}{r_s})"
         )
 
-    _lad = row.get("spot_weekly_ladder")
+    _lad = analysis.spot_ladder
     ladder = _lad if isinstance(_lad, dict) else {}
 
     def _lvls(side: str) -> str:
@@ -321,10 +318,6 @@ def _spot_context_text(row: dict[str, Any]) -> str | None:
     return "\n".join(["📈 <b>Спот-контекст</b>", *lines])
 
 
-def format_analyst_from_row(row: dict[str, Any], **kwargs: Any) -> str:
-    return format_analyst_telegram(build_analyst_report_from_row(row, **kwargs))
-
-
 format_deep_analysis_telegram = format_analyst_telegram  # backward compat after deep→analyst rename
 
-__all__ = ["format_analyst_telegram", "format_analyst_from_row", "format_deep_analysis_telegram"]
+__all__ = ["format_analyst_telegram", "format_deep_analysis_telegram"]

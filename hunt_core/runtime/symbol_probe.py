@@ -7,7 +7,10 @@ import asyncio
 import html
 import structlog
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from hunt_core.runtime.native_assembly import NativeAnalystView
 
 LOG = structlog.get_logger("hunt_core.runtime.symbol_probe")
 # klines.<tf>.stale.<SYMBOL>.<age>ms><limit>ms  (completeness.audit_kline_staleness)
@@ -394,55 +397,6 @@ async def probe_symbol_catalog(
     )
 
 
-async def probe_pinned_deep(
-    symbol: str,
-    *,
-    stagger_ms: int = 200,
-    auto_watchlist: bool = True,
-    client: HuntCcxtClient | None = None,
-) -> dict[str, Any]:
-    """Extended REST + full prepare + microstructure for pinned anchors."""
-    from hunt_core.runtime.analyst_assembly import assemble_analyst_tick
-    from hunt_core.runtime.query_service import STORE_STALE_S, row_age_seconds
-    from hunt_core.runtime.tick_state import deep_query_store
-
-    sym = normalize_symbol(symbol)
-    cached = deep_query_store().resolve(sym)
-    if isinstance(cached, dict) and not cached.get("error") and cached.get("prizrak_summary"):
-        age = row_age_seconds(cached)
-        if age is not None and age <= STORE_STALE_S:
-            out = dict(cached)
-            out["_query_source"] = "deep_store"
-            return out
-    if client is None:
-        msg = f"probe_deep: no client for {sym}"
-        raise RuntimeError(msg)
-    return await assemble_analyst_tick(sym, client, stagger_ms=max(stagger_ms, 200))
-
-
-async def probe_deep_only(
-    symbol: str,
-    *,
-    stagger_ms: int = 200,
-    client: HuntCcxtClient | None = None,
-) -> dict[str, Any]:
-    """Deep product probe — enrich pinned/MTF without watchlist side effects."""
-    sym = normalize_symbol(symbol)
-    if sym in PINNED_SYMBOLS:
-        row = await probe_pinned_deep(
-            sym, stagger_ms=max(stagger_ms, 200), auto_watchlist=False, client=client
-        )
-    else:
-        row = await probe_symbol_signal(
-            sym,
-            stagger_ms=stagger_ms,
-            auto_watchlist=False,
-            client=client,
-        )
-        row["_analyst"] = True
-    return row
-
-
 async def _tracker_levels_backtest(client: Any, sym: str) -> dict[str, Any] | None:
     """Mini forward backtest: replay latched levels of the active tracker signal
     over closed 5m bars since open; lets /signal audit compare outcome vs tracker."""
@@ -493,11 +447,15 @@ async def deliver_signal_probe(
     live: bool = False,
     client: HuntCcxtClient | None = None,
     allow_low_liquidity: bool = False,
-) -> dict[str, Any]:
-    """Reply with query result for ``symbol`` (store-first, full blocker explain).
+) -> NativeAnalystView | None:
+    """Reply with the typed deep query result for ``symbol`` (deep-store first).
 
-    Telegram ``/signal`` calls this directly via ``telegram_commands.py``.
+    Telegram ``/signal`` calls this directly via ``telegram_commands.py``. ADR-0004 Phase 9: the
+    deep verdict is the typed :class:`NativeAnalystView`; a symbol outside the engine warm-set
+    yields ``None`` and an honest "not tracked" reply (``client``/``stagger_ms``/``allow_low_liquidity``
+    are legacy-signature kwargs kept for the caller — the native path fetches off the engine runtime).
     """
+    _ = (stagger_ms, client, allow_low_liquidity)
     sym = normalize_symbol(symbol)
 
     from hunt_core.runtime.query_service import (
@@ -507,60 +465,34 @@ async def deliver_signal_probe(
         resolve_query_row,
     )
 
-    row, _source, from_store, age_s = await resolve_query_row(
-        sym, live=live, stagger_ms=stagger_ms, client=client, allow_low_liquidity=allow_low_liquidity
-    )
-    audit = row.get("_signal_audit") or {}
-    liq_warn = row.get("liquidity_warning")
-    if row.get("error"):
-        extra = ""
-        if audit.get("issues"):
-            extra = "\n<i>audit: " + html.escape(", ".join(audit["issues"][:3])) + "</i>"
-        raw_err = str(row["error"])
-        friendly = humanize_probe_error(raw_err, symbol=sym)
-        if friendly is not None:
-            # Lead with the plain explanation; keep the raw code small for power users/logs.
-            body = f"{friendly}\n<i>({html.escape(raw_err)})</i>"
-        elif row.get("detail"):
-            # e.g. probe_throttled carries its explicit retry-in message in `detail`;
-            # without this the user saw only the bare code (G-40).
-            body = f"{html.escape(str(row['detail']))}\n<i>({html.escape(raw_err)})</i>"
-        else:
-            body = f"<code>{html.escape(raw_err)}</code>"
+    native, source, from_store, age_s = await resolve_query_row(sym, live=live)
+    if native is None:
         await broadcaster.send_html(
-            f"⚠️ <b>/signal</b> {html.escape(sym)}\n{body}{extra}",
+            f"⚠️ <b>/signal</b> {html.escape(sym)}\n"
+            "<i>символ не отслеживается движком (вне warm-set) — свежих данных нет</i>",
             no_split=True,
         )
-        return row
+        return None
 
-    query = build_query_result(
-        row, sym, source=_source, from_store=from_store, age_s=age_s
-    )
-    text = format_query_telegram(
-        query, added_watch=bool(row.get("_watchlist_added"))
-    )
-    if liq_warn:
-        text = f"⚠️ <b>Низкая ликвидность:</b> <code>{html.escape(liq_warn)}</code>\n\n{text}"
-    if row.get("_probe_lite"):
-        text = (
-            f"{text}\n⚡ <i>облегчённый пак: серии basis/OI/long-short не запрошены "
-            f"(защита от IP-бана, символ вне юниверса)</i>"
-        )
-    from hunt_core.deliver.confluence_grid import build_confluence_grid, format_grid_telegram
+    query = build_query_result(native, sym, source=source, from_store=from_store, age_s=age_s)
+    text = format_query_telegram(query)
+
     from hunt_core.deliver._sections import format_intraday_maps_telegram
+    from hunt_core.deliver.confluence_grid import build_confluence_grid_native, format_grid_telegram
 
-    # Skip level grid + maps for WAIT signals — avoid conflicting scanner artifacts
-    _prizrak_action = str((row.get("prizrak_summary") or {}).get("action") or "").upper()
+    # Skip level grid + maps for WAIT signals — avoid conflicting scanner artifacts.
+    _prizrak_action = str((native.prizrak.summary or {}).get("action") or "").upper()
     _show_extras = _prizrak_action in {"LONG", "SHORT"} or not _prizrak_action
     if _show_extras:
-        grid = build_confluence_grid(row)
+        price = float(native.view.last_price or 0)
+        grid = build_confluence_grid_native(native.prizrak, native.features, price=price)
         if grid:
-            text = f"{text}\n\n{format_grid_telegram(grid, price=float(row.get('price') or 0))}"
-        maps_block = format_intraday_maps_telegram(row)
+            text = f"{text}\n\n{format_grid_telegram(grid, price=price)}"
+        maps_block = format_intraday_maps_telegram(native)
         if maps_block:
             text = f"{text}\n\n{maps_block}"
     text = f"{text}\n{format_freshness_footer(query)}"
     # Deep analysis for a low-cap can exceed one Telegram message (many levels);
     # split into tag-safe parts (📄 1/N) instead of truncating the tail away.
     await broadcaster.send_html(text)
-    return row
+    return native

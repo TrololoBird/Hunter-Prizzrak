@@ -1,11 +1,18 @@
 """Analyst report orchestrator."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any
-
-from hunt_core.prizrak.forecast_panel import build_structural_forecast_panel
 import html
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
+
+from hunt_core.features.models import FeaturePanel
+from hunt_core.maps.engine import MapBundle, derive_map_features
+from hunt_core.prizrak.models import PrizrakOutput
+from hunt_core.prizrak.structural_forecast_native import build_structural_forecast_panel_native
+from hunt_core.view.models import MarketView
+
+if TYPE_CHECKING:
+    from hunt_core.runtime.native_assembly import NativeAnalystView
 
 
 def _plural_ru(n: int, one: str, few: str, many: str) -> str:
@@ -56,11 +63,22 @@ def _reactions_ru(n: int) -> str:
 
 @dataclass(frozen=True, slots=True)
 class AnalystReport:
+    """Rendered deep-analysis product, built from the typed :class:`NativeAnalystView` handles.
+
+    Replaces the untyped ``row: dict`` carrier: every render method reads from ``prizrak`` (the
+    PRIZRAK verdict), ``view`` (price/spot), ``maps``/``features`` (map + TF confluence), and the
+    precomputed ``forecasts``/``spot_ladder`` side-channels — no row-dict, no legacy transport.
+    """
+
     symbol: str
-    row: dict[str, Any]
+    prizrak: PrizrakOutput
+    view: MarketView
+    maps: MapBundle | None
+    features: FeaturePanel
     fusion: dict[str, Any]
     forecasts: dict[str, dict[str, Any] | None]
-    would_deliver: bool
+    spot_ladder: dict[str, Any] | None = None
+    would_deliver: bool = False
     blockers: tuple[str, ...] = field(default_factory=tuple)
     include_watch_appendix: bool = True
     scenario: Any | None = None
@@ -88,14 +106,16 @@ class AnalystReport:
         return ""
 
     def forecast_text(self) -> str:
-        return build_structural_forecast_panel(self.forecasts, self.row)
+        return build_structural_forecast_panel_native(
+            self.forecasts, last_price=self.view.last_price
+        )
 
     def mtf_text(self) -> str:
         # Single structural source of truth: Prizrak's own multi-scale structure read
         # (row["prizrak_structure"] = the exact struct + HTF bias that gated the signal),
         # NOT the legacy display-only MTFConfluence — so what the user sees is what the
         # engine actually used. No fabrication: render nothing if it wasn't computed.
-        ps = self.row.get("prizrak_structure")
+        ps = self.prizrak.structure
         if not isinstance(ps, dict) or not ps:
             return ""
         _raw_sbt = ps.get("struct_by_tier")
@@ -194,7 +214,7 @@ class AnalystReport:
         # the candidate never reaches delivery at all). Report what the gate
         # actually did for *this* candidate instead of a canned line that
         # contradicted the message it was attached to.
-        summary = self.row.get("prizrak_summary")
+        summary = self.prizrak.summary
         direction = None
         if isinstance(summary, dict):
             action = str(summary.get("action") or "").lower()
@@ -253,8 +273,8 @@ class AnalystReport:
         # HTF bias can still contradict the live microstructure (bullish DOM/squeeze
         # under a SHORT bias) — surface that conflict instead of printing bias and
         # microstructure side by side unresolved. Only when no candidate flag showed.
-        elif isinstance(self.row.get("prizrak_bias_liq_conflict"), dict):
-            bc = self.row["prizrak_bias_liq_conflict"]
+        elif isinstance(self.prizrak.bias_liq_conflict, dict):
+            bc = self.prizrak.bias_liq_conflict
             bias_ru = _BIAS_RU.get(str(bc.get("bias") or ""), str(bc.get("bias") or ""))
             ev = ", ".join(bc.get("evidence") or [])
             note = f" ({ev})" if ev else ""
@@ -269,7 +289,7 @@ class AnalystReport:
         still shows WHERE to act — the trader's «локальные трейды 4ч» framing."""
         from hunt_core.deliver._labels import fmt_dist, fmt_price
 
-        iz = self.row.get("prizrak_interest_zones")
+        iz = self.prizrak.interest_zones
         if not isinstance(iz, dict) or not (iz.get("long") or iz.get("short")):
             return ""
         tf = str(iz.get("tf") or "4h")
@@ -277,9 +297,8 @@ class AnalystReport:
         # dict, prizrak_summary["htf_bias"] is just the string verdict. The zone
         # block can render with summary=None (no active candidate), so read the
         # dict form first (survives the WAIT tick) and fall back to the string.
-        _raw_struct = self.row.get("prizrak_structure")
-        struct = _raw_struct if isinstance(_raw_struct, dict) else {}
-        _raw_ps = self.row.get("prizrak_summary")
+        struct = self.prizrak.structure if isinstance(self.prizrak.structure, dict) else {}
+        _raw_ps = self.prizrak.summary
         ps = _raw_ps if isinstance(_raw_ps, dict) else {}
         _struct_htf = struct.get("htf_bias")
         if isinstance(_struct_htf, dict):
@@ -344,13 +363,14 @@ class AnalystReport:
                 return
             from hunt_core.deliver.zone_confluence import score_zone_confluence
 
-            _m = self.row.get("market")
-            _mp = self.row.get("maps")
+            _price = float(self.view.last_price or 0)
+            _m = derive_map_features(self.maps, current_price=_price)
+            _mp = self.maps.to_dict() if self.maps is not None else {}
             conf = score_zone_confluence(
                 lo=float(lo), hi=float(hi), side=side,
                 market=_m if isinstance(_m, dict) else {},
                 maps=_mp if isinstance(_mp, dict) else {},
-                price=float(self.row.get("price") or 0),
+                price=_price,
             )
             fund = conf.get("funding_regime")
             if conf["score"] >= 2:  # ≥2 INDEPENDENT sources (VP/liq/orderbook)
@@ -379,7 +399,7 @@ class AnalystReport:
                 # a bare number invites the reader to treat it as a target and size to it.
                 parts.append(
                     f"встречная структура → <code>{fmt_price(tgt)}</code>"
-                    f"{fmt_dist(tgt, float(self.row.get('price') or 0))} <i>(ориентир, не тейк)</i>"
+                    f"{fmt_dist(tgt, float(self.view.last_price or 0))} <i>(ориентир, не тейк)</i>"
                 )
             if parts:
                 lines.append("   " + " · ".join(parts))
@@ -595,10 +615,14 @@ class AnalystReport:
         # different, independently-tradeable setups) silently dropped the second one
         # from the message entirely. Render every candidate the engine actually
         # produced, strongest first, not just the one that happened to win "best".
-        signals = self.row.get("prizrak_signals")
-        candidates = [s for s in signals if isinstance(s, dict)] if isinstance(signals, list) else []
+        signals = self.prizrak.signals
+        candidates = (
+            [s for s in signals if isinstance(s, dict)]
+            if isinstance(signals, (list, tuple))
+            else []
+        )
         if not candidates:
-            summary = self.row.get("prizrak_summary")
+            summary = self.prizrak.summary
             if not (isinstance(summary, dict) and summary):
                 return ""
             candidates = [summary]
@@ -624,88 +648,51 @@ class AnalystReport:
         return "\n".join(line for line in lines if line)
 
 
-def _enrich_analyst_row(
-    work: dict[str, Any],
+def build_analyst_report(
+    native: NativeAnalystView,
     *,
-    ohlcv_by_tf: dict[str, list[list[float]]] | None = None,
-) -> dict[str, Any]:
-    sym = str(work.get("symbol") or "").upper()
-    tf = work.get("timeframes") or {}
-    price = float(work.get("price") or 0)
-    if not sym or not tf or price <= 0:
-        return work
-
-    # Idempotency guard: build_analyst_report_from_row(row, full=True) re-runs this
-    # on every render (e.g. every /signal reply for an already-enriched, cached row).
-    # Without ohlcv_by_tf explicitly passed, ensure_prizrak_verdict falls back to
-    # row_ohlcv_by_tf(row) — which is always empty (row["timeframes"][tf]["ohlcv"]
-    # is never populated by the live pipeline) — and would silently overwrite an
-    # already-correct prizrak_summary/prizrak_signals (computed once, with real bars,
-    # by assemble_analyst_tick) back to None right before rendering. Skip recomputation
-    # when the row already carries a verdict and the caller isn't supplying fresh bars.
-    if ohlcv_by_tf is None and "prizrak_signals" in work:
-        return work
-
-    # PrizrakTrade engine is the decision authority (full replacement of the old
-    # L0-L5/5-module pipeline — see hunt_core/prizrak/). Fills the same
-    # row["prizrak_summary"] slot every existing consumer already reads, plus
-    # row["prizrak_signals"] (all 0..N independent candidates, not just the best one).
-    from hunt_core.prizrak.entry import ensure_prizrak_verdict
-
-    ensure_prizrak_verdict(work, ohlcv_by_tf=ohlcv_by_tf)
-    return work
-
-
-def build_analyst_report_from_row(
-    row: dict[str, Any],
-    *,
-    full: bool = True,
     include_watch_appendix: bool = True,
-    would_deliver: bool | None = None,
+    would_deliver: bool = False,
     blockers: list[str] | None = None,
+    scenario: Any | None = None,
 ) -> AnalystReport:
-    """Analyst product path — pinned/MTF/maps; watch delivery is optional appendix."""
-    sym = str(row.get("symbol") or "").upper()
-    work = dict(row)
-    if full:
-        work = _enrich_analyst_row(work)
+    """Build the deep-analysis product from the typed :class:`NativeAnalystView`.
 
-    from hunt_core.prizrak.structural_forecast import (
-        build_structural_down_forecast,
-        build_structural_up_forecast,
-    )
+    The forecasts / fusion / spot-ladder are already computed on ``native`` (native producers), so
+    this is a pure projection onto :class:`AnalystReport` — no row-dict, no ``ensure_prizrak_verdict``
+    re-run (``assemble_prizrak`` is the sole producer). The compact symbol (``BTCUSDT``) is derived
+    from the unified ``view.symbol`` for the display formatter.
 
-    up_fc = build_structural_up_forecast(work)
-    down_fc = build_structural_down_forecast(work)
-    forecasts = {
-        "structural_up": up_fc,
-        "structural_down": down_fc,
-    }
-    _raw_fusion = work.get("manipulation_fusion")
+    Args:
+        native: The typed native view (``prizrak``/``view``/``maps``/``features`` + side-channels).
+        include_watch_appendix: Whether to render the scanner would-deliver appendix (deep card =
+            ``False``); the native deep path does not compute a scanner verdict.
+        would_deliver: Scanner would-deliver flag (only meaningful with the appendix).
+        blockers: Scanner delivery blockers (appendix only).
+        scenario: Optional scenario metadata object (no native producer yet → typically ``None``).
+
+    Returns:
+        The rendered-ready :class:`AnalystReport`.
+    """
+    _raw_fusion = native.fusion
     fusion = _raw_fusion if isinstance(_raw_fusion, dict) else {}
-
-    wd = would_deliver
-    if wd is None and include_watch_appendix:
-        wd = bool(work.get("would_deliver"))
-    elif not include_watch_appendix:
-        wd = False
-
-    bl = tuple(blockers or work.get("delivery_blockers") or [])
-
-    scenario = work.get("scenario")
-
+    sym = native.view.symbol.split(":", 1)[0].replace("/", "").upper()
     return AnalystReport(
         symbol=sym,
-        row=work,
+        prizrak=native.prizrak,
+        view=native.view,
+        maps=native.maps,
+        features=native.features,
         fusion=fusion,
-        forecasts=forecasts,
-        would_deliver=bool(wd) if wd is not None else False,
-        blockers=bl,
+        forecasts=native.forecasts,
+        spot_ladder=native.spot_ladder,
+        would_deliver=would_deliver if include_watch_appendix else False,
+        blockers=tuple(blockers or ()),
         include_watch_appendix=include_watch_appendix,
         scenario=scenario,
     )
 
 
-build_deep_report = build_analyst_report_from_row
+build_deep_report = build_analyst_report
 
-__all__ = ["AnalystReport", "build_analyst_report_from_row", "build_deep_report"]
+__all__ = ["AnalystReport", "build_analyst_report", "build_deep_report"]
