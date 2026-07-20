@@ -20,10 +20,9 @@ Invariants: closed-only (I-5 — ``rest.seed_ohlcv`` drops the forming bar); fai
 still older than its staleness bound after a refetch, or an unparseable funding record, yields
 ``None``/is skipped, never a fabricated bar or ``0.0`` rate).
 
-Two implementations share one :class:`ScannerFeed` interface so the coexistence flag can pick either
-without the delivery path knowing which: :class:`EngineScannerFeed` (native, the cutover target) and
-:class:`LegacyScannerFeed` (the doomed ``HuntCcxtClient`` behind the same interface, byte-identical to
-the pre-cutover path, deleted with the transport at S11).
+:class:`EngineScannerFeed` implements the :class:`ScannerFeed` interface natively over the engine's
+on-demand REST tail (``engine.exchange`` + ``engine.rest``); it is the sole scanner feed — the legacy
+``HuntCcxtClient``-backed feed was deleted once the engine runtime became the transport.
 """
 from __future__ import annotations
 
@@ -179,67 +178,4 @@ class EngineScannerFeed:
         return ctx
 
 
-class LegacyScannerFeed:
-    """The doomed ``HuntCcxtClient`` behind the :class:`ScannerFeed` interface (deleted at S11).
-
-    Byte-identical to the pre-cutover ``manipulation_delivery._fetch_symbol_data`` path — used when
-    the engine coexistence flag is OFF so the default live scanner is unchanged during the cutover.
-    """
-
-    def __init__(
-        self,
-        client: Any,
-        *,
-        timeframes: tuple[str, ...] = _TIMEFRAMES,
-        parallelism: int = _DEFAULT_PARALLELISM,
-    ) -> None:
-        self._client = client
-        self._timeframes = timeframes
-        self._sem = asyncio.Semaphore(parallelism)
-
-    async def detection_data(
-        self, symbol: str, *, now_ms: float
-    ) -> tuple[str, OHLCVByTF, FundingCtx | None]:
-        ohlcv_by_tf: OHLCVByTF = {}
-
-        async def _fetch(tf: str) -> tuple[str, list[Bar] | None]:
-            try:
-                bars = await self._client.fetch_ohlcv_list_cached(
-                    symbol, tf, limit=_LOOKBACK_BY_TF[tf]
-                )
-                if bars and len(bars) >= 2:
-                    interval_ms = _INTERVAL_MS.get(tf)
-                    if interval_ms is not None and int(bars[-1][0]) + interval_ms > now_ms:
-                        bars = bars[:-1]  # drop the still-forming candle (list path, I-5)
-                if bars and len(bars) > 0:
-                    if now_ms - int(bars[-1][0]) > _MAX_STALE_MS_BY_TF.get(tf, 3600_000):
-                        return tf, None
-                return tf, bars
-            except Exception:
-                LOG.debug("manipulation_fetch_failed sym=%s tf=%s", symbol, tf, exc_info=True)
-                return tf, None
-
-        async with self._sem:
-            tfs = await asyncio.gather(
-                *[_fetch(tf) for tf in self._timeframes], return_exceptions=True
-            )
-            funding = await self._funding_for(symbol)
-        for item in tfs:
-            if isinstance(item, BaseException):
-                continue
-            tf, bars = item
-            if isinstance(tf, str) and bars:
-                ohlcv_by_tf[tf] = bars
-        return symbol, ohlcv_by_tf, funding
-
-    async def _funding_for(self, symbol: str) -> FundingCtx | None:
-        try:
-            hist = await self._client.fetch_funding_rate_history(symbol, limit=_FUNDING_LIMIT)
-        except Exception:
-            LOG.debug("manipulation_funding_failed sym=%s", symbol, exc_info=True)
-            return None
-        rates = [float(r.get("fundingRate") or 0.0) for r in (hist or [])]
-        return _funding_ctx_from(rates)
-
-
-__all__ = ["ScannerFeed", "EngineScannerFeed", "LegacyScannerFeed", "OHLCVByTF", "FundingCtx"]
+__all__ = ["ScannerFeed", "EngineScannerFeed", "OHLCVByTF", "FundingCtx"]

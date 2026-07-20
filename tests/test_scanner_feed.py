@@ -14,7 +14,6 @@ from hunt_core.scanner.feed import (
     _MAX_STALE_MS_BY_TF,
     _TIMEFRAMES,
     EngineScannerFeed,
-    LegacyScannerFeed,
 )
 
 _H1_MS = 3_600_000  # 1h interval in ms
@@ -161,28 +160,3 @@ def test_funding_empty_history_is_none():
     assert ctx is None  # нет данных, never a fabricated context
 
 
-# ── LegacyScannerFeed: the coexistence-OFF path must stay byte-identical to the old client path ──
-
-
-class _FakeClient:
-    def __init__(self, rows: list[list[float]], funding: list[dict]) -> None:
-        self._rows = rows
-        self._funding = funding
-
-    async def fetch_ohlcv_list_cached(self, symbol, tf, limit):
-        return [list(r) for r in self._rows]
-
-    async def fetch_funding_rate_history(self, symbol, limit=10):
-        return list(self._funding)
-
-
-def test_legacy_feed_drops_forming_and_keeps_client_semantics():
-    """LegacyScannerFeed reproduces the pre-cutover fetch: conditional forming-drop + old funding."""
-    t = 1_000 * _H1_MS
-    rows = _rows(t, n_closed=5)  # last row is forming (open = t + interval)
-    client = _FakeClient(rows, funding=[{"fundingRate": 0.001}, {"fundingRate": None}])
-    feed = LegacyScannerFeed(client, timeframes=("1h",))
-    _, ohlcv, ctx = asyncio.run(feed.detection_data("X", now_ms=t + _H1_MS + 5))
-    assert len(ohlcv["1h"]) == 5 and int(ohlcv["1h"][-1][0]) == t
-    # Legacy `or 0.0` semantics preserved (None → 0.0) — this is the OLD path, kept byte-identical:
-    assert ctx == {"rate": 0.0, "peak": 0.001}

@@ -12,7 +12,7 @@ from hunt_core import clock, serde
 from hunt_core.view.runtime import MarketRuntime, build_market_runtime
 from hunt_core.data.collect import TickBatchCache, safe_fetch
 from hunt_core.data.lake import FeatureLakeWriter, buffer_tick_rows, flush_lake
-from hunt_core.scanner.feed import EngineScannerFeed, LegacyScannerFeed, ScannerFeed
+from hunt_core.scanner.feed import EngineScannerFeed, ScannerFeed
 from hunt_core.scanner.prescan import (
     PrescanDebounceQueue,
     PrescanEngine,
@@ -362,27 +362,22 @@ async def run_loop(
 
     set_live_spot_companion(spot_companion)
 
-    # ── ADR-0004 coexistence: the engine-native MarketRuntime alongside the legacy plane ──
-    # OFF by default (HUNT_ENGINE_COEXIST). When enabled it constructs+starts the ccxt.pro engine
-    # (MultiEngine + SpotEngine) over the pinned universe. When ON the engine is progressively
-    # load-bearing (S7: scanner detection frames via EngineScannerFeed; S8: the tick's spot
-    # enrichment via set_live_spot_engine below) — always gated, OFF stays byte-identical, and a
-    # start failure degrades (logged), never sinks the loop.
-    if os.environ.get("HUNT_ENGINE_COEXIST", "").strip().lower() in {"1", "true", "yes", "on"}:
+    # ── ADR-0004: the engine-native MarketRuntime is the transport for the scanner (and, as the
+    # tick-swap lands, the deep/main tick). Constructed for the continuous loop — the ccxt.pro engine
+    # (MultiEngine + SpotEngine) over the pinned universe — alongside the still-live legacy plane
+    # during the cutover. Gated on `not once` for now: only the continuous scanner uses it today, so a
+    # one-shot smoke stays legacy-only (un-gate when the main tick swaps onto the view). A start
+    # failure degrades (logged, market_runtime=None) → the scanner is skipped, never sinks the loop.
+    if not once:
         try:
             eng_fut, eng_spot = _engine_universe(PINNED_SYMBOLS, cli_symbols)
             market_runtime = build_market_runtime(eng_fut, spot_symbols=eng_spot)
             await market_runtime.start()
-            # S8 first cut: source market.spot_* from the engine SpotEngine at the tick seam
-            # (tick_assembly.snapshot_symbol) instead of the legacy companion. None-safe: if spot
-            # is disabled the seam falls back to the companion.
             set_live_spot_engine(market_runtime.spot)
-            # S8-core: expose the runtime so the tick can build a per-symbol MarketView for the
-            # data-source swap. Currently shadow-only (parity telemetry, no behaviour change).
             set_live_market_runtime(market_runtime)
-            LOG.info("engine_coexist_started", futures=len(eng_fut), spot=len(eng_spot))
+            LOG.info("engine_runtime_started", futures=len(eng_fut), spot=len(eng_spot))
         except Exception:
-            LOG.exception("engine_coexist_start_failed")  # additive/non-load-bearing — degrade
+            LOG.exception("engine_runtime_start_failed")  # degrade, never sink the loop
             market_runtime = None
             set_live_spot_engine(None)
             set_live_market_runtime(None)
@@ -410,23 +405,21 @@ async def run_loop(
 
     manipulation_task: asyncio.Task[None] | None = None
     if not once:
-        # ADR-0004 S7: the scanner's detection-frame read is cut off the legacy client onto the
-        # engine when coexistence is ON. OFF → LegacyScannerFeed (byte-identical to pre-cutover);
-        # ON → EngineScannerFeed on the primary engine's ccxt client (engine.exchange + engine.rest,
-        # the on-demand REST tail the engine serves for non-tracked symbols). The delivery path
-        # only knows the ScannerFeed interface.
-        scanner_feed: ScannerFeed = (
-            EngineScannerFeed(market_runtime.multi.primary)
-            if market_runtime is not None
-            else LegacyScannerFeed(client)
-        )
-        # Pass the CLI seed only — the loop re-resolves watchlist ∪ cli minus pinned on
-        # every pass, so freshly-prescanned coins are actually scanned (see docstring).
-        manipulation_task = asyncio.create_task(
-            _manipulation_scan_loop(cli_symbols, scanner_feed, broadcaster, send_telegram),
-            name="manipulation_scan_loop",
-        )
-        LOG.info("manipulation_scan_loop_scheduled", engine_fed=market_runtime is not None)
+        # ADR-0004 S7: the scanner reads its detection frames off the ENGINE — EngineScannerFeed on
+        # the primary engine's ccxt client (engine.exchange + engine.rest, the on-demand REST tail the
+        # engine serves for non-tracked symbols). The legacy client feed is deleted; if the engine
+        # runtime failed to start the scanner is simply skipped (logged), never client-fed.
+        if market_runtime is None:
+            LOG.error("manipulation_scan_disabled | engine runtime unavailable")
+        else:
+            scanner_feed: ScannerFeed = EngineScannerFeed(market_runtime.multi.primary)
+            # Pass the CLI seed only — the loop re-resolves watchlist ∪ cli minus pinned on
+            # every pass, so freshly-prescanned coins are actually scanned (see docstring).
+            manipulation_task = asyncio.create_task(
+                _manipulation_scan_loop(cli_symbols, scanner_feed, broadcaster, send_telegram),
+                name="manipulation_scan_loop",
+            )
+            LOG.info("manipulation_scan_loop_scheduled", engine_fed=True)
 
     from hunt_core.data.frame_cache import reset_frame_cache
 
