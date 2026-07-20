@@ -5,8 +5,14 @@ from __future__ import annotations
 
 from typing import Any
 
+import structlog
+
 from hunt_core.deliver._labels import fmt_dist as _fmt_dist
 from hunt_core.deliver._labels import fmt_price as _fmt_price_adaptive
+from hunt_core.features.models import FeaturePanel
+from hunt_core.prizrak.models import PrizrakOutput
+
+LOG = structlog.get_logger(__name__)
 
 
 def build_confluence_grid(row: dict[str, Any]) -> list[dict[str, Any]]:
@@ -169,6 +175,195 @@ def build_confluence_grid(row: dict[str, Any]) -> list[dict[str, Any]]:
     regime = row.get("regime") or {}
     if regime.get("poc_1h"):
         grid.append({"tf": "regime", "poc": regime.get("poc_1h"), "note": "session POC"})
+    return grid
+
+
+def build_confluence_grid_native(
+    prizrak: PrizrakOutput,
+    features: FeaturePanel,
+    *,
+    price: float,
+) -> list[dict[str, Any]]:
+    """Level map from TYPED handles — native replacement for :func:`build_confluence_grid`.
+
+    Same return shape (a ``list[dict]`` consumed by :func:`format_grid_telegram`) and same geometry
+    (deep-zone collection, clustering, dedup); only the SOURCES move from the untyped row-dict to the
+    typed spine:
+
+    * ``price``               ← ``MarketView.last_price`` (passed in).
+    * donchian support/resist ← ``FeaturePanel.tf[tf].donchian_low20 / .donchian_high20``.
+    * ``poc``/``vah``/``val`` ← ``FeaturePanel.vp[tf]``.
+    * trailing session POC    ← ``FeaturePanel.vp["1h"].poc``.
+    * prizrak structure       ← ``PrizrakOutput.structure`` (still a dict payload).
+
+    Gap — ``local_support`` / ``local_resistance``:
+        The untyped grid read ``block.get("local_support") or block.get("donchian_low20")``. But
+        ``tf_snapshot`` — the sole producer of ``row["timeframes"][tf]`` — NEVER wrote those keys, so
+        they were phantom reads that always resolved to ``None`` and the ``or`` always fell through to
+        donchian. ``TfSummary`` has no such field either → this form uses donchian directly (identical
+        behaviour, dead slot removed).
+
+    Behaviour change — ``poc``/``vah``/``val``:
+        Those TF blocks also never carried ``poc``/``vah``/``val`` (always ``None``); sourcing them
+        from ``FeaturePanel.vp[tf]`` POPULATES per-TF POC/VAH/VAL the old grid dropped — a
+        correct-wiring change, not a byte-parity reproduction.
+
+    Args:
+        prizrak: The typed PRIZRAK verdict; ``.structure`` carries ``struct_by_tf`` deep levels.
+        features: The typed feature panel; ``.tf`` (donchian) and ``.vp`` (POC/VAH/VAL) per TF.
+        price: Live price (``MarketView.last_price``) used to validate levels against spot.
+
+    Returns:
+        The level-map grid — a ``list[dict[str, Any]]`` in the exact shape
+        :func:`format_grid_telegram` consumes.
+    """
+    price = float(price or 0)
+    grid: list[dict[str, Any]] = []
+
+    # --- legacy TF levels (1h, 15m, 5m): donchian from tf summaries, POC/VAH/VAL from vp ---
+    for tf_name in ("1h", "15m", "5m"):
+        tsum = features.tf.get(tf_name)
+        vp = features.vp.get(tf_name)
+        if tsum is None and vp is None:
+            LOG.debug("confluence_grid_native.tf_empty", tf=tf_name)
+            continue
+        support = tsum.donchian_low20 if tsum is not None else None
+        resistance = tsum.donchian_high20 if tsum is not None else None
+        if support is not None and float(support) <= 0:
+            support = None
+        if resistance is not None and float(resistance) <= 0:
+            resistance = None
+        if price > 0:
+            if support is not None and float(support) >= price:
+                support = None
+            if resistance is not None and float(resistance) <= price:
+                resistance = None
+        grid.append(
+            {
+                "tf": tf_name,
+                "poc": vp.poc if vp is not None else None,
+                "vah": vp.vah if vp is not None else None,
+                "val": vp.val if vp is not None else None,
+                "support": support,
+                "resistance": resistance,
+            }
+        )
+
+    # --- Prizrak structural levels per-TF (4h, 1w, + 1h/1d fallback) — dict payload unchanged ---
+    ps = prizrak.structure if isinstance(prizrak.structure, dict) else {}
+    _sbt = ps.get("struct_by_tf")
+    struct_by_tf: dict[str, Any] = _sbt if isinstance(_sbt, dict) else {}
+    for tf_name in ("1w", "1d", "4h", "1h"):
+        _s3 = struct_by_tf.get(tf_name)
+        s = _s3 if isinstance(_s3, dict) else {}
+        if not s:
+            continue
+        kl = s.get("key_levels") or {}
+        support = kl.get("support")
+        resistance = kl.get("resistance")
+        if price > 0:
+            if support is not None and float(support) >= price:
+                support = None
+            if resistance is not None and float(resistance) <= price:
+                resistance = None
+        grid.append(
+            {
+                "tf": tf_name,
+                "support": support,
+                "resistance": resistance,
+                "last_swing_high": kl.get("last_swing_high"),
+                "last_swing_low": kl.get("last_swing_low"),
+                "_all_swing_highs": s.get("all_swing_highs"),
+                "_all_swing_lows": s.get("all_swing_lows"),
+            }
+        )
+
+    # Levels already printed on a per-TF row — the "глубже/выше" lists must not repeat them.
+    shown_levels: list[float] = []
+    for g in grid:
+        for k in ("support", "resistance"):
+            v = g.get(k)
+            if isinstance(v, (int, float)) and v > 0:
+                shown_levels.append(float(v))
+
+    def _dedup_levels(vals: list[float], *, min_sep_pct: float = 0.15) -> list[float]:
+        """Drop levels within ``min_sep_pct`` of an already-kept OR already-shown level."""
+        kept: list[float] = []
+        for p in vals:
+            if any(abs(p - sv) / max(p, 1e-9) * 100.0 < min_sep_pct for sv in shown_levels):
+                continue
+            if any(abs(p - kv) / max(p, 1e-9) * 100.0 < min_sep_pct for kv in kept):
+                continue
+            kept.append(p)
+        return kept
+
+    # --- Multi-level deep zones: collect swing lows below / highs above price ---
+    deeper_supports: list[float] = []
+    deeper_resistances: list[float] = []
+    for g in grid:
+        lows = g.get("_all_swing_lows")
+        if isinstance(lows, list):
+            for p in lows:
+                if isinstance(p, (int, float)) and p > 0 and p < price:
+                    if p not in deeper_supports and _level_within_range(float(p), price):
+                        deeper_supports.append(p)
+        highs = g.get("_all_swing_highs")
+        if isinstance(highs, list):
+            for p in highs:
+                if isinstance(p, (int, float)) and p > 0 and p > price:
+                    if p not in deeper_resistances and _level_within_range(float(p), price):
+                        deeper_resistances.append(p)
+
+    if deeper_supports:
+        sorted_lows = _dedup_levels(sorted(deeper_supports, reverse=True))
+        if sorted_lows:
+            grid.append({"tf": "глубже", "support": sorted_lows[:6]})
+        clusters = _cluster_levels(sorted_lows, pct_gap=2.5)
+        if len(clusters) > 1:
+            for i, cl in enumerate(clusters):
+                if len(cl) < 2:
+                    continue
+                lo, hi = min(cl), max(cl)
+                if hi > price:
+                    continue
+                if lo <= 0 or (hi - lo) / hi * 100.0 > _ZONE_ROW_MAX_WIDTH_PCT:
+                    continue
+                grid.append(
+                    {
+                        "tf": f"зона {i + 1}",
+                        "support": f"{_fmt_price_adaptive(hi)}–{_fmt_price_adaptive(lo)}",
+                        "_skip_generic": True,
+                    }
+                )
+
+    if deeper_resistances:
+        sorted_highs = _dedup_levels(sorted(deeper_resistances))
+        if sorted_highs:
+            grid.append({"tf": "выше", "resistance": sorted_highs[:6]})
+        clusters_h = _cluster_levels(sorted_highs, pct_gap=2.5)
+        if len(clusters_h) > 1:
+            for i, cl in enumerate(clusters_h):
+                if len(cl) < 2:
+                    continue
+                lo, hi = min(cl), max(cl)
+                if lo < price:
+                    continue
+                if lo <= 0 or (hi - lo) / hi * 100.0 > _ZONE_ROW_MAX_WIDTH_PCT:
+                    continue
+                grid.append(
+                    {
+                        "tf": f"зона {i + 1}",
+                        "resistance": f"{_fmt_price_adaptive(hi)}–{_fmt_price_adaptive(lo)}",
+                        "_skip_generic": True,
+                    }
+                )
+
+    # Trailing session-POC row — was row["regime"]["poc_1h"]; Regime has no poc_1h, its value is
+    # the 1h volume-profile POC (features/prepare.py poc_1h=profile_1h[0]) == vp["1h"].poc.
+    vp_1h = features.vp.get("1h")
+    poc_1h = vp_1h.poc if vp_1h is not None else None
+    if poc_1h is not None:
+        grid.append({"tf": "regime", "poc": poc_1h, "note": "session POC"})
     return grid
 
 
