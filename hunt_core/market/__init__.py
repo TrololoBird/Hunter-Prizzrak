@@ -1,74 +1,38 @@
-"""Hunter market data plane — CCXT (REST + Pro watch) only."""
+"""Hunter market plane — transport-agnostic CCXT symbol/gate helpers (ADR-0004).
 
-from hunt_core.market.ccxt_guard import ccxt_method_available, ccxt_ws_method_available
-from hunt_core.market.ccxt_rest import HuntCcxtRestGate
-from hunt_core.market.factory import (
-    create_async_binance_future,
-    create_async_binance_spot,
-    create_pro_binance_future,
-    create_sync_binance_future,
-    create_hunt_market_plane,
-    create_hunt_market_plane_from_settings,
-    fetch_klines_sync,
-    fetch_klines_async,
-    ccxt_ohlcv_to_frame,
-    finalize_kline_frame,
+The legacy ccxt transport (``HuntCcxtClient`` / ``HuntCcxtStreams`` / spot companion / cross-venue REST
+plane / rate-gate) was deleted at the engine cutover — the ccxt.pro engine (:mod:`hunt_core.engine`) is
+the sole transport now. What remains here is the pure, transport-agnostic surface every consumer still
+needs: symbol id ↔ unified resolution, the universe-ticker normalizer, the tradability gate, and the
+egress/network helpers. Import submodules directly (``hunt_core.market.symbols`` /
+``hunt_core.market.network`` / ``hunt_core.market.tick_registry``) for the rest.
+"""
+
+from hunt_core.market.symbol_gate import gate_symbol_list, is_allowed_for_analysis
+from hunt_core.market.symbols import (
+    SymbolResolutionError,
+    fetch_ticker_rows,
+    filter_tradable_symbols,
+    is_crypto_underlying,
+    is_linear_usdt_swap_market,
+    normalize_ticker_rows,
+    to_binance_symbol,
+    to_ccxt_symbol,
+    try_binance_id_from_ccxt,
+    underlying_type_of,
 )
-from hunt_core.market.client import HuntCcxtClient, normalize_depth_levels
-from hunt_core.market.capacity import HuntLoadPlanner
-from hunt_core.market.cross import (
-    CrossExchangeConfig,
-    SECONDARY_EXCHANGES,
-    apply_cross_exchange_env,
-    apply_cross_snapshot_to_market,
-    attach_cross_fields,
-    attach_cross_microstructure,
-    fetch_secondary_ticker_overlay,
-    load_cross_exchange_config,
-    merge_ws_cross_into_snapshot,
-    refresh_cross_exchange_cache,
-)
-from hunt_core.market.live_price import apply_live_price_to_row, resolve_live_price
-from hunt_core.market.symbol_gate import (
-    gate_symbol_list,
-    is_allowed_for_analysis,
-)
-from hunt_core.market.symbols import SymbolResolutionError
-from hunt_core.market.spot import HuntCcxtSpotCompanion
-from hunt_core.market.streams import HuntCcxtStreams
 
 __all__ = [
-    "HuntCcxtClient",
-    "HuntCcxtSpotCompanion",
-    "HuntCcxtStreams",
-    "HuntCcxtRestGate",
-    "HuntLoadPlanner",
-    "ccxt_method_available",
-    "ccxt_ws_method_available",
-    "create_async_binance_future",
-    "create_async_binance_spot",
-    "create_hunt_market_plane",
-    "create_hunt_market_plane_from_settings",
-    "create_pro_binance_future",
-    "create_sync_binance_future",
-    "fetch_klines_sync",
-    "fetch_klines_async",
-    "ccxt_ohlcv_to_frame",
-    "finalize_kline_frame",
     "SymbolResolutionError",
-    "CrossExchangeConfig",
-    "SECONDARY_EXCHANGES",
-    "apply_cross_exchange_env",
-    "apply_cross_snapshot_to_market",
-    "attach_cross_fields",
-    "attach_cross_microstructure",
-    "fetch_secondary_ticker_overlay",
-    "load_cross_exchange_config",
-    "merge_ws_cross_into_snapshot",
-    "refresh_cross_exchange_cache",
-    "apply_live_price_to_row",
-    "resolve_live_price",
-    "normalize_depth_levels",
+    "fetch_ticker_rows",
+    "filter_tradable_symbols",
     "gate_symbol_list",
     "is_allowed_for_analysis",
+    "is_crypto_underlying",
+    "is_linear_usdt_swap_market",
+    "normalize_ticker_rows",
+    "to_binance_symbol",
+    "to_ccxt_symbol",
+    "try_binance_id_from_ccxt",
+    "underlying_type_of",
 ]

@@ -141,25 +141,10 @@ class LastTickStore:
 _STORE: LastTickStore | None = None
 _HUNT_STORE: HuntScanStore | None = None
 _DEEP_STORE: DeepQueryStore | None = None
-# Live spot companion handle (HuntCcxtSpotCompanion), registered once by the
-# watch loop when the market plane is created. Lets the deep/analyst plane reuse
-# the SAME spot exchange + weight budget instead of owning a second connection
-# (callers of assemble_analyst_tick only carry the futures client).
-_SPOT_COMPANION: Any | None = None
-# Live engine SpotEngine handle (ADR-0004 S8), registered once by the watch loop ONLY when the
-# coexistence engine is started (HUNT_ENGINE_COEXIST). When present, the tick's spot enrichment
-# (market.spot_*) is sourced from the engine's push-state SpotEngine instead of the legacy
-# HuntCcxtSpotCompanion. Absent (None) ⇒ the legacy companion path is used, byte-identical.
+# Live engine SpotEngine handle (ADR-0004), registered once by the watch loop when the engine
+# runtime starts. The tick's spot enrichment (market.spot_*) is sourced from the engine's
+# push-state SpotEngine. Absent (None) ⇒ spot enrichment is skipped (fail-loud, no fabrication).
 _SPOT_ENGINE: Any | None = None
-
-
-def set_live_spot_companion(spot: Any | None) -> None:
-    global _SPOT_COMPANION
-    _SPOT_COMPANION = spot
-
-
-def live_spot_companion() -> Any | None:
-    return _SPOT_COMPANION
 
 
 def set_live_spot_engine(spot_engine: Any | None) -> None:
@@ -215,9 +200,7 @@ __all__ = [
     "hunt_scan_store",
     "last_tick_store",
     "live_market_runtime",
-    "live_spot_companion",
     "live_spot_engine",
     "set_live_market_runtime",
-    "set_live_spot_companion",
     "set_live_spot_engine",
 ]

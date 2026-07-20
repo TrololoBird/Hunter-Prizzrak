@@ -178,3 +178,75 @@ def filter_tradable_symbols(
             len(out),
         )
     return out
+
+
+def _ticker_float(value: Any) -> float:
+    """ccxt ticker field → finite float, ``0.0`` fail-safe (a missing/garbage field is not fabricated)."""
+    if value is None:
+        return 0.0
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return out if out == out and out not in (float("inf"), float("-inf")) else 0.0
+
+
+def normalize_ticker_rows(
+    exchange: Any, tickers: dict[str, dict[str, Any]]
+) -> list[dict[str, float | str]]:
+    """ccxt bulk ``fetch_tickers`` payload → the normalized 24h ticker rows the scanner funnel reads.
+
+    Projects every linear-USDT-swap ccxt ticker onto the row shape the universe funnel / regime
+    calibration consume (``symbol`` as the Binance id, ``last_price``, ``price_change_percent``,
+    ``quote_volume``, ``trade_count``, ``underlying_type`` + optional ``high_price``/``low_price``).
+    This is the engine-native replacement for the old ``HuntCcxtClient.fetch_ticker_24h`` body —
+    fail-loud: a symbol with no last/quote-volume is dropped, never fabricated. ``exchange.markets``
+    must be loaded (the engine loads them on start).
+    """
+    rows: list[dict[str, float | str]] = []
+    for ccxt_sym, item in (tickers or {}).items():
+        if not isinstance(item, dict):
+            continue
+        market = exchange.markets.get(ccxt_sym) if getattr(exchange, "markets", None) else None
+        if not is_linear_usdt_swap_market(market):
+            continue
+        sym = try_binance_id_from_ccxt(ccxt_sym, exchange=exchange)
+        if not sym:
+            continue
+        last_price = _ticker_float(item.get("last"))
+        quote_volume = _ticker_float(item.get("quoteVolume"))
+        if last_price <= 0 or quote_volume <= 0:
+            continue
+        raw_info = item.get("info")
+        info: dict[str, Any] = raw_info if isinstance(raw_info, dict) else {}
+        row: dict[str, float | str] = {
+            "symbol": sym,
+            "last_price": last_price,
+            "price_change_percent": _ticker_float(item.get("percentage")),
+            "quote_volume": quote_volume,
+            "trade_count": _ticker_float(info.get("count")),
+            # Asset class from exchangeInfo so the scanner gate can drop tokenized
+            # equities/commodities (COIN = real crypto). Kept on the row — not filtered
+            # here — so /signal and pinned metals still get their ticker.
+            "underlying_type": underlying_type_of(market),
+        }
+        high = _ticker_float(item.get("high"))
+        low = _ticker_float(item.get("low"))
+        if high > 0:
+            row["high_price"] = high
+        if low > 0:
+            row["low_price"] = low
+        rows.append(row)
+    return rows
+
+
+async def fetch_ticker_rows(exchange: Any) -> list[dict[str, float | str]]:
+    """Fetch + normalize the whole-universe 24h tickers off the engine's ccxt exchange (fail-loud ``[]``).
+
+    The single universe-wide REST batch (weight ~40) the scanner funnel, prescan and regime
+    calibration all rank against. Delegates the raw call to :func:`hunt_core.engine.rest.fetch_all_tickers`
+    (which returns ``{}`` on failure) and projects it via :func:`normalize_ticker_rows`.
+    """
+    from hunt_core.engine.rest import fetch_all_tickers
+
+    return normalize_ticker_rows(exchange, await fetch_all_tickers(exchange))

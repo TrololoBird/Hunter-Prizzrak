@@ -514,8 +514,6 @@ from datetime import UTC, datetime
 import structlog
 
 from hunt_core import serde
-from hunt_core.domain.config import load_settings
-from hunt_core.market import HuntCcxtClient
 def load_adaptive_store(*_a, **_k) -> dict: return {}
 def save_adaptive_store(*_a, **_k) -> None: return None
 def update_change_24h(*_a, **_k) -> None: return None
@@ -806,133 +804,132 @@ async def run_scan(
     *,
     limit: int = 30,
     min_score: float = HUNT_SCORE_WATCH_THRESHOLD,
-    client: HuntCcxtClient | None = None,
+    exchange: Any,
 ) -> dict[str, Any]:
-    settings = load_settings()
-    owned_client = client is None
-    if client is None:
-        client = HuntCcxtClient.from_settings(settings)
-    await client.load_markets()
-    try:
-        tickers = _enrich_ticker_rows(await client.fetch_ticker_24h())
-        gated_tickers = [
-            row
-            for row in tickers
-            if apply_quality_gates(row)[0]
-        ]
-        prescan_hits = prescan_from_tickers(gated_tickers, engine=PrescanEngine())
-        pump_store = load_pump_history()
-        adaptive_store = load_adaptive_store()
-        stats_map = {sym: st.to_public() for sym, st in pump_store.symbols.items()}
-        candidates = rank_hunt_candidates(
-            gated_tickers, limit=max(limit, 30), pump_stats_by_sym=stats_map, adaptive=adaptive_store
-        )
-        candidates = enrich_candidates_with_percentile_ranks(candidates)
-        hot = funnel_hot_candidates(candidates)
-        for row in tickers:
-            sym = str(row.get("symbol") or "").strip().upper()
-            # is-None fallthrough: a 24h change of exactly 0.0 is a real reading.
-            chg = row.get("price_change_percent")
-            if chg is None:
-                chg = row.get("price_change_pct")
-            if sym and chg is not None:
-                with contextlib.suppress(TypeError, ValueError):
-                    update_change_24h(adaptive_store, sym, float(chg))
-        save_adaptive_store(adaptive_store)
-        now = datetime.now(UTC)
-        for c in candidates:
-            if "pump_extreme" not in c.flags and "pump_extreme_z" not in c.flags:
-                continue
-            if c.change_24h_pct <= 0:
-                continue
-            if _has_recent_leg(pump_store, c.symbol, "scanner", hours=24.0):
-                continue
-            record_pump_leg(
-                    pump_store,
-                    symbol=c.symbol,
-                    kind="pump",
-                    source="scanner",
-                    price=c.last_price,
-                    change_24h_pct=c.change_24h_pct,
-                    now=now,
-                )
-        save_pump_history(pump_store)
-        if legacy_hunter_thresholds_enabled():
-            watch = [
-                c
-                for c in candidates
-                if c.hunt_score >= min_score
-                or ("dump_in_progress" in c.flags and c.hunt_score >= 32.0)
-            ]
-            priority = [c for c in candidates if c.hunt_score >= HUNT_SCORE_PRIORITY_THRESHOLD]
-        else:
-            watch = list(candidates[:limit])
-            priority = [
-                c
-                for c in candidates
-                if "top_decile_move" in c.flags or c.hunt_score >= candidates[0].hunt_score * 0.85
-            ][: max(5, limit // 3)] if candidates else []
-        from hunt_core.data.universe import PINNED_SYMBOLS
+    """Rank the whole USDⓈ-M perp universe into the watchlist off the engine ccxt exchange.
 
-        pinned = {str(s).upper() for s in PINNED_SYMBOLS}
-        summary: dict[str, Any] = {
-            "ts": datetime.now(UTC).isoformat(),
-            "ticker_count": len(tickers),
-            "gated_ticker_count": len(gated_tickers),
-            "prescan_hit_count": len(prescan_hits),
-            "candidates": len(candidates),
-            "hot_funnel_count": len(hot),
-            "watch_count": len(watch),
-            "priority_count": len(priority),
-            "min_score": min_score,
-            "limit": limit,
-            "pinned_overlap": sorted({c.symbol for c in priority if c.symbol in pinned}),
-            "watchlist": [
-                {
-                    **c.model_dump(),
-                    "in_pinned": c.symbol in pinned,
-                    "suggest_minute_watch": c.hunt_score >= HUNT_SCORE_PRIORITY_THRESHOLD,
-                    "in_hot_funnel": c.symbol in {h.symbol for h in hot},
-                }
-                for c in watch
-            ],
-            "prescan_top": [
-                {
-                    "symbol": h.symbol,
-                    "interval": h.interval,
-                    "direction": h.direction,
-                    "change_pct": h.change_pct,
-                }
-                for h in prescan_hits[:15]
-            ],
-            "hot_funnel": [c.model_dump() for c in hot],
-        }
-        WATCHLIST.parent.mkdir(parents=True, exist_ok=True)
-        # Atomic publish: write_text truncates in place, so a crash (or a kill, or a
-        # full disk) mid-write left a half-written watchlist on disk that every reader
-        # then failed to parse — turning a scan interruption into an empty universe on
-        # the next start. tmp + os.replace makes readers see either the old file or the
-        # new one, never a partial.
-        tmp_path = WATCHLIST.with_suffix(WATCHLIST.suffix + ".tmp")
-        tmp_path.write_text(serde.dumps_str(summary, indent=True), encoding="utf-8")
-        os.replace(tmp_path, WATCHLIST)
-        LOG.info(
-            "hunt_scan_done",
-            candidates=len(candidates),
-            watch=len(watch),
-            priority=len(priority),
-            out=str(WATCHLIST),
-        )
-        for c in priority[:10]:
-            LOG.info(
-                "hunt_priority",
+    ``exchange`` is the engine's ccxt.pro client (``market_runtime.multi.primary.exchange``); the
+    24h tickers come from :func:`hunt_core.market.symbols.fetch_ticker_rows` (fail-loud ``[]``),
+    replacing the old owned ``HuntCcxtClient`` plane.
+    """
+    from hunt_core.market.symbols import fetch_ticker_rows
+
+    tickers = _enrich_ticker_rows(await fetch_ticker_rows(exchange))
+    gated_tickers = [
+        row
+        for row in tickers
+        if apply_quality_gates(row)[0]
+    ]
+    prescan_hits = prescan_from_tickers(gated_tickers, engine=PrescanEngine())
+    pump_store = load_pump_history()
+    adaptive_store = load_adaptive_store()
+    stats_map = {sym: st.to_public() for sym, st in pump_store.symbols.items()}
+    candidates = rank_hunt_candidates(
+        gated_tickers, limit=max(limit, 30), pump_stats_by_sym=stats_map, adaptive=adaptive_store
+    )
+    candidates = enrich_candidates_with_percentile_ranks(candidates)
+    hot = funnel_hot_candidates(candidates)
+    for row in tickers:
+        sym = str(row.get("symbol") or "").strip().upper()
+        # is-None fallthrough: a 24h change of exactly 0.0 is a real reading.
+        chg = row.get("price_change_percent")
+        if chg is None:
+            chg = row.get("price_change_pct")
+        if sym and chg is not None:
+            with contextlib.suppress(TypeError, ValueError):
+                update_change_24h(adaptive_store, sym, float(chg))
+    save_adaptive_store(adaptive_store)
+    now = datetime.now(UTC)
+    for c in candidates:
+        if "pump_extreme" not in c.flags and "pump_extreme_z" not in c.flags:
+            continue
+        if c.change_24h_pct <= 0:
+            continue
+        if _has_recent_leg(pump_store, c.symbol, "scanner", hours=24.0):
+            continue
+        record_pump_leg(
+                pump_store,
                 symbol=c.symbol,
-                score=c.hunt_score,
-                bias=c.watch_bias,
-                change=c.change_24h_pct,
-                flags=",".join(c.flags),
+                kind="pump",
+                source="scanner",
+                price=c.last_price,
+                change_24h_pct=c.change_24h_pct,
+                now=now,
             )
-        return summary
-    finally:
-        if owned_client:
-            await client.close()
+    save_pump_history(pump_store)
+    if legacy_hunter_thresholds_enabled():
+        watch = [
+            c
+            for c in candidates
+            if c.hunt_score >= min_score
+            or ("dump_in_progress" in c.flags and c.hunt_score >= 32.0)
+        ]
+        priority = [c for c in candidates if c.hunt_score >= HUNT_SCORE_PRIORITY_THRESHOLD]
+    else:
+        watch = list(candidates[:limit])
+        priority = [
+            c
+            for c in candidates
+            if "top_decile_move" in c.flags or c.hunt_score >= candidates[0].hunt_score * 0.85
+        ][: max(5, limit // 3)] if candidates else []
+    from hunt_core.data.universe import PINNED_SYMBOLS
+
+    pinned = {str(s).upper() for s in PINNED_SYMBOLS}
+    summary: dict[str, Any] = {
+        "ts": datetime.now(UTC).isoformat(),
+        "ticker_count": len(tickers),
+        "gated_ticker_count": len(gated_tickers),
+        "prescan_hit_count": len(prescan_hits),
+        "candidates": len(candidates),
+        "hot_funnel_count": len(hot),
+        "watch_count": len(watch),
+        "priority_count": len(priority),
+        "min_score": min_score,
+        "limit": limit,
+        "pinned_overlap": sorted({c.symbol for c in priority if c.symbol in pinned}),
+        "watchlist": [
+            {
+                **c.model_dump(),
+                "in_pinned": c.symbol in pinned,
+                "suggest_minute_watch": c.hunt_score >= HUNT_SCORE_PRIORITY_THRESHOLD,
+                "in_hot_funnel": c.symbol in {h.symbol for h in hot},
+            }
+            for c in watch
+        ],
+        "prescan_top": [
+            {
+                "symbol": h.symbol,
+                "interval": h.interval,
+                "direction": h.direction,
+                "change_pct": h.change_pct,
+            }
+            for h in prescan_hits[:15]
+        ],
+        "hot_funnel": [c.model_dump() for c in hot],
+    }
+    WATCHLIST.parent.mkdir(parents=True, exist_ok=True)
+    # Atomic publish: write_text truncates in place, so a crash (or a kill, or a
+    # full disk) mid-write left a half-written watchlist on disk that every reader
+    # then failed to parse — turning a scan interruption into an empty universe on
+    # the next start. tmp + os.replace makes readers see either the old file or the
+    # new one, never a partial.
+    tmp_path = WATCHLIST.with_suffix(WATCHLIST.suffix + ".tmp")
+    tmp_path.write_text(serde.dumps_str(summary, indent=True), encoding="utf-8")
+    os.replace(tmp_path, WATCHLIST)
+    LOG.info(
+        "hunt_scan_done",
+        candidates=len(candidates),
+        watch=len(watch),
+        priority=len(priority),
+        out=str(WATCHLIST),
+    )
+    for c in priority[:10]:
+        LOG.info(
+            "hunt_priority",
+            symbol=c.symbol,
+            score=c.hunt_score,
+            bias=c.watch_bias,
+            change=c.change_24h_pct,
+            flags=",".join(c.flags),
+        )
+    return summary

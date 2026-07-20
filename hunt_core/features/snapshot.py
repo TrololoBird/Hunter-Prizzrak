@@ -8,8 +8,6 @@ from typing import Any, Literal, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from hunt_core.domain.schemas import SymbolFrames
-    from hunt_core.market.client import HuntCcxtClient
-    from hunt_core.market.streams import HuntCcxtStreams
 
 import polars as pl
 import polars_ols  # hard dep; module-level so btc_beta_1h needs no import-guard crutch
@@ -419,32 +417,6 @@ def apply_cross_exchange_flat(row: dict[str, Any]) -> None:
     row["cross_price_divergence_pct"] = cx.get("price_divergence_pct")
 
 
-async def attach_cross_market_fields(
-    market: dict[str, Any],
-    *,
-    client: HuntCcxtClient,
-    symbol: str,
-    ws_feed: HuntCcxtStreams | None,
-    cross_snapshot: dict[str, Any] | None = None,
-) -> None:
-    """Merge REST cross snapshot + live WS overlay — never partial-null secondaries."""
-    from hunt_core.market.cross import apply_cross_snapshot_to_market
-
-    ws_cross = ws_feed.live_funding_cross(symbol) if ws_feed is not None else None
-    snap = cross_snapshot
-    if snap is None:
-        try:
-            snap = await client.fetch_cross_exchange_snapshot(symbol)
-        except Exception as exc:
-            LOG.warning("cross_rest_fallback_failed | symbol=%s error=%s", symbol, exc)
-            if ws_cross:
-                snap = {"symbol": symbol, "funding": {"binance": market.get("funding_rate")}}
-                apply_cross_snapshot_to_market(market, snap, ws_cross=ws_cross)
-                return
-            market["cross_data_source"] = "unavailable"
-            return
-    apply_cross_snapshot_to_market(market, snap, ws_cross=ws_cross)
-
 def btc_corr_1h(sym_work_1h: Any, btc_work_1h: Any, *, lookback: int = 24) -> float | None:
     if (
         sym_work_1h is None
@@ -622,7 +594,7 @@ def attach_research_setup_fields(setup: dict[str, Any], *, tf: dict[str, Any], r
 def apply_rest_enrichments_local(
     prepared: Any,
     *,
-    client: HuntCcxtClient,
+    client: Any,
     symbol: str,
     pack: dict[str, Any],
     book: dict[str, float | None],
@@ -962,7 +934,7 @@ _col = col  # legacy name in split body
 def merge_ws_kline_closed(
     tf: dict[str, Any],
     symbol: str,
-    ws_feed: HuntCcxtStreams | None,
+    ws_feed: Any,
     *,
     tf_key: str = "1m_closed",
 ) -> None:

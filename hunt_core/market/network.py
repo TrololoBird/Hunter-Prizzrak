@@ -25,6 +25,7 @@ from typing import Any
 from urllib.parse import urlparse, urlunparse
 
 import aiohttp
+import ccxt
 
 try:
     from aiohttp_socks import ProxyConnector
@@ -203,6 +204,34 @@ def is_proxy_transport_error(exc: BaseException) -> bool:
     return any(marker in message for marker in markers)
 
 
+def ws_transport_fatal(exc: BaseException) -> bool:
+    """Classify a ccxt.pro WS/transport error as a benign, self-healing drop.
+
+    ``True`` for the transport-level failures ccxt.pro retries internally — WS close
+    frames (``1006``/``4004``), rate-limit / DDoS-protection, request timeouts, checksum
+    mismatches and the ``NetworkError``/``ExchangeNotAvailable`` family. The watch loop's
+    asyncio exception handler uses this to demote the orphaned-future noise these produce
+    to a rate-limited debug line instead of logging every retry (the 700 MB log fix).
+
+    The old classifier lived on ``HuntCcxtStreams`` and depended on ``market/ccxt_guard``;
+    both are removed at the engine cutover, so the rate-limit check is inlined against the
+    ccxt exception types here (fail-safe: unknown exceptions return ``False`` → logged loud).
+    """
+    if isinstance(exc, (ccxt.RateLimitExceeded, ccxt.DDoSProtection)):
+        return True
+    if isinstance(exc, TimeoutError):
+        return True
+    text = repr(exc)
+    name = type(exc).__name__
+    return (
+        "1006" in text
+        or "4004" in text
+        or name in {"NetworkError", "RequestTimeout", "ExchangeNotAvailable", "ChecksumError"}
+        or "ConnectionClosed" in name
+        or "ChecksumError" in text
+    )
+
+
 # ── Local proxy detection (Telegram delivery only) ──────────────────────────
 
 _BINANCE_PING_ENDPOINTS = (
@@ -317,4 +346,5 @@ __all__ = [
     "proxy_reachable",
     "proxy_scheme",
     "resolve_proxy_url",
+    "ws_transport_fatal",
 ]

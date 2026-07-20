@@ -350,11 +350,18 @@ def symbol_regime_features(df: Any) -> dict[str, Any]:
         return {}
 
 
-async def refresh_market_regime(client: Any) -> MarketRegimeSnapshot:
-    """Fetch tickers and recalibrate; persists JSON artifact."""
+async def refresh_market_regime(exchange: Any) -> MarketRegimeSnapshot:
+    """Fetch the whole-universe 24h tickers off the engine exchange and recalibrate; persists JSON.
+
+    ``exchange`` is the engine's ccxt.pro client (``market_runtime.multi.primary.exchange``); the
+    normalized ticker rows come from :func:`hunt_core.market.symbols.fetch_ticker_rows` (fail-loud
+    ``[]``), replacing the old ``HuntCcxtClient.fetch_ticker_24h`` plane.
+    """
+    from hunt_core.market.symbols import fetch_ticker_rows
+
     started = time.monotonic()
-    tickers = await client.fetch_ticker_24h()
-    snapshot = calibrate_from_cross_section(tickers or [])
+    tickers = await fetch_ticker_rows(exchange)
+    snapshot = calibrate_from_cross_section(tickers)
     apply_snapshot(snapshot)
     save_regime_file(snapshot)
     LOG.info(

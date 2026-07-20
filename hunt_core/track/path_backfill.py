@@ -126,12 +126,16 @@ def compute_derived_from_path(
     }
 
 
-async def run_backfill_pass(client: Any, *, now_ms: int, max_rows: int = 200) -> int:
+async def run_backfill_pass(exchange: Any, *, now_ms: int, max_rows: int = 200) -> int:
     """Fetch forward paths for elapsed candidates and write D records.
 
-    Returns the number of candidates backfilled. ``client`` is a
-    ``HuntCcxtClient`` (or anything exposing the same ``fetch_ohlcv_list``).
+    Returns the number of candidates backfilled. ``exchange`` is the engine's ccxt.pro client
+    (``market_runtime.multi.primary.exchange``); the closed 1m forward window comes from
+    :func:`hunt_core.engine.rest.fetch_ohlcv_between` (closed-only, fail-loud ``[]``).
     """
+    from hunt_core.engine import rest
+    from hunt_core.market.symbols import try_resolve_linear_usdt_swap
+
     pending = load_pending_backfill(now_ms=now_ms, max_rows=max_rows)
     if not pending:
         return 0
@@ -140,26 +144,13 @@ async def run_backfill_pass(client: Any, *, now_ms: int, max_rows: int = 200) ->
         symbol = row["symbol"]
         decision_ts = int(row["decision_ts"])
         h_max_ms = int(row.get("h_max_hours") or 24) * 3600 * 1000
-        try:
-            ohlcv = await client.fetch_ohlcv_list(
-                symbol, "1m", since=decision_ts, limit=1500,
-                qos_context="path_backfill",  # background QoS: yield to the watch tick
-            )
-        except Exception:
-            _LOG.exception("path_backfill_fetch_failed sym=%s candidate=%s", symbol, row.get("candidate_id"))
-            continue
-        # fetch_ohlcv_list is the RAW list path — it bypasses finalize_kline_frame,
-        # so callers must drop the unclosed tail themselves (as analyst_assembly
-        # and manipulation_delivery do). Without this, a pass running near the
-        # window's expiry keeps the in-progress 1m candle, whose high/low still
-        # repaint — and the forward path is the ground truth every MFE/MAE and
-        # first-passage stat is derived from, so an extreme that no closed bar
-        # ever printed would be recorded as fact.
-        from hunt_core.toolkit.ohlcv import drop_unclosed_ohlcv_tail
-
-        ohlcv = drop_unclosed_ohlcv_tail(list(ohlcv), "1m", exchange=client.exchange)
-        # fetch_ohlcv_list caps at 1500 bars/call; 24h@1m=1440 fits in one call.
-        window = [b for b in ohlcv if decision_ts <= b[0] <= decision_ts + h_max_ms]
+        ccxt_sym = try_resolve_linear_usdt_swap(symbol, exchange=exchange) or symbol
+        # fetch_ohlcv_between drops the forming bar (I-5) and windows to [start, end] closed,
+        # so the forward path is only fully-printed bars — the ground truth every MFE/MAE and
+        # first-passage stat is derived from (an intra-bar repaint must never be recorded as fact).
+        window = await rest.fetch_ohlcv_between(
+            exchange, ccxt_sym, "1m", start_ms=decision_ts, end_ms=decision_ts + h_max_ms
+        )
         forward_dq: dict[str, Any] = {}
         if not window:
             forward_dq["gaps"] = True
@@ -186,7 +177,7 @@ async def run_backfill_pass(client: Any, *, now_ms: int, max_rows: int = 200) ->
     return done
 
 
-async def path_backfill_loop(client: Any, *, interval_s: float = 900.0) -> None:
+async def path_backfill_loop(exchange: Any, *, interval_s: float = 900.0) -> None:
     """Background task: periodically backfill elapsed candidates' forward paths.
 
     Runs every ``interval_s`` (default 15 min) — frequent enough that
@@ -216,7 +207,7 @@ async def path_backfill_loop(client: Any, *, interval_s: float = 900.0) -> None:
             from hunt_core.track.candidate_ledger import rotate_ledger_if_large
 
             await asyncio.to_thread(rotate_ledger_if_large)
-            n = await run_backfill_pass(client, now_ms=int(_time.time() * 1000))
+            n = await run_backfill_pass(exchange, now_ms=int(_time.time() * 1000))
             if n:
                 _LOG.info("path_backfill_loop_tick backfilled=%s", n)
         except Exception:

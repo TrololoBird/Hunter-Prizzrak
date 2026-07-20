@@ -10,7 +10,6 @@ from typing import Any
 
 from hunt_core import clock, serde
 from hunt_core.view.runtime import MarketRuntime, build_market_runtime
-from hunt_core.data.collect import safe_fetch
 from hunt_core.data.lake import FeatureLakeWriter, buffer_tick_rows, flush_lake
 from hunt_core.scanner.feed import EngineScannerFeed, ScannerFeed
 from hunt_core.scanner.prescan import (
@@ -36,16 +35,8 @@ from hunt_core.regime.market_regime import (
 )
 from hunt_core.errors import DEFENSIVE_EXC, defensive_exc_types, system_breakers
 from hunt_core.maps.engine import get_map_store
-from hunt_core.market import (
-    CrossExchangeConfig,
-    HuntLoadPlanner,
-    apply_cross_exchange_env,
-    create_hunt_market_plane_from_settings,
-    fetch_secondary_ticker_overlay,
-    gate_symbol_list,
-    load_cross_exchange_config,
-    refresh_cross_exchange_cache,
-)
+from hunt_core.market.symbol_gate import gate_symbol_list
+from hunt_core.market.symbols import fetch_ticker_rows
 from hunt_core.params.store import migrate_calibration_split, prescan_thresholds
 from hunt_core.runtime.cycle._cycle_tick import run_tick
 from hunt_core.runtime.heartbeat import beat as _wd_beat
@@ -69,7 +60,7 @@ from hunt_core.track.pump_history import (
 )
 from hunt_core.track.tracker import iter_active_tracker_symbols, load_tracker_state
 from hunt_core.domain.config import load_settings
-from hunt_core.market.network import detect_local_proxies
+from hunt_core.market.network import detect_local_proxies, ws_transport_fatal
 
 
 _ORPHAN_WS_LOG_STATE: dict[str, float] = {"count": 0.0, "next_emit": 0.0}
@@ -239,7 +230,6 @@ async def run_loop(
 
     from hunt_core.runtime.cycle import _impl as _loop_impl
 
-    _overlay_ws_tickers = _loop_impl._overlay_ws_tickers
     _TICK_LOCK = _loop_impl._TICK_LOCK
 
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -247,12 +237,9 @@ async def run_loop(
 
     def _hunt_loop_exc_handler(loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
         exc = context.get("exception")
-        if exc is not None:
-            from hunt_core.market import HuntCcxtStreams
-
-            if HuntCcxtStreams._ws_transport_fatal(exc):
-                _log_orphan_ws(exc)
-                return
+        if exc is not None and ws_transport_fatal(exc):
+            _log_orphan_ws(exc)
+            return
         if _prev_loop_handler is not None:
             _prev_loop_handler(loop, context)
         else:
@@ -312,87 +299,38 @@ async def run_loop(
                 LOG.warning("watch_telegram_disabled", reason="preflight_failed")
                 send_telegram = False
 
-    cross_cfg: CrossExchangeConfig = load_cross_exchange_config()
-    apply_cross_exchange_env(cross_cfg)
-    LOG.info(
-        "hunt_multi_exchange",
-        enabled=cross_cfg.enabled,
-        ws=cross_cfg.ws_enabled,
-        exchanges=",".join(cross_cfg.exchanges),
-        refresh_s=cross_cfg.refresh_interval_s,
-        max_symbols=cross_cfg.max_symbols_per_refresh,
-    )
-    # Startup network/DNS can be transiently down (e.g. right after the host wakes
-    # from sleep). Binance is reached directly (no proxy pool), so a single blip is
-    # handled by retrying the full plane creation a few times with backoff before
-    # actually failing startup.
-    plane = None
-    _plane_exc: Exception | None = None
-    market_runtime: MarketRuntime | None = None  # ADR-0004 coexistence engine (gated, see below)
+    # ── ADR-0004: the engine-native MarketRuntime is the sole transport now. The legacy market plane
+    # (HuntCcxtClient/HuntCcxtStreams/spot companion) is deleted; the ccxt.pro engine (MultiEngine +
+    # cross-venue + SpotEngine) over the pinned+cli universe replaces it. Startup network/DNS can be
+    # transiently down (host just woke from sleep); Binance is reached directly, so retry the whole
+    # runtime build a few times with backoff before degrading. A failure leaves market_runtime=None
+    # and the loop degrades to "engine unavailable" (logged, tasks skipped) — never a legacy fallback.
+    from hunt_core.runtime.tick_state import set_live_market_runtime, set_live_spot_engine
+
+    market_runtime: MarketRuntime | None = None
+    eng_fut, eng_spot = _engine_universe(PINNED_SYMBOLS, cli_symbols)
     for _attempt in range(1, 4):
         try:
-            plane = await create_hunt_market_plane_from_settings(settings)
-            break
-        except Exception as exc:
-            _plane_exc = exc
-            LOG.warning(
-                "hunt_market_plane_startup_retry | attempt=%d error=%s",
-                _attempt, type(exc).__name__,
-            )
-            if _attempt < 3:
-                await asyncio.sleep(20.0 * _attempt)
-    if plane is None:
-        assert _plane_exc is not None  # set on every failed attempt above
-        raise _plane_exc
-    client = plane.client
-    ws_feed = plane.streams
-    spot_companion = plane.spot
-    # Expose the live spot companion so the deep/analyst plane (assemble_analyst_tick)
-    # can reuse the same spot exchange + weight budget for its per-symbol enrichment.
-    from hunt_core.runtime.tick_state import (
-        set_live_market_runtime,
-        set_live_spot_companion,
-        set_live_spot_engine,
-    )
-
-    set_live_spot_companion(spot_companion)
-
-    # ── ADR-0004: the engine-native MarketRuntime is the transport for the scanner (and, as the
-    # tick-swap lands, the deep/main tick). Constructed for the continuous loop — the ccxt.pro engine
-    # (MultiEngine + SpotEngine) over the pinned universe — alongside the still-live legacy plane
-    # during the cutover. Gated on `not once` for now: only the continuous scanner uses it today, so a
-    # one-shot smoke stays legacy-only (un-gate when the main tick swaps onto the view). A start
-    # failure degrades (logged, market_runtime=None) → the scanner is skipped, never sinks the loop.
-    if not once:
-        try:
-            eng_fut, eng_spot = _engine_universe(PINNED_SYMBOLS, cli_symbols)
             market_runtime = build_market_runtime(eng_fut, spot_symbols=eng_spot)
             await market_runtime.start()
-            set_live_spot_engine(market_runtime.spot)
-            set_live_market_runtime(market_runtime)
-            LOG.info("engine_runtime_started", futures=len(eng_fut), spot=len(eng_spot))
+            break
         except Exception:
-            LOG.exception("engine_runtime_start_failed")  # degrade, never sink the loop
+            LOG.exception("engine_runtime_start_retry", attempt=_attempt)
             market_runtime = None
-            set_live_spot_engine(None)
-            set_live_market_runtime(None)
-
-    # ── exchange health check ──────────────────────────────────
-    try:
-        st = await client.fetch_status()
-        if st:
-            status = str(st.get("status") or "")
-            if status and status not in ("ok", "open"):
-                LOG.warning(
-                    "hunt_exchange_status_unexpected | status=%s info=%s",
-                    status,
-                    str(st.get("info", {}))[:200],
-                )
-    except Exception:
-        LOG.exception("hunt_exchange_status_check_failed")
-    ws_feed.set_symbols(list(cli_symbols))
-    await ws_feed.start()
-    # Persistent across ticks: kline/OI caches live in client; oi_flush/oi_build need prev tick.
+            if _attempt < 3:
+                await asyncio.sleep(20.0 * _attempt)
+    if market_runtime is not None:
+        set_live_spot_engine(market_runtime.spot)
+        set_live_market_runtime(market_runtime)
+        LOG.info("engine_runtime_started", futures=len(eng_fut), spot=len(eng_spot))
+    else:
+        set_live_spot_engine(None)
+        set_live_market_runtime(None)
+        LOG.error("engine_runtime_unavailable | watch loop degraded, no legacy fallback")
+    # The engine's primary ccxt.pro client — the exchange handle every drained consumer takes
+    # (regime refresh, prescan run_scan, path-backfill, the tick's universe funnel). None ⇒ degraded.
+    exchange = market_runtime.multi.primary.exchange if market_runtime is not None else None
+    # Persistent across ticks: prev-tick OI carry for oi_flush/oi_build.
     prev_oi: dict[str, float | None] = {}
     last_bias: dict[str, str] = {}
     last_lifecycle_phase: dict[str, str] = {}
@@ -416,9 +354,6 @@ async def run_loop(
             )
             LOG.info("manipulation_scan_loop_scheduled", engine_fed=True)
 
-    from hunt_core.data.frame_cache import reset_frame_cache
-
-    reset_frame_cache()
     feature_lake = FeatureLakeWriter()
     prescan_debounce = PrescanDebounceQueue(
         debounce_s=float(
@@ -430,30 +365,28 @@ async def run_loop(
         ),
     )
     prescan_engine = PrescanEngine()
-    load_planner = HuntLoadPlanner()
     digest_scheduler = get_digest_scheduler()
-    _lake_warmed_syms: set[str] = set()
     pump_store = load_pump_history()
     if not pump_store.symbols and not pump_store.event_log:
         backfill_from_jsonl(pump_store)
         save_pump_history(pump_store)
 
-    # --once smoke: skip heavy first-tick scan/cross-ex (full watchlist prescan).
+    # --once smoke: skip the heavy first-tick scan (full watchlist prescan).
     _now_mono = time.monotonic()
     last_scan = _now_mono if once else 0.0
     last_regime = _now_mono if once else 0.0
-    last_cross_ex = _now_mono if once else 0.0
+    # Cross-venue is now engine-native (MultiEngine secondaries), so the legacy REST cross-ex cache and
+    # secondary-CEX ticker overlay are permanently empty here — kept only as the soft inputs the prescan
+    # funnel + the (cross-ignoring) run_tick still accept.
     _cross_ex_cache: dict[str, dict[str, Any]] = {}
-    # P1.8: secondary-CEX 24h ticker overlay for the prescan outlier matrix.
     _secondary_ticker_overlay: dict[str, dict[str, Any]] = {}
-    last_secondary_tickers = 0.0
     last_tick_rotate = time.monotonic()
     cached = load_regime_file()
     if cached is not None:
         apply_snapshot(cached)
-    if not once:
+    if not once and exchange is not None:
         try:
-            await refresh_market_regime(client)
+            await refresh_market_regime(exchange)
             last_regime = time.monotonic()
         except Exception:
             LOG.exception("market_regime_startup_failed")
@@ -472,12 +405,10 @@ async def run_loop(
         and cold_start
         and _startup_tg not in {"0", "false", "no"}
     ):
-        cross_line = ", ".join(cross_cfg.exchanges) if cross_cfg.enabled else "off"
         try:
             await broadcaster.send_html(
                 "🟢 <b>Hunt live</b>\n"
                 f"Interval {interval_s}s · confirm-only alerts\n"
-                f"Cross-intel: {cross_line}\n"
                 "<i>Не auto-trade</i>"
             )
             startup_sentinel.parent.mkdir(parents=True, exist_ok=True)
@@ -488,7 +419,7 @@ async def run_loop(
 
     # /signal polling conflicts with a second getUpdates consumer — only when TG sends enabled.
     tg_cmds = (
-        build_hunt_telegram_commands(settings, proxy_url=proxy_url, client=client)
+        build_hunt_telegram_commands(settings, proxy_url=proxy_url)
         if send_telegram and settings.tg_token
         else None
     )
@@ -513,11 +444,11 @@ async def run_loop(
         LOG.error("analyst_pinned_loop_disabled | engine runtime unavailable")
 
     path_backfill_task: asyncio.Task[None] | None = None
-    if not once:
+    if not once and exchange is not None:
         from hunt_core.track.path_backfill import path_backfill_loop
 
         path_backfill_task = asyncio.create_task(
-            path_backfill_loop(client, interval_s=900.0),
+            path_backfill_loop(exchange, interval_s=900.0),
             name="path_backfill_loop",
         )
         LOG.info("path_backfill_scheduled", interval_s=900.0)
@@ -555,28 +486,21 @@ async def run_loop(
     _wd_task = asyncio.create_task(_watchdog_rearmer()) if not once else None
     _pinned_brief_sent = False
     _last_checkpoint = time.monotonic()
-    _last_htf_persist = time.monotonic()
-    # Reload persisted HTF (1h/4h/1d) frames so a restart has a fresh-enough
-    # fallback instead of a stale bootstrap seed — collapses the post-restart
-    # HTF-staleness blackout while REST backfill catches up. Best effort.
-    try:
-        from hunt_core.data.frame_cache import get_frame_cache as _gfc
-        from hunt_core.paths import HTF_FRAMES as _HTF_FRAMES
-
-        _n_htf = _gfc().load_htf_frames(_HTF_FRAMES)
-        if _n_htf:
-            LOG.info("htf_frames_reloaded", frames=_n_htf)
-    except Exception:
-        LOG.exception("htf_frames_reload_failed")
+    # HTF frames live in the engine's kline planes now (seeded + WS-streamed by MultiEngine); the
+    # legacy frame-cache persist/reload is gone, so a restart re-seeds off the engine, not a JSON blob.
     _degraded_streak = 0  # consecutive ticks the whole universe failed data assembly
     try:
         tick_ctx: dict[str, Any] | None = None
         while not should_stop():
             started = time.monotonic()
             try:
-                if not once and time.monotonic() - last_regime >= REGIME_REFRESH_S:
+                if (
+                    not once
+                    and exchange is not None
+                    and time.monotonic() - last_regime >= REGIME_REFRESH_S
+                ):
                     try:
-                        snap = await refresh_market_regime(client)
+                        snap = await refresh_market_regime(exchange)
                         last_regime = time.monotonic()
                         LOG.info(
                             "market_regime_tick",
@@ -588,7 +512,11 @@ async def run_loop(
                         LOG.exception("market_regime_refresh_failed")
                         last_regime = time.monotonic()
 
-                if not once and time.monotonic() - last_scan >= SCAN_INTERVAL_S:
+                if (
+                    not once
+                    and exchange is not None
+                    and time.monotonic() - last_scan >= SCAN_INTERVAL_S
+                ):
                     try:
                         from hunt_core.params.store import hunter_thresholds
                         from hunt_core.scanner.prescan import run_scan
@@ -597,7 +525,7 @@ async def run_loop(
                         summary = await run_scan(
                             limit=int(_ht.get("watchlist_limit", 50)),
                             min_score=float(_ht.get("score_watch", 45.0)),
-                            client=client,
+                            exchange=exchange,
                         )
                         LOG.info(
                             "hunt_scan_refresh",
@@ -610,51 +538,23 @@ async def run_loop(
 
                 settings = load_settings()
                 now = clock.now_utc()
-                ticker_raw = await asyncio.wait_for(
-                    safe_fetch(
-                        client.fetch_ticker_24h,
-                        context="ticker_24h",
-                        client=client,
-                    ),
-                    timeout=120.0,
-                ) or []
+                # Whole-universe 24h tickers off the engine ccxt exchange (fail-loud []); the scanner
+                # funnel + prescan rank against these. Cross-venue is engine-native now, so the legacy
+                # secondary-CEX overlay is permanently empty (soft) and the per-symbol OI %-change cache
+                # is gone — prescan treats absent OI as None (I-6, never fabricated).
+                ticker_raw = (
+                    await asyncio.wait_for(fetch_ticker_rows(exchange), timeout=120.0)
+                    if exchange is not None
+                    else []
+                )
                 ticker_by_sym = {str(t.get("symbol")): t for t in ticker_raw if t.get("symbol")}
-                ex = client.exchange
+                ex = exchange
                 # P1.6: prescan outliers feed an internal debounce queue, NOT
                 # Telegram. Ready (debounced) symbols merge into the watch universe.
                 gated_ticker_rows = [
                     t for t in ticker_raw if apply_quality_gates(t)[0]
                 ]
-                # P1.8: refresh secondary-CEX ticker overlay on the cross-ex cadence
-                # (soft — a stale/empty overlay leaves prescan on primary only).
-                if (
-                    not once
-                    and cross_cfg.enabled
-                    and len(gated_ticker_rows) <= 100
-                    and (
-                        not _secondary_ticker_overlay
-                        or time.monotonic() - last_secondary_tickers
-                        >= cross_cfg.refresh_interval_s
-                    )
-                ):
-                    try:
-                        _secondary_ticker_overlay = await fetch_secondary_ticker_overlay(
-                            client, cfg=cross_cfg
-                        )
-                    except Exception:
-                        LOG.exception("secondary_ticker_overlay_refresh_failed")
-                    last_secondary_tickers = time.monotonic()
-                # P1.10: primary OI % change overlay (cached ratio → percent; None
-                # when unseen, so divergence stays soft).
                 _oi_change_by_sym: dict[str, float | None] = {}
-                for _t in gated_ticker_rows:
-                    _sym = str(_t.get("symbol") or "")
-                    if not _sym:
-                        continue
-                    _ratio = client.get_cached_oi_change(_sym)
-                    _oi_change_by_sym[_sym] = (
-                        _ratio * 100.0 if _ratio is not None else None
-                    )
                 batch_update_baselines(gated_ticker_rows, oi_by_sym=_oi_change_by_sym)
                 _prescan_hits = prescan_from_tickers(
                     gated_ticker_rows,
@@ -794,101 +694,19 @@ async def run_loop(
                         )
                     if pinned_n:
                         LOG.info("watch_tracker_pin", symbols=pinned_n)
-                merged = gate_symbol_list(merged, exchange=ex, label="watch_universe")
+                merged = (
+                    gate_symbol_list(merged, exchange=ex, label="watch_universe")
+                    if ex is not None
+                    else merged
+                )
                 active = tuple(dict.fromkeys(merged))
-                # Warm the feature lake for any symbol that has never been backfilled.
-                # Needed so the phase classifier (requires close × 30+) does not return
-                # NEUTRAL on every tick for freshly-promoted scanner candidates.
-                _cold = [
-                    s for s in active
-                    if s not in _lake_warmed_syms
-                ]
-                if _cold:
-                    from hunt_core.data.lake import query_features as _qf
-                    from hunt_core.data.lake_warmup import ensure_lake_warm
-                    _really_cold = [
-                        s for s in _cold
-                        if _qf(s, tf="15m", limit=31).height < 30
-                    ]
-                    if _really_cold:
-                        LOG.info("lake_warmup_start", symbols=_really_cold)
-                        _warmup_writer = FeatureLakeWriter()
-                        await ensure_lake_warm(client, _really_cold, writer=_warmup_writer)
-                        _warmup_writer.close()
-                    _lake_warmed_syms.update(_cold)
                 active = tuple(s for s in active if not is_blacklisted(s))
+                # No demand-shaping load planner and no lake-warmup pre-fetch: the engine's ccxt
+                # throttler owns REST weight, the MarketView is read-through per symbol, and the engine
+                # seeds/streams the kline planes. A symbol outside the engine warm-set simply reports
+                # not-ready this tick (dynamic warm-set add is a later phase), never client-warmed.
                 hunt_active = tuple(active)
-                load_plan = load_planner.plan_tick(
-                    hunt_active,
-                    interval_s=float(interval_s),
-                )
-                if load_plan.dropped_symbols:
-                    # Demand shaping (ADR-0001 pillar 3): the plan shed these to fit
-                    # the weight budget — exclude them from THIS tick's REST snapshots.
-                    # WS subscriptions below still cover the full universe (weight-free),
-                    # and the keep-window rotates so they return on later ticks.
-                    _shed = frozenset(load_plan.dropped_symbols)
-                    hunt_active = tuple(s for s in hunt_active if s not in _shed)
-                    LOG.info(
-                        "hunt_demand_shaped",
-                        kept=len(hunt_active),
-                        dropped=len(_shed),
-                        dropped_list=sorted(_shed)[:10],
-                    )
-                LOG.info(
-                    "hunt_load_plan",
-                    symbols=len(hunt_active),
-                    ws_symbols=len(active),
-                    parallel=load_plan.parallel,
-                    full=load_plan.full_count,
-                    fast=load_plan.fast_count,
-                    est_weight=load_plan.estimated_binance_weight,
-                    est_fapi=load_plan.estimated_fapi_calls,
-                    cross_max=load_plan.cross_max_symbols,
-                    skip_secondary=load_plan.skip_secondary_tickers,
-                )
-                _overlay_ws_tickers(ticker_by_sym, active, ws_feed)
-                ws_feed.set_symbols(
-                    list(active),
-                    priority=list(cli_symbols),
-                )
-                ws_n = min(len(active), 24) + 1
-                if ws_feed.kline_ws_enabled:
-                    ws_n += min(len(active), 24)
-                LOG.info(
-                    "watch_universe",
-                    symbols=len(hunt_active),
-                    ws_symbols=len(active),
-                    ws_streams=ws_n,
-                    kline_ws=ws_feed.kline_ws_enabled,
-                    kline_interval="1m",
-                    list=list(active)[:8],
-                )
-
-                if (
-                    not once
-                    and cross_cfg.enabled
-                    and (
-                        not _cross_ex_cache
-                        or time.monotonic() - last_cross_ex >= cross_cfg.refresh_interval_s
-                    )
-                ):
-                    try:
-                        from dataclasses import replace
-
-                        cross_cfg_tick = replace(
-                            cross_cfg,
-                            max_symbols_per_refresh=load_plan.cross_max_symbols,
-                        )
-                        await refresh_cross_exchange_cache(
-                            client,
-                            active,
-                            _cross_ex_cache,
-                            cfg=cross_cfg_tick,
-                        )
-                    except Exception:
-                        LOG.exception("cross_exchange_refresh_failed")
-                    last_cross_ex = time.monotonic()
+                LOG.info("watch_universe", symbols=len(hunt_active), list=list(active)[:8])
 
                 # ADR-0004 Phase 9: the main tick runs on the engine-native MarketRuntime (typed
                 # MarketView per symbol) + the map store, not the legacy client/ws_feed/batch cache.
@@ -977,16 +795,13 @@ async def run_loop(
                             streak=_degraded_streak,
                             **_health.telemetry(),
                         )
-                        # IP-ban detection — computed once, used by BOTH the alert
-                        # (cause hint) and the self-restart guard (never restart on a
-                        # ban: it self-heals, and a respawn just re-hits the banned IP).
-                        _guard = getattr(getattr(client, "rest_gate", None), "guard", None)
-                        try:
-                            _ban_pause = _guard.remaining_pause_s() if _guard is not None else 0.0
-                        except Exception:
-                            _ban_pause = 0.0
-                        _last_kind = getattr(getattr(_guard, "telemetry", None), "last_kind", None)
-                        _is_ban = _ban_pause > 0 or _last_kind == "ip_ban"
+                        # IP-ban detection used to read the legacy REST gate's guard telemetry;
+                        # the engine's ccxt.pro client owns rate-limit handling internally now, so a
+                        # ban is no longer observable from here. Treat the blackout as non-ban (the
+                        # conservative branch — the self-restart guard may then respawn on a sustained
+                        # critical stall, which is the intended WS-mux recovery).
+                        _ban_pause = 0.0
+                        _is_ban = False
                         # Escalate to an ops alert once the blackout persists (not a
                         # one-off blip) — near-total failure across several ticks.
                         if (
@@ -1024,9 +839,9 @@ async def run_loop(
                                 LOG.exception("hunt_universe_degraded_alert_failed")
                         # AUTO-RECOVERY: a sustained critical NON-ban blackout (e.g. a
                         # stalled WS mux — 2026-07-13) doesn't trip the progress watchdog,
-                        # so recover by exiting for a clean supervised respawn. HTF frames
-                        # are persisted first (os._exit skips `finally`) so the respawn has
-                        # no warmup blackout.
+                        # so recover by exiting for a clean supervised respawn. The engine
+                        # re-seeds its kline planes on restart, so there is no warmup blackout
+                        # to pre-persist (the legacy HTF frame-cache dump is gone).
                         if should_self_restart_on_blackout(
                             critical=_health.critical,
                             degraded_streak=_degraded_streak,
@@ -1040,13 +855,6 @@ async def run_loop(
                                 streak=_degraded_streak,
                                 **_health.telemetry(),
                             )
-                            try:
-                                from hunt_core.data.frame_cache import get_frame_cache as _gfc
-                                from hunt_core.paths import HTF_FRAMES as _HTF
-
-                                _gfc().persist_htf_frames(_HTF)
-                            except Exception:
-                                LOG.exception("blackout_restart_persist_failed")
                             os._exit(1)
                     else:
                         _degraded_streak = 0
@@ -1070,19 +878,6 @@ async def run_loop(
                         except Exception:
                             LOG.exception("watch_pinned_startup_brief_failed")
                         _pinned_brief_sent = True
-                ban_telemetry = client.rest_gate.guard.telemetry
-                if ban_telemetry.last_at_mono and (
-                    time.monotonic() - ban_telemetry.last_at_mono < interval_s + 5
-                ):
-                    LOG.warning(
-                        "hunt_ccxt_ban_telemetry",
-                        kind=ban_telemetry.last_kind,
-                        context=ban_telemetry.last_context,
-                        ip_bans=ban_telemetry.ip_ban_count,
-                        rate_limits=ban_telemetry.rate_limit_count,
-                        pause_remaining_s=round(client.rest_gate.guard.remaining_pause_s(), 1),
-                        weight_used=client.rest_gate.weight_budget.used_weight,
-                    )
                 # P1.7: scheduled pump/dump digest (1h/3h/6h) — distinct from the
                 # per-tick advisory batch. Candidates come from gated tickers.
                 if send_telegram and broadcaster is not None:
@@ -1102,19 +897,6 @@ async def run_loop(
                         _last_checkpoint = time.monotonic()
                     except Exception:
                         LOG.exception("session_checkpoint_save_failed")
-                # Persist HTF frames (~every 5 min) so a hard-kill restart still
-                # has a recent fallback — periodic because SIGKILL skips `finally`.
-                if time.monotonic() - _last_htf_persist >= 300.0:
-                    try:
-                        from hunt_core.data.frame_cache import get_frame_cache as _gfc
-                        from hunt_core.paths import HTF_FRAMES as _HTF_FRAMES
-
-                        _n = _gfc().persist_htf_frames(_HTF_FRAMES)
-                        _last_htf_persist = time.monotonic()
-                        if _n:
-                            LOG.debug("htf_frames_persisted", frames=_n)
-                    except Exception:
-                        LOG.exception("htf_frames_persist_failed")
                 save_pump_history(pump_store)
                 buffer_tick_rows(rows)
                 if (
@@ -1149,16 +931,6 @@ async def run_loop(
                     break
                 await asyncio.sleep(min(1.0, remaining))
     finally:
-        # Capture the freshest HTF frames on graceful shutdown so the next start
-        # reloads current data (periodic persist covers SIGKILL). Best effort.
-        if not once:
-            try:
-                from hunt_core.data.frame_cache import get_frame_cache as _gfc
-                from hunt_core.paths import HTF_FRAMES as _HTF_FRAMES
-
-                _gfc().persist_htf_frames(_HTF_FRAMES)
-            except Exception:
-                LOG.exception("htf_frames_persist_shutdown_failed")
         if _wd_task is not None:
             _wd_task.cancel()
         faulthandler.cancel_dump_traceback_later()
@@ -1207,11 +979,7 @@ async def run_loop(
             try:
                 await market_runtime.close()
             except Exception:
-                LOG.exception("engine_coexist_close_failed")
-        try:
-            await plane.aclose()
-        except Exception:
-            LOG.exception("hunt_plane_close_failed")
+                LOG.exception("engine_runtime_close_failed")
 
 
 __all__ = ["run_loop"]

@@ -20,7 +20,7 @@ import importlib.util
 import sys
 from pathlib import Path
 
-from hunt_core.market.factory import drop_unclosed_ohlcv_tail
+from hunt_core.toolkit.ohlcv import drop_unclosed_ohlcv_tail
 
 _MIN_15M = 900_000
 _MIN_1W = 604_800_000

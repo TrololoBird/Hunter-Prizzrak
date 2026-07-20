@@ -747,7 +747,7 @@ async def backfill_kline_gaps(
     gaps: list[KlineGapSpec],
 ) -> Any:
     """Fetch missing bars via REST and merge deduped into the existing frame."""
-    from hunt_core.market.factory import finalize_kline_frame
+    from hunt_core.toolkit.ohlcv import finalize_kline_frame
 
     if df is None or not gaps:
         return df

@@ -376,21 +376,19 @@ def reconcile_active_from_ticker(
     ticker_by_sym: dict[str, Any],
     now: datetime,
     only_symbols: set[str] | None = None,
-    ws_feed: Any | None = None,
 ) -> list[HuntFollowUp]:
-    """Apply live price to latched SL/TP when a symbol missed the tick batch."""
-    from hunt_core.market.live_price import resolve_live_price
+    """Apply the 24h ticker last price to latched SL/TP when a symbol missed the tick batch.
 
+    The engine's ``MarketView`` is the live-price oracle now, so a symbol in-batch already carries
+    a fresh price; this safety net only fires for symbols rotated OUT of the batch, off the already
+    fetched 24h ticker (the legacy WS ``resolve_live_price`` overlay was removed at the cutover).
+    """
     events: list[HuntFollowUp] = []
     for sym, direction in iter_active_tracker_symbols(state):
         if only_symbols is not None and sym not in only_symbols:
             continue
         t = ticker_by_sym.get(sym) or {}
         px = float(t.get("last_price") or t.get("lastPrice") or 0)
-        if ws_feed is not None:
-            ws_px, _src = resolve_live_price(sym, ws_feed=ws_feed, fallback=px)
-            if ws_px > 0:
-                px = ws_px
         if px <= 0:
             continue
         k = _key(sym, direction)

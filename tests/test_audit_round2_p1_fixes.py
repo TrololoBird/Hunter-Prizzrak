@@ -93,11 +93,16 @@ def test_g67_manipulation_delivery_does_not_double_record_burst() -> None:
 
 
 def test_g45_pinned_signal_prefers_global_ls_over_top() -> None:
-    # The pinned /signal map bundle must read global_ls_1h FIRST (top-trader L/S is a
-    # different population). Guard against re-inverting the fallback order.
-    src = (_ROOT / "hunt_core/runtime/symbol_probe.py").read_text()
-    assert 'market.get("global_ls_1h") or market.get("top_ls_1h")' in src
-    assert 'market.get("top_ls_1h") or market.get("global_ls_1h")' not in src
+    # The map bundle must source global L/S from the GLOBAL account plane and top-trader L/S from
+    # the TOP plane — different populations that must never be crossed. The pinned /signal path is
+    # engine-native now (maps/feed.py::build_map_bundle over the typed MarketView), so the invariant
+    # lives there as two distinct typed fields instead of a fallback `or` chain in symbol_probe —
+    # structurally un-invertible. Guard against re-crossing the two planes.
+    src = (_ROOT / "hunt_core/maps/feed.py").read_text()
+    assert "global_ls_ratio=view.derivs.global_ls_5m" in src
+    assert "top_ls_ratio=view.derivs.top_ls_acct_5m" in src
+    assert "global_ls_ratio=view.derivs.top_ls_acct_5m" not in src
+    assert "top_ls_ratio=view.derivs.global_ls_5m" not in src
 
 
 def test_g43_g44_stats_filters_match_real_funnel_events() -> None:
