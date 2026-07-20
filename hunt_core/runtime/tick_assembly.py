@@ -356,7 +356,6 @@ async def snapshot_symbol(
     enrichment_pack_override: dict[str, Any] | None = None,
     btc_work_1m: Any | None = None,
     hunt_fusion: bool = True,
-    intra_bar: Any | None = None,
     allow_low_liquidity: bool = False,
 ) -> dict[str, Any]:
     meta = exchange_by_sym.get(symbol)

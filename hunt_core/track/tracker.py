@@ -1092,18 +1092,24 @@ def latch_setup_if_active(
     return out
 
 
-def latch_row_setups(state: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
-    """Apply confirm latch to both setup sides on a watch row."""
-    sym = str(row.get("symbol") or "")
-    if not sym:
-        return row
-    for direction, key in (("short", "dump"), ("long", "long")):
-        setup = row.get(key)
-        if isinstance(setup, dict):
-            row[key] = latch_setup_if_active(
-                state, symbol=sym, direction=direction, setup=setup
-            )
-    return row
+def latch_row_setups(
+    state: dict[str, Any],
+    *,
+    symbol: str,
+    dump: dict[str, Any],
+    long: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Apply the confirm latch to both (neutral) setup sides on the native tick (ADR-0004 seam).
+
+    Takes the compact ``symbol`` and the two neutral setup stubs directly (no row dict), and reflects
+    any currently-open TG-sent signal back onto the matching side so the persisted scanner row shows
+    a confirmed setup while a signal is live. Returns the ``(dump, long)`` pair.
+    """
+    if not symbol:
+        return dump, long
+    latched_dump = latch_setup_if_active(state, symbol=symbol, direction="short", setup=dump)
+    latched_long = latch_setup_if_active(state, symbol=symbol, direction="long", setup=long)
+    return latched_dump, latched_long
 
 
 def reconcile_signal(

@@ -2,7 +2,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from hunt_core.features.models import FeaturePanel
+    from hunt_core.view.models import MarketView
 
 # Stop must clear the anchoring level by at least this much ATR, and never sit
 # closer than the nominal percentage floor shared with levels.py.
@@ -353,6 +357,41 @@ def _scenario_to_dict(sc: ScenarioScore) -> dict[str, Any]:
         "stop": float(sc.stop),
         "evidence": list(sc.evidence),
     }
+
+
+_NATIVE_MTF_TFS = ("1w", "1d", "4h", "1h", "15m")
+
+
+def build_mtf_confluence_native(
+    view: MarketView, features: FeaturePanel
+) -> MTFConfluence:
+    """MTF confluence from the typed native handles (ADR-0004 main-tick MTF consumer).
+
+    Projects the per-TF :class:`~hunt_core.features.models.TfSummary` handles onto the minimal
+    per-TF indicator snapshot :func:`build_mtf_confluence` reads (rsi/adx/atr/EMA-stack/trend), then
+    delegates to the shared arithmetic. Structural targets (``row["structure"]`` /
+    ``liquidity_pools``) live on the deep/prizrak output, not on the main tick, so this journal-only
+    confluence gets ATR-anchored stops and empty targets (``row`` omitted) — the meaningful part
+    (tf_signals, HTF alignment counts, dominant bias) is fully faithful.
+    """
+    symbol = str(view.symbol or "").split(":", 1)[0].replace("/", "").upper()
+    tf_dict: dict[str, Any] = {}
+    for key in _NATIVE_MTF_TFS:
+        s = features.tf.get(key)
+        if s is None:
+            continue
+        tf_dict[key] = {
+            "rsi14": s.rsi14,
+            "adx14": s.adx14,
+            "atr14": s.atr14,
+            "ema20": s.ema20,
+            "ema50": s.ema50,
+            "ema200": s.ema200,
+            "close": s.close,
+            "supertrend_dir": s.supertrend_dir,
+            "trend": s.trend,
+        }
+    return build_mtf_confluence(symbol, tf_dict, float(view.last_price))
 
 
 def mtf_confluence_to_dict(mtf: MTFConfluence) -> dict[str, Any]:

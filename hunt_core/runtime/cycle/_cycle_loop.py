@@ -10,7 +10,7 @@ from typing import Any
 
 from hunt_core import clock, serde
 from hunt_core.view.runtime import MarketRuntime, build_market_runtime
-from hunt_core.data.collect import TickBatchCache, safe_fetch
+from hunt_core.data.collect import safe_fetch
 from hunt_core.data.lake import FeatureLakeWriter, buffer_tick_rows, flush_lake
 from hunt_core.scanner.feed import EngineScannerFeed, ScannerFeed
 from hunt_core.scanner.prescan import (
@@ -35,7 +35,7 @@ from hunt_core.regime.market_regime import (
     refresh_market_regime,
 )
 from hunt_core.errors import DEFENSIVE_EXC, defensive_exc_types, system_breakers
-from hunt_core.features.prepare import min_required_bars
+from hunt_core.maps.engine import get_map_store
 from hunt_core.market import (
     CrossExchangeConfig,
     HuntLoadPlanner,
@@ -312,11 +312,6 @@ async def run_loop(
                 LOG.warning("watch_telegram_disabled", reason="preflight_failed")
                 send_telegram = False
 
-    minimums = min_required_bars(
-        min_bars_15m=settings.filters.min_bars_15m,
-        min_bars_1h=settings.filters.min_bars_1h,
-        min_bars_4h=settings.filters.min_bars_4h,
-    )
     cross_cfg: CrossExchangeConfig = load_cross_exchange_config()
     apply_cross_exchange_env(cross_cfg)
     LOG.info(
@@ -453,7 +448,6 @@ async def run_loop(
     _secondary_ticker_overlay: dict[str, dict[str, Any]] = {}
     last_secondary_tickers = 0.0
     last_tick_rotate = time.monotonic()
-    batch_cache = TickBatchCache()
     cached = load_regime_file()
     if cached is not None:
         apply_snapshot(cached)
@@ -896,11 +890,13 @@ async def run_loop(
                         LOG.exception("cross_exchange_refresh_failed")
                     last_cross_ex = time.monotonic()
 
+                # ADR-0004 Phase 9: the main tick runs on the engine-native MarketRuntime (typed
+                # MarketView per symbol) + the map store, not the legacy client/ws_feed/batch cache.
                 tick_ctx = {
                     "active": active,
                     "settings": settings,
-                    "minimums": minimums,
-                    "client": client,
+                    "rt": market_runtime,
+                    "store": get_map_store(),
                     "prev_oi": prev_oi,
                     "last_bias": last_bias,
                     "last_lifecycle_phase": last_lifecycle_phase,
@@ -909,12 +905,6 @@ async def run_loop(
                     "send_telegram": send_telegram,
                     "ticker_by_sym": ticker_by_sym,
                     "pump_store": pump_store,
-                    "ws_feed": ws_feed,
-                    "spot_companion": spot_companion,
-                    "batch_cache": batch_cache,
-                    "tier": "full",
-                    "tier_by_symbol": load_plan.tier_by_symbol,
-                    "snapshot_parallel": load_plan.parallel,
                     "cross_ex_cache": _cross_ex_cache,
                     "prescan_outlier_by_sym": prescan_outlier_by_sym,
                     "symbol_state": symbol_state,
@@ -948,19 +938,25 @@ async def run_loop(
                     )
                 from hunt_core.runtime import telemetry
 
-                async with _TICK_LOCK:
-                    with telemetry.span(
-                        "cycle.tick",
-                        **{
-                            "hunt.active_symbols": len(hunt_active),
-                            "hunt.send_telegram": send_telegram,
-                        },
-                    ):
-                        rows = await run_tick(
-                            hunt_active,
-                            **{k: v for k, v in tick_ctx.items() if k != "active"},
-                        )
-                        telemetry.set_attributes({"hunt.rows_emitted": len(rows or [])})
+                # The main tick is engine-native now — no engine runtime means no MarketView, so the
+                # tick is skipped (logged), never client-fed. The deep/scanner lanes degrade the same.
+                if market_runtime is None:
+                    LOG.error("watch_tick_disabled | engine runtime unavailable")
+                    rows = []
+                else:
+                    async with _TICK_LOCK:
+                        with telemetry.span(
+                            "cycle.tick",
+                            **{
+                                "hunt.active_symbols": len(hunt_active),
+                                "hunt.send_telegram": send_telegram,
+                            },
+                        ):
+                            rows = await run_tick(
+                                hunt_active,
+                                **{k: v for k, v in tick_ctx.items() if k != "active"},
+                            )
+                            telemetry.set_attributes({"hunt.rows_emitted": len(rows or [])})
                 _wd_beat()  # tick body completed — mark progress
                 # ── universe data-plane health ─────────────────────────────
                 # Turn a SILENT mass data blackout (dead proxy → every symbol fails
@@ -1175,7 +1171,6 @@ async def run_loop(
         except Exception:
             LOG.exception("tick_buffer_flush_failed")
         try:
-            from hunt_core.maps.engine import get_map_store
             from hunt_core.paths import MAPS_LAKE_JSONL
 
             get_map_store().flush_lake(MAPS_LAKE_JSONL)

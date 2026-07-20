@@ -6,7 +6,10 @@ from datetime import datetime
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from hunt_core.features.models import FeaturePanel
+    from hunt_core.maps.engine import MapBundle
     from hunt_core.track.tracker import HuntFollowUp
+    from hunt_core.view.models import MarketView
 
 from hunt_core import clock
 from hunt_core.params.store import tracker_thresholds
@@ -198,13 +201,29 @@ def _maybe_armed_to_triggered(
 
 def evaluate_followups(
     state: dict[str, Any],
-    row: dict[str, Any],
     *,
+    view: MarketView,
+    features: FeaturePanel,
+    maps: MapBundle | None = None,
+    session: dict[str, Any] | None = None,
+    lifecycle: dict[str, Any] | None = None,
     now: datetime | None = None,
 ) -> list[Any]:
-    """Compare tick vs active signals; emit follow-up events (no entry cooldown)."""
+    """Compare the typed native tick vs active signals; emit follow-up events (ADR-0004 track seam).
+
+    Takes the typed handles (``view`` / ``features`` / ``maps`` + the neutral ``lifecycle`` block and
+    the ``session`` stats) instead of the legacy row dict, and projects them onto the narrow
+    lifecycle working context (:func:`native_lifecycle_row`) that drives the shared SL/TP geometry.
+    The tick is not an emission surface — neutral setup stubs keep the entry/structure arms inert; the
+    job here is refreshing tracking (extremes, trailing, stale/timeout invalidation) for OPEN signals.
+    """
+    from hunt_core.track._native_context import native_lifecycle_row
+
     trk = _tracker_ref()
     ts = now or clock.now_utc()
+    row = native_lifecycle_row(
+        view, features, maps, session=session, lifecycle=lifecycle, ts=ts.isoformat()
+    )
     events: list[HuntFollowUp] = []
     symbol = str(row.get("symbol") or "").upper()
     price = float(row.get("price") or 0)

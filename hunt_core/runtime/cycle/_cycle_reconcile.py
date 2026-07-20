@@ -4,9 +4,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from hunt_core.data.collect import safe_fetch
 from hunt_core.data.lake import buffer_tracker_state
-from hunt_core.market import HuntCcxtClient
+from hunt_core.engine import rest
 from hunt_core.runtime.state import LOG
 from hunt_core.track.events import append_signal_event
 from hunt_core.track.pump_history import record_signal_outcome
@@ -21,8 +20,43 @@ ORPHAN_RECONCILE_MINUTES = 2
 INWATCH_KLINE_RECONCILE_SECONDS = 45
 
 
+def _unified(compact: str) -> str:
+    """Compact tracker key ``BTCUSDT`` → ccxt-unified ``BTC/USDT:USDT`` for the engine exchange."""
+    base = compact.upper().replace("/", "").replace(":USDT", "")
+    if base.endswith("USDT"):
+        base = base[:-4]
+    return f"{base}/USDT:USDT"
+
+
+async def _kline_extremes_between(
+    exchange: Any, compact_symbol: str, *, anchor: datetime, now: datetime
+) -> tuple[float, float, float] | None:
+    """Engine-REST 5m ``(hi, lo, last_close)`` for the closed window, or ``None`` fail-loud.
+
+    ADR-0004: the reconcile pollers fetch their own detection frames off the ENGINE REST tail
+    (``fetch_ohlcv_between`` over ``rt.multi.primary.exchange``), not the deleted legacy client.
+    """
+    try:
+        bars = await rest.fetch_ohlcv_between(
+            exchange,
+            _unified(compact_symbol),
+            "5m",
+            start_ms=int(anchor.timestamp() * 1000),
+            end_ms=int(now.timestamp() * 1000),
+        )
+    except Exception as exc:  # noqa: BLE001 — REST tail is best-effort; a stale anchor just retries
+        LOG.warning("reconcile_klines_failed", symbol=compact_symbol, error=repr(exc))
+        return None
+    if not bars:
+        return None
+    hi = max(float(b[2]) for b in bars)
+    lo = min(float(b[3]) for b in bars)
+    last_price = float(bars[-1][4])
+    return hi, lo, last_price
+
+
 async def _reconcile_inwatch_active(
-    client: HuntCcxtClient,
+    exchange: Any,
     tracker_state: dict[str, Any],
     *,
     symbol: str,
@@ -45,22 +79,11 @@ async def _reconcile_inwatch_active(
             anchor = now
         if (now - anchor).total_seconds() < INWATCH_KLINE_RECONCILE_SECONDS:
             continue
-        df = await safe_fetch(
-            lambda: client.fetch_klines_between(
-                o_sym,
-                "5m",
-                start_time_ms=int(anchor.timestamp() * 1000),
-                end_time_ms=int(now.timestamp() * 1000),
-            ),
-            context=f"inwatch_klines.{o_sym}",
-            client=client,
-        )
-        if df is None or df.is_empty():
+        extremes = await _kline_extremes_between(exchange, o_sym, anchor=anchor, now=now)
+        if extremes is None:
             sig["last_checked_at"] = now.isoformat()
             continue
-        hi = float(df["high"].max())
-        lo = float(df["low"].min())
-        last_price = float(df["close"][-1])
+        hi, lo, last_price = extremes
         events.extend(
             reconcile_signal(
                 tracker_state,
@@ -76,7 +99,7 @@ async def _reconcile_inwatch_active(
 
 
 async def _reconcile_orphan_signals(
-    client: HuntCcxtClient,
+    exchange: Any,
     tracker_state: dict[str, Any],
     *,
     seen_symbols: set[str],
@@ -97,22 +120,11 @@ async def _reconcile_orphan_signals(
             anchor = now
         if (now - anchor).total_seconds() < ORPHAN_RECONCILE_MINUTES * 60:
             continue
-        df = await safe_fetch(
-            lambda: client.fetch_klines_between(
-                o_sym,
-                "5m",
-                start_time_ms=int(anchor.timestamp() * 1000),
-                end_time_ms=int(now.timestamp() * 1000),
-            ),
-            context=f"orphan_klines.{o_sym}",
-            client=client,
-        )
-        if df is None or df.is_empty():
+        extremes = await _kline_extremes_between(exchange, o_sym, anchor=anchor, now=now)
+        if extremes is None:
             sig["last_checked_at"] = now.isoformat()
             continue
-        hi = float(df["high"].max())
-        lo = float(df["low"].min())
-        last_price = float(df["close"][-1])
+        hi, lo, last_price = extremes
         events.extend(
             reconcile_signal(
                 tracker_state,

@@ -7,11 +7,15 @@ import math
 from dataclasses import asdict, dataclass, fields
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import polars as pl
 
 from hunt_core import serde
+
+if TYPE_CHECKING:
+    from hunt_core.features.models import FeaturePanel
+    from hunt_core.view.models import MarketView
 
 _REGISTRY_PATH = Path(__file__).resolve().parents[1] / "domain" / "feature_registry.json"
 
@@ -382,6 +386,123 @@ def build_feature_vector(
     return FeatureVector(**filtered)
 
 
+def build_feature_vector_native(
+    view: MarketView,
+    features: FeaturePanel,
+    *,
+    tf: str,
+    ts: str,
+    market_features: dict[str, Any],
+    session: dict[str, Any] | None = None,
+    lifecycle: dict[str, Any] | None = None,
+) -> FeatureVector:
+    """Registry-backed feature vector from the typed native handles (ADR-0004 tick lake builder).
+
+    The native replacement for :func:`build_feature_vector` on the main-tick path: it reads the
+    typed :class:`~hunt_core.features.models.TfSummary` for ``tf`` plus the raw
+    :class:`~hunt_core.view.models.MarketView` derivative/book planes and the pre-derived map
+    scalars (``derive_map_features``), never a legacy row dict. Every value is the real typed field
+    or ``None`` (fail-loud, I-6); the required registry features (price/close/rsi14/atr14/adx14) still
+    raise :class:`FeatureExtractError` when absent so a warm-up bar is skipped, not fabricated.
+
+    Args:
+        view: The raw market view (price + derivative/book planes).
+        features: The derived feature panel (per-TF indicator summaries + regime).
+        tf: Unified timeframe key to source the per-bar indicators from (e.g. ``"15m"``).
+        ts: Row timestamp string (the freshness ``as_of``) for the lake key.
+        market_features: ``derive_map_features(maps, current_price=view.last_price)`` output — the
+            volume-profile / liquidation / orderbook scalars. ``{}`` when maps are absent.
+        session: ``session_stats_native`` output (24h range), or ``None``.
+        lifecycle: The (neutral) lifecycle block, or ``None``.
+
+    Returns:
+        A :class:`FeatureVector`. Fields with no typed producer yet (``chg_24h_pct``,
+        ``oi_change_pct``, ``oi_slope_5m``, ``oi_acceleration``, ``premium_zscore_5m``,
+        ``bb_width``) are ``None`` — fail-loud, never fabricated (tracked follow-up #38).
+    """
+    sym = str(view.symbol or "").split(":", 1)[0].replace("/", "").upper()
+    if not sym:
+        raise FeatureExtractError("symbol is required for feature vector extraction")
+    if not ts:
+        raise FeatureExtractError(f"ts missing for feature vector extraction: {sym}")
+
+    summary = features.tf.get(tf)
+    if summary is None:
+        raise FeatureExtractError(f"timeframe summary absent for {sym} tf={tf}")
+
+    derivs = view.derivs
+    book = view.book
+    orderflow = view.orderflow
+    sess = session or {}
+    lc = lifecycle or {}
+    mkt = market_features or {}
+
+    kwargs: dict[str, Any] = {
+        "symbol": sym,
+        "ts": str(ts),
+        "tf": tf,
+        "price": _require_float(view.last_price, field="price", symbol=sym, tf=tf),
+        "close": _require_float(summary.close, field="close", symbol=sym, tf=tf),
+        "rsi14": _require_float(summary.rsi14, field="rsi14", symbol=sym, tf=tf),
+        "atr14": _require_float(summary.atr14, field="atr14", symbol=sym, tf=tf),
+        "adx14": _require_float(summary.adx14, field="adx14", symbol=sym, tf=tf),
+        "atr_pct": _coerce_float(summary.atr_pct),
+        "ema20": _coerce_float(summary.ema20),
+        "ema50": _coerce_float(summary.ema50),
+        "ema200": _coerce_float(summary.ema200),
+        "volume_ratio20": _coerce_float(summary.vol_ratio),
+        "macd_hist": _coerce_float(summary.macd_hist),
+        "bb_pct_b": _coerce_float(summary.bb_pct_b),
+        "supertrend_dir": _coerce_float(summary.supertrend_dir),
+        "delta_ratio": _coerce_float(summary.delta_ratio),
+        "zscore30": _coerce_float(summary.return_zscore),
+        "session_cvd": _coerce_float(summary.session_cvd),
+        "rolling_cvd_24h": _coerce_float(summary.rolling_cvd_24h),
+        "range_24h_pct": _coerce_float(sess.get("range_pct_24h")),
+        "oi": _coerce_float(derivs.oi),
+        "funding_rate": _coerce_float(derivs.funding),
+        "ls_ratio": _coerce_float(derivs.top_ls_pos_5m),
+        "global_ls_ratio": _coerce_float(derivs.global_ls_5m),
+        "depth_imbalance": _coerce_float(book.depth_imbalance),
+        "microprice_bias": _coerce_float(book.microprice_bias),
+        "basis_pct": _coerce_float(derivs.basis),
+        "liquidation_score": _coerce_float(orderflow.liq_score_5m),
+        "funding_velocity": _encode_signed_label(derivs.funding_trend),
+        "poc_migration_1h": _encode_signed_label(mkt.get("map_poc_migration_1h")),
+        "poc_migration_4h": _encode_signed_label(mkt.get("map_poc_migration_4h")),
+        "va_contraction": _coerce_float(mkt.get("map_vp_va_contraction")),
+        "liquidity_void_path": _coerce_float(mkt.get("map_void_above_pct")),
+        "lifecycle_phase": str(lc.get("phase")) if lc.get("phase") is not None else None,
+        "lifecycle_bias": (
+            str(lc.get("recommended_bias")) if lc.get("recommended_bias") is not None else None
+        ),
+        "market_regime": (
+            str(features.regime.market_regime)
+            if features.regime.market_regime is not None
+            else None
+        ),
+        "closed_bar": True,
+    }
+    if kwargs["va_contraction"] is None and mkt.get("map_vp_va_contraction") is not None:
+        kwargs["va_contraction"] = 1.0 if bool(mkt.get("map_vp_va_contraction")) else 0.0
+
+    registry = load_feature_registry().get("features") or {}
+    missing_required = [
+        name
+        for name, meta in registry.items()
+        if isinstance(meta, dict)
+        and meta.get("required")
+        and (name not in kwargs or kwargs[name] is None)
+    ]
+    if missing_required:
+        raise FeatureExtractError(
+            f"required registry features missing for {sym} tf={tf}: {sorted(missing_required)}"
+        )
+
+    allowed = {f.name for f in fields(FeatureVector)}
+    return FeatureVector(**{k: v for k, v in kwargs.items() if k in allowed})
+
+
 # ── Optional feature provenance metadata ─────────────────────────────────────
 
 
@@ -433,6 +554,7 @@ __all__ = [
     "FeatureProvenance",
     "FeatureVector",
     "build_feature_vector",
+    "build_feature_vector_native",
     "load_feature_registry",
     "record_feature_provenance",
 ]
