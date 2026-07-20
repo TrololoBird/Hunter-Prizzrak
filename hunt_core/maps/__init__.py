@@ -5,7 +5,6 @@ from hunt_core.maps.config import MapsConfig, load_maps_config
 from hunt_core.maps.engine import (
     MapBundle,
     MapTimeSeriesStore,
-    apply_map_bundle_to_row,
     build_map_bundle,
     derive_map_features,
     get_map_store,
@@ -48,7 +47,6 @@ __all__ = [
     "PeriodProfile",
     "VolumeProfileMap",
     "WallCluster",
-    "apply_map_bundle_to_row",
     "build_liquidation_heatmap",
     "build_liquidation_map",
     "build_map_bundle",

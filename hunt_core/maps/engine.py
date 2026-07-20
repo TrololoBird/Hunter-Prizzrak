@@ -463,23 +463,3 @@ def derive_map_features(
         out["map_accumulation_score"] = round(sum(acc) / len(acc), 3)
 
     return out
-
-
-def apply_map_bundle_to_row(row: dict[str, Any], bundle: MapBundle | None) -> None:
-    """Merge map bundle into tick row (market + top-level maps key)."""
-    if bundle is None:
-        return
-    price = float(row.get("price") or 0)
-    features = derive_map_features(bundle, current_price=price)
-    market = row.setdefault("market", {})
-    if isinstance(market, dict):
-        market.update(features)
-    row["maps"] = bundle.to_dict()
-    if bundle.orderbook and not row.get("book_walls"):
-        row["book_walls"] = {
-            "bid_levels": bundle.orderbook.bid_walls,
-            "ask_levels": bundle.orderbook.ask_walls,
-            "venues": bundle.orderbook.venues,
-            "depth_imbalance": bundle.orderbook.zone_imbalance.get("imb_1pct"),
-            "source": bundle.orderbook.source,
-        }
