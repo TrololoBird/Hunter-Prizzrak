@@ -28,7 +28,11 @@ REQUIRED_PINNED_SYMBOLS: tuple[str, ...] = (
 
 
 class _StrictModel(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    # extra="forbid": a typo'd or stale key in config.toml's [bot] section is a loud boot-error, not
+    # a silent no-op (kills the "editing the TOML did nothing" footgun for the [bot] tree). NB this
+    # governs ONLY config.toml's tiny [bot] section — the big config.defaults.toml param-store is a
+    # separate loader (load_config_defaults_toml) whose doc-only sections are handled explicitly there.
+    model_config = ConfigDict(extra="forbid")
 
 
 class RuntimeConfig(_StrictModel):
@@ -54,7 +58,10 @@ class NetworkConfig(_StrictModel):
     """Network settings. Binance is reached on a DIRECT connection — the rotating
     egress proxy pool (proxy_urls / failover_*) was removed (Branch A). Any legacy
     proxy_url / proxy_urls / failover_* keys still present in config.toml are ignored
-    (``extra="ignore"``)."""
+    (``extra="ignore"``) — this section DELIBERATELY overrides the strict base so an old
+    proxy config does not break boot."""
+
+    model_config = ConfigDict(extra="ignore")
 
     trust_env: bool = True
 
@@ -244,9 +251,13 @@ def _normalize_bot_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(runtime_payload, dict):
         runtime_payload = {}
 
+    # MOVE (pop) the runtime convenience-keys from the top level into [runtime]: leaving a top-level
+    # copy behind relied on extra="ignore" to drop it, which extra="forbid" (now the strict base)
+    # would reject. An explicit [bot.runtime] value wins over the top-level shorthand.
     for field_name in ("strict_data_quality", "shortlist_unified_routing", "analysis_kline_intervals", "log_level", "telemetry_subdir"):
-        if field_name in normalized and field_name not in runtime_payload:
-            runtime_payload[field_name] = normalized[field_name]
+        if field_name in normalized:
+            moved = normalized.pop(field_name)
+            runtime_payload.setdefault(field_name, moved)
 
     if runtime_payload:
         normalized["runtime"] = runtime_payload
