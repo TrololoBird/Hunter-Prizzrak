@@ -63,6 +63,22 @@ def _binance_id(symbol: str) -> str:
     return symbol.split(":", 1)[0].replace("/", "")
 
 
+def _to_unified(symbol: str) -> str:
+    """Compact ``BTCUSDT`` → ccxt-unified ``BTC/USDT:USDT`` for engine lookups (idempotent).
+
+    The engine tracks UNIFIED ccxt symbols; the deep/analyst loop and the probe iterate COMPACT ids
+    (``PINNED_SYMBOLS`` = ``BTCUSDT``). Passing a compact id straight to ``rt.view`` finds no planes,
+    so every symbol comes back falsely ``not_ready`` — the root cause of the deep lane producing
+    nothing live (``assemble_analyst_tick`` passed the compact id unchanged). Normalising here makes
+    EVERY caller correct regardless of the id form it holds, and is idempotent for already-unified ids.
+    """
+    s = symbol.upper()
+    if "/" in s or ":" in s:
+        return s
+    base = s[:-4] if s.endswith("USDT") else s
+    return f"{base}/USDT:USDT"
+
+
 # Per-symbol cache of the raw OI-hist rows. The 1h open-interest history is recomputed by Binance on
 # a ~5-min cadence (engine/params.py), so refetching it on every 60s tick returns duplicates and burns
 # the tight /futures/data budget — a live 20-min run showed that per-tick volume tripping Binance -1003
@@ -104,6 +120,7 @@ async def assemble_native_analyst(
     rt: MarketRuntime, symbol: str, *, store: MapTimeSeriesStore
 ) -> NativeAnalystView | None:
     """Compose the full typed native view for ``symbol``, or ``None`` if no price (no fabricated view)."""
+    symbol = _to_unified(symbol)  # engine tracks unified ids — normalize so compact callers resolve
     view = rt.view(symbol)
     if view is None:
         return None
