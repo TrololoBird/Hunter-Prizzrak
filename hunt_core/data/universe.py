@@ -311,7 +311,7 @@ def add_to_watchlist(
     return True
 
 
-# Market I/O: HuntCcxtClient / HuntCcxtSpotCompanion (see hunt/docs/CCXT.md).
+# Market I/O runs through the ccxt.pro engine (MarketRuntime / MultiEngine + SpotEngine).
 
 
 _GOLD_EQUIVALENTS: frozenset[str] = frozenset({"XAUUSDT", "PAXGUSDT"})

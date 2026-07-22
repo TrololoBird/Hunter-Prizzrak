@@ -2,10 +2,9 @@
 SpotEngine, plus the typed :class:`MarketView` assembly over them.
 
 :func:`build_market_runtime` constructs it; :meth:`MarketRuntime.start`/:meth:`~MarketRuntime.close`
-own the lifecycle and :meth:`MarketRuntime.view` produces a typed view for one symbol. It replaces
-the legacy ``HuntCcxtClient`` market plane. During the cutover it is built **alongside** the legacy
-plane — this module is additive and nothing wires it into ``run_loop`` yet, so it cannot affect the
-running system until the seam-swap (S10).
+own the lifecycle and :meth:`MarketRuntime.view` produces a typed view for one symbol. It IS the
+market data plane (ADR-0004 complete): the legacy ``HuntCcxtClient`` plane and ``snapshot_symbol``
+row-dict are deleted, and ``run_loop`` runs the deep/main tick + scanner off this runtime alone.
 """
 from __future__ import annotations
 
@@ -47,6 +46,18 @@ class MarketRuntime:
     async def start(self) -> None:
         """Start the engine loops — MultiEngine (primary + cross) first, then the spot sibling."""
         await self._multi.start()
+        # Populate the per-symbol exchange tick registry from the primary's loaded markets — the
+        # native replacement for HuntCcxtClient.register_ticks_from_markets (deleted with the client).
+        # Without it, quantize_conservative (track SL/TP prices) has no tick and falls back to a coarse
+        # round(), losing the real exchange grid. Public exchangeInfo precision; keeps the engine core
+        # market-independent (this composition layer owns the market/ import).
+        from hunt_core.market.tick_registry import register_ticks_from_markets
+
+        primary = getattr(self._multi, "primary", None)
+        exchange = getattr(primary, "exchange", None)
+        markets = getattr(exchange, "markets", None)
+        if isinstance(markets, dict) and markets:
+            register_ticks_from_markets(markets.values())
         if self._spot is not None:
             await self._spot.start()
 

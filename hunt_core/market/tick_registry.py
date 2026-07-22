@@ -10,8 +10,8 @@ exchange grid.
 CCXT binanceusdm runs in ``TICK_SIZE`` precision mode, so
 ``market["precision"]["price"]`` IS the tick (a float like 0.1 or 1e-7), read
 from the public ``exchangeInfo`` endpoint — no private API involved. The
-registry is populated by :class:`hunt_core.market.client.HuntCcxtClient` right
-after ``load_markets`` (both the normal and the implicit-bootstrap path).
+registry is populated by :meth:`hunt_core.view.runtime.MarketRuntime.start` right
+after the primary engine's ``load_markets`` (via :func:`register_ticks_from_markets`).
 
 Conservative rounding sides (never promise more than the grid allows):
 
