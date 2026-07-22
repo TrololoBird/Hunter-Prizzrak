@@ -10,12 +10,29 @@ fabricates a value: a missing/failed datum returns ``None`` and is logged, never
 from __future__ import annotations
 
 import math
+import re
 import time
 from typing import Any
 
 import structlog
 
 from hunt_core.engine.freshness import Bar
+
+# --- /futures/data ban backoff (Binance error -1003) ---------------------------------------------
+# Binance IP-bans callers who exceed the /futures/data/* budget, and a call that RETRIES against a
+# banned endpoint gets the ban EXTENDED — worse, a rotated egress IP gets banned too. So on a -1003
+# we parse the "banned until <epoch-ms>" and PAUSE every /futures/data call until then: the plane goes
+# fail-loud absent (never fabricated) and, crucially, we stop hammering the endpoint into a longer or
+# wider ban. Module-level so it is shared across all pollers/symbols on the one egress. (Native ban
+# surfacing — the capability the legacy ccxt_guard/weight_registry used to provide.)
+_BAN_UNTIL_MS: float = 0.0
+_BAN_RE = re.compile(r"banned until (\d+)")
+_DEFAULT_BAN_MS = 120_000.0  # fallback pause when a -1003 carries no parseable timestamp
+
+
+def futures_data_banned_until_ms() -> float:
+    """Epoch-ms until which ``/futures/data`` polling is paused by a Binance -1003 ban (0 = clear)."""
+    return _BAN_UNTIL_MS
 
 LOG = structlog.get_logger(__name__)
 
@@ -287,6 +304,10 @@ async def poll_futures_data(
     ``contractType``). Capability-gated: an absent method / failed call yields a loud skip, never a
     fabricated series.
     """
+    global _BAN_UNTIL_MS
+    now_ms = time.time() * 1000.0
+    if now_ms < _BAN_UNTIL_MS:
+        return None  # paused during an active -1003 ban — hitting the endpoint would extend it
     fn = getattr(exchange, method, None)
     if fn is None:
         LOG.warning("engine_futures_data_unsupported", method=method)
@@ -294,7 +315,19 @@ async def poll_futures_data(
     try:
         rows = await fn(dict(req_params))
     except Exception as exc:  # noqa: BLE001
-        LOG.warning("engine_futures_data_failed", method=method, params=req_params, err=str(exc))
+        msg = str(exc)
+        match = _BAN_RE.search(msg)
+        if match or "-1003" in msg:
+            until = float(match.group(1)) if match else now_ms + _DEFAULT_BAN_MS
+            _BAN_UNTIL_MS = max(_BAN_UNTIL_MS, until)
+            LOG.warning(
+                "engine_futures_data_banned",
+                method=method,
+                banned_until_ms=int(until),
+                pause_s=round(max(0.0, until - now_ms) / 1000.0, 1),
+            )
+        else:
+            LOG.warning("engine_futures_data_failed", method=method, params=req_params, err=msg)
         return None
     return list(rows) if isinstance(rows, list) else None
 
@@ -311,4 +344,5 @@ __all__ = [
     "poll_funding_rates",
     "poll_long_short_ratio",
     "poll_futures_data",
+    "futures_data_banned_until_ms",
 ]

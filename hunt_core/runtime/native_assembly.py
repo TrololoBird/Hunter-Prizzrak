@@ -63,14 +63,37 @@ def _binance_id(symbol: str) -> str:
     return symbol.split(":", 1)[0].replace("/", "")
 
 
+# Per-symbol cache of the raw OI-hist rows. The 1h open-interest history is recomputed by Binance on
+# a ~5-min cadence (engine/params.py), so refetching it on every 60s tick returns duplicates and burns
+# the tight /futures/data budget — a live 20-min run showed that per-tick volume tripping Binance -1003
+# IP bans. Cache the rows for ``_OI_BARS_TTL_S`` and re-join them to the fresh 1h frame each tick (the
+# join is cheap; only the REST call is throttled). Fail-loud absent stays absent (not cached).
+_OI_BARS_TTL_S = 300.0
+_OI_BARS_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+
+
 async def _fetch_oi_bars(exchange: Any, symbol: str, view: MarketView) -> list[dict[str, Any]] | None:
-    """1h open-interest history (48 bars) as-of-joined to the 1h kline frame, or ``None`` fail-loud."""
+    """1h open-interest history (48 bars) as-of-joined to the 1h kline frame, or ``None`` fail-loud.
+
+    The raw OI rows are cached per symbol for ``_OI_BARS_TTL_S`` (they change on Binance's ~5-min
+    cadence); the as-of join to the live 1h frame runs every call. This throttles the /futures/data
+    REST volume that a live run showed was tripping -1003 IP bans.
+    """
     h1 = view.klines.h1
     if h1 is None:
         return None
-    rows = await rest.poll_futures_data(
-        exchange, "fapiDataGetOpenInterestHist", {"symbol": _binance_id(symbol), "period": "1h", "limit": 48}
-    )
+    now = time.monotonic()
+    cached = _OI_BARS_CACHE.get(symbol)
+    if cached is not None and now - cached[0] < _OI_BARS_TTL_S:
+        rows: list[dict[str, Any]] | None = cached[1]
+    else:
+        rows = await rest.poll_futures_data(
+            exchange,
+            "fapiDataGetOpenInterestHist",
+            {"symbol": _binance_id(symbol), "period": "1h", "limit": 48},
+        )
+        if rows:
+            _OI_BARS_CACHE[symbol] = (now, rows)  # cache only real data (fail-loud absent isn't cached)
     if not rows:
         return None
     bars = oi_bars_from_frames(rows, h1)
