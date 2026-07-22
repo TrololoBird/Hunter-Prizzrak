@@ -30,10 +30,11 @@ class MapBundle(BaseModel):
     ``arbitrary_types_allowed`` because it nests plain dataclasses (OrderbookMap,
     VolumeProfileMap) and an opaque LiquidationMap — those are stored as-is (isinstance
     check, no deep validation), so the validation here only guards symbol/ts_ms/extra.
-    Not mutated after construction.
+    ``frozen`` enforces the never-mutated-after-construction invariant; ``extra="forbid"``
+    makes a phantom construction kwarg a loud error at the seam (I-6), not a silent drop.
     """
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True, extra="forbid")
 
     symbol: str
     ts_ms: int
