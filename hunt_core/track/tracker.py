@@ -21,6 +21,10 @@ SignalEvent = Literal[
     "stop_warning",
     "trailing_updated",
     "avg_zone",
+    # Zone-map watcher (prizrak/zone_watch.py): price approaching / entering one of the PRIZRAK map
+    # zones (перезакуп/добор/шорт) — a limit-level alert, distinct from an emitted signal's lifecycle.
+    "zone_approach",
+    "zone_entry",
 ]
 
 from hunt_core.market.tick_registry import quantize_conservative, quantize_price

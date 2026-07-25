@@ -173,6 +173,37 @@ def format_followup_telegram(followup: Any, row: dict[str, Any]) -> str:
             f"<i>Hunt follow-up · не auto-trade</i>"
         )
 
+    if event in {"zone_approach", "zone_entry"}:
+        # Zone-map alert (prizrak/zone_watch.py) — a LIMIT level from the карта зон, in the author's
+        # grammar: zone + ПОК + стоп за структуру + цели. Not an emitted signal's lifecycle event.
+        kind = str(payload.get("zone_kind") or "зона")
+        emoji = {"перезакуп": "🟢", "добор": "🟡", "шорт": "🔴"}.get(kind, "🎯")
+        z_lo, z_hi = fmt_price(payload.get("zone_lo")), fmt_price(payload.get("zone_hi"))
+        band = z_lo if z_lo == z_hi else f"{z_lo}–{z_hi}"
+        poc = payload.get("poc")
+        poc_s = f" (ПОК <code>{fmt_price(poc)}</code>)" if isinstance(poc, (int, float)) else ""
+        fact = " · <i>по факту</i>" if payload.get("by_fact") else ""
+        stop_s = fmt_price(payload.get("stop_loss"))
+        tgts = [t for t in (payload.get("targets") or []) if isinstance(t, (int, float))][:3]
+        tgt_line = (
+            "\n🎯 цели: " + " · ".join(f"<code>{fmt_price(t)}</code>" for t in tgts) if tgts else ""
+        )
+        if event == "zone_entry":
+            head = f"🎯 <b>ЦЕНА В ЗОНЕ · {sym}</b>"
+            sub = f"{emoji} {kind} <code>{band}</code>{poc_s}{fact} — вход по факту касания"
+        else:
+            try:
+                d = f"{float(payload.get('dist_pct') or 0):.1f}%"
+            except (TypeError, ValueError):
+                d = "—"
+            head = f"🔔 <b>ПОДХОД К ЗОНЕ · {sym}</b>"
+            sub = f"{emoji} {kind} <code>{band}</code>{poc_s}{fact} — <b>{d}</b> до зоны"
+        return (
+            f"{head}\n{sub}\n"
+            f"📍 Цена <code>{price}</code> · стоп <code>{stop_s}</code> (за структуру){tgt_line}\n"
+            f"<i>Зона карты · лимит вручную · не auto-trade</i>"
+        )
+
     if event == "entry_triggered":
         return (
             f"🎯 <b>TRIGGERED · {sym} {direction}</b>\n"

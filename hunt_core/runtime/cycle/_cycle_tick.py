@@ -46,6 +46,7 @@ from hunt_core.track.tracker import (
     load_tracker_state,
     reconcile_active_from_ticker,
 )
+from hunt_core.prizrak.zone_watch import evaluate_zone_watch
 from hunt_core.view.runtime import MarketRuntime
 
 
@@ -148,7 +149,17 @@ async def run_tick(
     rows: list[dict[str, Any]] = []
     _tick_success = False
     try:
-        ordered = list(symbols)
+        # The tick assembles ONLY the engine warm-set (pinned + any on-demand /signal coin). A
+        # non-pinned coin is on-demand — warmed just-in-time by the /signal query path, never
+        # continuously WS-streamed (ADR-0004 §1.6 + the "non-pinned = on-demand" model); prescan
+        # outliers stay OUT (Module 2 scans them on its own REST-tail). Open signals on non-pinned
+        # symbols are NOT bulk-warmed here: adding ~N trackers' WS subscriptions at once triggers a
+        # Binance 1006 close-storm at scale — they are tracked instead by the REST safety nets below
+        # (reconcile_active_from_ticker + _reconcile_orphan_signals). After this scope every ticked
+        # symbol has a live view, so a `not_ready` IS a real warm-set blackout — exactly what
+        # universe-health must still catch — and stays classified as a failure.
+        warm = {_compact(s) for s in rt.multi.primary.tracked_symbols()}
+        ordered = [s for s in symbols if s.upper() in warm]
         tick_started = time.monotonic()
 
         async def _native_one(
@@ -294,6 +305,10 @@ async def run_tick(
                     lifecycle=neutral_lc,
                     now=now,
                 )
+                # Zone-map watcher: approach/entry alerts for the карта зон limits (перезакуп/добор/
+                # шорт), which the emission path never tracks — one trade per SYMBOL:direction there.
+                # Delivered through the same pipeline (gating + dedup + mark-sent) as any follow-up.
+                followups = [*followups, *evaluate_zone_watch(tracker_state, native=nav, now=now)]
                 for fu in followups:
                     if fu.message_key in followup_sent_keys:
                         continue

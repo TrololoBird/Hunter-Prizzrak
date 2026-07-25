@@ -56,7 +56,8 @@ def test_confirming_cap_raises_strength_via_context() -> None:
 
 
 def test_disabled_factor_leaves_strength_unchanged() -> None:
-    cfg = PrizrakConfig()  # marketcap_enabled defaults False
+    # Explicitly disabled — the factor is ON by default now that macro_refresh.py fills its cache.
+    cfg = PrizrakConfig(marketcap_enabled=False)
     ohlcv = _price("bull")
     token = orch._MARKETCAP_SERIES.set(_cap("bull"))
     try:

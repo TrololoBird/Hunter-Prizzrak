@@ -44,7 +44,9 @@ def _cap(trend: str, *, base: float = 1_000_000.0, scale: float = 1.0) -> list[l
 
 
 def test_disabled_is_neutral() -> None:
-    res = compute_marketcap_factor(_price("bull"), _cap("bull"), direction="long", cfg=PrizrakConfig())
+    # Explicitly disabled — the factor is ON by default now that macro_refresh.py fills its cache.
+    cfg_off = PrizrakConfig(marketcap_enabled=False)
+    res = compute_marketcap_factor(_price("bull"), _cap("bull"), direction="long", cfg=cfg_off)
     assert res["multiplier"] == 1.0
     assert "marketcap_disabled" in res["evidence"]
 

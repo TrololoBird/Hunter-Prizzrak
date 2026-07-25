@@ -113,10 +113,12 @@ class PrizrakConfig(BaseModel):
     bos_max_bar_offset: int = Field(default=5, ge=1)
 
     # Market-cap доп-фактор (Павел М., prizrak_marketcap_factor) — the cap chart as a
-    # calibration factor for true-value/price divergence. OFF by default: it needs a
-    # non-CCXT free supply source (CoinGecko), fetched off the critical tick plane and
-    # silently neutral when unavailable, so enabling it never risks the live path.
-    marketcap_enabled: bool = Field(default=False)
+    # calibration factor for true-value/price divergence. ON: the supply source is CoinGecko
+    # (non-CCXT), fetched OFF the critical tick plane by ``macro_refresh.py`` and read
+    # cache-only, and the factor is silently neutral (1.0 + "marketcap_unavailable") whenever
+    # the cache is cold or the ticker has no free data — so it can never stall or fabricate.
+    # (Was OFF while nothing filled the cache, which made the flag a no-op stub.)
+    marketcap_enabled: bool = Field(default=True)
     # Strength bonus when the cap trend confirms the trade direction (damped 0.5× when
     # supply is unstable — a moving supply decouples cap from price).
     marketcap_confirm_bonus: float = Field(default=0.10, ge=0.0, le=0.15)
@@ -128,10 +130,12 @@ class PrizrakConfig(BaseModel):
     marketcap_supply_drift_pct: float = Field(default=0.05, ge=0.0, le=0.5)
 
     # Dominance доп-фактор (Prizrak: «доминация вниз — крипта вверх»; TOTAL3/Others reaction).
-    # OFF by default: needs a non-CCXT free source (CoinGecko /global) fetched off the tick
-    # plane, with 24h change derived from a rolling snapshot cache; silently neutral when
-    # unavailable (incl. cold start < 24h), so enabling it never risks the live path.
-    dominance_enabled: bool = Field(default=False)
+    # ON: the trader reads this out loud in every обзор («догоняющее движение на разгрузке
+    # Доминации ETH», «Стейблкоины пришли к поддержке»). Source is CoinGecko /global, fetched
+    # off the tick plane by ``macro_refresh.py`` (hourly append) and read cache-only; the 24h
+    # change needs a rolling snapshot cache, so it stays neutral (1.0 + "dominance_unavailable")
+    # during the cold start < 24h. (Was OFF while nothing filled the cache — a no-op stub flag.)
+    dominance_enabled: bool = Field(default=True)
     # Min |24h change| (BTC.D percentage-points / TOTAL3 percent) below which dominance is
     # treated as flat — inside this band the factor stays neutral (no signal from noise).
     dominance_neutral_band_pct: float = Field(default=0.3, ge=0.0, le=5.0)

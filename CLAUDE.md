@@ -34,13 +34,23 @@ _cli.py (pid-lock data/watch.pid) → runtime/cycle/_cycle_loop.py::run_loop   �
   ├─ deep_task          :456  analyst_pinned_loop                          [ПРИЗРАК]
   ├─ tg_task            :449  telegram_commands (/signal)
   ├─ path_backfill_task :466  каждые 900s
+  ├─ macro_refresh_task       dominance (1ч) + marketcap (6ч) → кэши доп-факторов [ПРИЗРАК]
   ├─ _wd_task           :502  faulthandler hang-watchdog
   └─ MAIN TICK          :521  каждые --interval (30s) → _cycle_tick.py::run_tick
         refresh_tick_batch_cache (data/collect.py) → _overlay_ws_tickers (WS поверх REST)
         → gather(tick_assembly.py::snapshot_symbol) ← ЗДЕСЬ считаются все фичи
         → feature_lake.enqueue (1 строка на ЗАКРЫТЫЙ 15m бар)
-        → evaluate_followups ← единственный send из тика (только по УЖЕ открытым сигналам)
+        → evaluate_followups + evaluate_zone_watch ← ЕДИНСТВЕННЫЙ send из тика
+             followups = по УЖЕ открытым сигналам; zone_watch = подход/вход в зоны карты
 ```
+
+**Две independent причины пуша по ПРИЗРАКу.** (1) `deep_task` шлёт КАРТОЧКУ на эмитированный
+сигнал (гейты RR/HTF) — она же трекается `register_signal_open` → SL/TP. (2) `evaluate_zone_watch`
+(`prizrak/zone_watch.py`) шлёт алерты по зонам КАРТЫ (перезакуп/добор/шорт из `prizrak/setups.py`),
+которых путь эмиссии не видит: трекер ключует `SYMBOL:direction`, т.е. физически не держит
+перезакуп И добор как два лонга. Вход в зону → handoff в трекер (если направление ещё свободно).
+Анти-спам — одноразовые флаги + матч зон по близости якоря (карта пересчитывается каждый тик и
+дрожит; ключ по координатам плодил бы «новую» зону каждые 60s).
 
 **Где сходятся две стратегии:** нигде до эмиссии. Отдельные таймеры, отдельные фетчи
 (сканер тянет свой OHLCV мимо `TickBatchCache`), отдельные форматтеры, отдельные гейты.

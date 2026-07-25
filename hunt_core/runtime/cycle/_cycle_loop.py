@@ -453,6 +453,18 @@ async def run_loop(
         )
         LOG.info("path_backfill_scheduled", interval_s=900.0)
 
+    # Macro доп-факторы (dominance / market cap). The tick reads their caches SYNCHRONOUSLY and
+    # cache-only, so without this producer the config flags were stubs — enabling one read an empty
+    # cache and the factor silently no-opped. Self-disables when both flags are off.
+    macro_refresh_task: asyncio.Task[None] | None = None
+    if not once:
+        from hunt_core.prizrak.macro_refresh import macro_context_refresh_loop
+
+        macro_refresh_task = asyncio.create_task(
+            macro_context_refresh_loop(tuple(PINNED_SYMBOLS)),
+            name="macro_context_refresh",
+        )
+
     # Hang watchdog: if a cycle stalls (e.g. an unbounded loop in scan/levels on
     # degenerate data), faulthandler dumps every Python thread's stack — it works
     # even while the GIL is held by a tight loop — then hard-exits so the process
@@ -971,6 +983,12 @@ async def run_loop(
             path_backfill_task.cancel()
             try:
                 await path_backfill_task
+            except asyncio.CancelledError:
+                pass
+        if macro_refresh_task is not None:
+            macro_refresh_task.cancel()
+            try:
+                await macro_refresh_task
             except asyncio.CancelledError:
                 pass
         if tg_cmds is not None:
