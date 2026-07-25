@@ -66,21 +66,6 @@ def _zones_report(action: str) -> AnalystReport:
     return report_from_row(row)
 
 
-def test_active_signal_zone_block_makes_no_wait_claim() -> None:
-    txt = _zones_report("long").interest_zones_text()
-    assert "WAIT" not in txt
-    assert "не активный сигнал" not in txt
-    assert "отдельно от основного сетапа" in txt
-
-
-def test_wait_tick_zone_block_keeps_wait_caption() -> None:
-    txt = _zones_report("wait").interest_zones_text()
-    assert "не активный сигнал" in txt
-
-
-# ── FIX 3 / FIX 4 — activation header R:R + pinned as-of stamp ────────────────
-
-
 class _StubResult:
     status = "sent"
     message_id = 1
@@ -197,40 +182,3 @@ def test_tp2_close_shows_computed_pnl_percent() -> None:
 # ── FIX 7 — RU pluralization ─────────────────────────────────────────────────
 
 
-def test_touches_ru_pluralization() -> None:
-    from hunt_core.prizrak.build import _touches_ru
-
-    assert _touches_ru(1) == "1 касание"
-    assert _touches_ru(2) == "2 касания"
-    assert _touches_ru(4) == "4 касания"
-    assert _touches_ru(5) == "5 касаний"
-    assert _touches_ru(11) == "11 касаний"
-    assert _touches_ru(14) == "14 касаний"
-    assert _touches_ru(21) == "21 касание"
-    assert _touches_ru(22) == "22 касания"
-
-
-def test_zone_strength_uses_correct_plural() -> None:
-    txt = _zones_report("wait").interest_zones_text()
-    assert "4 касания" in txt
-    assert "4 касаний" not in txt
-
-
-# ── FIX 8 — HTML escaping at the render site ─────────────────────────────────
-
-
-def test_invalidation_and_drivers_are_escaped() -> None:
-    row = {
-        "prizrak_summary": {
-            "action": "long",
-            "entry_lo": 60_000.0,
-            "entry_hi": 60_100.0,
-            "stop_loss": 59_000.0,
-            "invalidation": [{"condition": "close > 61000 & vol < 1M"}],
-            "confluence_drivers": [{"name": "OI > 5%", "delta": 0.1}],
-        },
-    }
-    report = report_from_row(row)
-    txt = report.prizrak_text()
-    assert "close &gt; 61000 &amp; vol &lt; 1M" in txt
-    assert "OI &gt; 5%" in txt

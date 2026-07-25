@@ -27,7 +27,7 @@ async def spot_weekly_ladder_native(
     price: float,
     spot: SpotEngine | None = None,
     weekly_bars: list[Bar] | None = None,
-    max_levels_per_side: int = 4,
+    max_levels_per_side: int = 24,
     merge_tol_pct: float = 1.5,
 ) -> dict[str, Any] | None:
     """Macro weekly-spot level ladder from typed handles — context only, never a gate.

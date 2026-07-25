@@ -102,6 +102,11 @@ def assemble_prizrak(
     )
     structure = compute_prizrak_structure(ohlcv_by_tf, cfg=cfg)
     zones = compute_interest_zones(ohlcv_by_tf, price=price, cfg=cfg)
+    # Multi-horizon ПОК-anchored setups (местный/недельный) for the Prizrak-post format; the spot
+    # horizon is merged from native.spot_ladder in the formatter. Orchestrator/signal path untouched.
+    from hunt_core.prizrak.setups import build_symbol_setups
+
+    setups = build_symbol_setups(ohlcv_by_tf, price=price, cfg=cfg, structure=structure)
     summary = max(candidates, key=lambda c: c["strength"]) if candidates else None
 
     if isinstance(summary, dict) and summary.get("liq_conflict"):
@@ -119,6 +124,7 @@ def assemble_prizrak(
         summary=summary,
         structure=structure,
         interest_zones=zones,
+        setups=setups,
         abstain=tuple(abstain),
         bias_liq_conflict=bias_liq_conflict,
     )

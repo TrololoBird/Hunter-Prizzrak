@@ -25,6 +25,7 @@ class PrizrakOutput(BaseModel):
     summary: dict[str, Any] | None = None  # was row["prizrak_summary"] — strongest candidate
     structure: dict[str, Any] = Field(default_factory=dict)  # was row["prizrak_structure"]
     interest_zones: dict[str, Any] = Field(default_factory=dict)  # was row["prizrak_interest_zones"]
+    setups: dict[str, Any] = Field(default_factory=dict)  # multi-horizon ПОК-anchored setups (setups.py)
     abstain: tuple[dict[str, Any], ...] = ()  # was row["prizrak_abstain"]
     bias_liq_conflict: dict[str, Any] | None = None  # was row["prizrak_bias_liq_conflict"]
 

@@ -889,10 +889,6 @@ from hunt_core.deliver._labels import (
     trigger_human,
     veto_human,
 )
-from hunt_core.deliver._sections import (
-    format_cross_exchange_section,
-    format_pinned_deep_analysis,
-)
 from hunt_core.deliver.templates import format_squeeze_telegram as _format_squeeze_telegram
 
 
@@ -1010,9 +1006,7 @@ __all__ = (
     "WebhookBroadcaster",
     "build_message_broadcaster",
     "fmt_price",
-    "format_cross_exchange_section",
     "format_followup_telegram",
-    "format_pinned_deep_analysis",
     "format_setup_lines",
     "format_squeeze_telegram",
     "format_symbol_telegram",

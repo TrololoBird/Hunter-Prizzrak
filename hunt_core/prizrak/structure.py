@@ -93,11 +93,14 @@ def spot_weekly_ladder(
     pivots merged into one level (touch count = structural strength, course стр.22),
     split into levels below/above the current price and ordered by distance.
 
-    Returns ``{"below": [...], "above": [...], "bars_used": int, "source": "spot_1w"}``
-    where each level is ``{"price": float, "touches": int}``. Empty lists when there
-    is not enough history or price is invalid.
+    Returns ``{"below": [...], "above": [...], "bars_used": int, "source": "spot_1w", "atl": float|None,
+    "ath": float|None}`` where each level is ``{"price": float, "touches": int}``. ``atl``/``ath`` are the
+    full-history spot extremes — the trader anchors his deepest spot horizon on the all-time-low (POL/MATIC
+    разбор: «спот-сетап от ATL»). Empty lists when there is not enough history or price is invalid.
     """
-    empty: dict[str, Any] = {"below": [], "above": [], "bars_used": 0, "source": "spot_1w"}
+    empty: dict[str, Any] = {
+        "below": [], "above": [], "bars_used": 0, "source": "spot_1w", "atl": None, "ath": None
+    }
     if price <= 0.0 or not ohlcv:
         return empty
     bars = bars_from_ohlcv(ohlcv)
@@ -126,7 +129,12 @@ def spot_weekly_ladder(
         (lv for lv in levels if float(lv["price"]) >= price),
         key=lambda lv: float(lv["price"]) - price,
     )[:max_levels_per_side]
-    return {"below": below, "above": above, "bars_used": len(bars), "source": "spot_1w"}
+    atl = min((r[3] for r in ohlcv if len(r) > 3), default=None)
+    ath = max((r[2] for r in ohlcv if len(r) > 2), default=None)
+    return {
+        "below": below, "above": above, "bars_used": len(bars), "source": "spot_1w",
+        "atl": atl, "ath": ath,
+    }
 
 
 __all__ = ["bars_from_ohlcv", "multi_scale_structure", "spot_weekly_ladder", "_tier_structure"]

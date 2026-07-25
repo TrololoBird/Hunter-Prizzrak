@@ -213,6 +213,56 @@ def _tf_lookback_map(cfg: PrizrakConfig) -> dict[str, int]:
     return mapping
 
 
+def _zone_edge_band(z: dict[str, Any], *, side: str) -> dict[str, Any]:
+    """Decompose an ENCLOSING (straddling) accumulation box into ONE actionable boundary
+    band: its support-cluster floor (``ext_lo..lo``, price is bought) for ``side="long"``
+    or its resistance-cluster ceiling (``hi..ext_hi``, price is shorted) for ``side="short"``.
+
+    A box whose range encloses the price is neither wholly-below nor wholly-above, so the
+    below/above split drops it from BOTH sides — and when the whole local range is one such
+    straddling flat (the common 4h/1h case) that leaves nothing and callers fall through to a
+    far, wide zone. But the box's OWN boundaries ARE the trader's levels — «уровень есть
+    уровень» (PDF стр.22): live 2026-07-22 BTC's 4h box 62546–66924 had floor ≈ his перезакуп
+    62850 and ceiling ≈ his short 66850. ``ext_lo/ext_hi/lo_touches/hi_touches`` are
+    unconditionally written by ``_zone_from_clusters`` — read directly, no ``or``-fallback: the
+    band rests on a real boundary cluster, never a synthesized level (invariant I-6).
+    """
+    if side == "long":  # floor band: the support cluster price bounces off (стр.18/19)
+        lo, hi, touches = z["ext_lo"], z["lo"], z["lo_touches"]
+    else:  # ceiling band: the resistance cluster price is shorted into
+        lo, hi, touches = z["hi"], z["ext_hi"], z["hi_touches"]
+    width_pct = round((hi - lo) / lo * 100.0, 4) if lo > 0 else 0.0
+    return {**z, "lo": float(lo), "hi": float(hi), "touches": int(touches), "width_pct": width_pct}
+
+
+def _split_below_above(
+    zones: list[dict[str, Any]], *, price: float, decompose_short: bool
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split zones into the long-side (below price) and short-side (above price) pools,
+    decomposing any straddling box into its boundary bands (:func:`_zone_edge_band`) so the
+    NEAR support/resistance surfaces instead of the straddler being dropped.
+
+    ``decompose_short`` gates the ceiling: the display card passes ``True`` (show both the
+    near 🟢 support and the near 🔴 resistance the trader analyses). The emitted-signal path
+    passes ``False``: a straddler's floor is a trend-aligned добор worth EMITTING, but its
+    ceiling is a counter-trend short that must stay a card «зона интереса», never an
+    auto-fired signal (razbor §6.5 guardrail — no «фанатично в шорты в лонг-тренде»).
+    Whole-below / whole-above boxes are classified unchanged.
+    """
+    below: list[dict[str, Any]] = []
+    above: list[dict[str, Any]] = []
+    for z in zones:
+        if z["hi"] < price:
+            below.append(z)
+        elif z["lo"] > price:
+            above.append(z)
+        else:  # straddle — the floor is always actionable; the ceiling only for the card
+            below.append(_zone_edge_band(z, side="long"))
+            if decompose_short:
+                above.append(_zone_edge_band(z, side="short"))
+    return below, above
+
+
 def compute_interest_zones(
     ohlcv_by_tf: dict[str, list[list[float]]],
     *,
@@ -259,8 +309,14 @@ def compute_interest_zones(
         def _tight(side: list[dict[str, Any]]) -> list[dict[str, Any]]:
             narrow = [z for z in side if float(z.get("width_pct") or 0) <= _INTEREST_ZONE_MAX_WIDTH_PCT]
             return narrow or (sorted(side, key=lambda z: float(z.get("width_pct") or 0))[:1] if side else [])
-        below = _tight([z for z in zones if z.get("hi", 0) < price])
-        above = _tight([z for z in zones if z.get("lo", 0) > price])
+
+        # The display card shows BOTH sides of a straddling flat — the near 🟢 support the
+        # trader buys AND the near 🔴 resistance he shorts («уровень есть уровень», стр.22;
+        # razbor §2/§7 ❌1). Without this a straddler (BTC 4h 62546–66924 live) was dropped
+        # from both sides and the tf-loop fell to the far, wide 1d boxes.
+        raw_below, raw_above = _split_below_above(zones, price=price, decompose_short=True)
+        below = _tight(raw_below)
+        above = _tight(raw_above)
         # Pick the STRONGEST accumulation box by touches first, volume as the reinforcing
         # factor, nearest as final tie-break.
         #
@@ -1538,8 +1594,12 @@ def _forward_zone_candidate(
     if not zones:
         return None
 
-    above = [z for z in zones if z["lo"] > price]
-    below = [z for z in zones if z["hi"] < price]
+    # A straddling flat's floor is a trend-aligned добор the trader pre-places a limit at —
+    # without this it was dropped and only the far DEEP floor (a separate zone, e.g. BTC
+    # 58955–60634) emitted, entering ~10% below his actual перезакуп ≈62850 (razbor §7 ❌3).
+    # decompose_short=False: the straddler's ceiling stays a card «зона интереса», never an
+    # auto-fired counter-trend short (razbor §6.5 guardrail).
+    below, above = _split_below_above(zones, price=price, decompose_short=False)
 
     def _score(zone: dict[str, Any], dist_pct: float) -> float:
         """Strength = traded volume (course стр.22), tempered by recency and distance.
@@ -1555,7 +1615,9 @@ def _forward_zone_candidate(
         distance_factor = 1.0 + dist_pct / 10.0
         return float(zone.get("zone_volume") or 0.0) * recency_factor / distance_factor
 
-    def _best(pool: list[dict[str, Any]], *, near_edge_key: str) -> tuple[dict[str, Any], float, float] | None:
+    def _best(
+        pool: list[dict[str, Any]], *, near_edge_key: str, nearest_first: bool = False
+    ) -> tuple[dict[str, Any], float, float] | None:
         ranked = []
         for z in pool:
             edge = z[near_edge_key]
@@ -1565,11 +1627,21 @@ def _forward_zone_candidate(
             ranked.append((z, dist_pct, _score(z, dist_pct)))
         if not ranked:
             return None
-        ranked.sort(key=lambda t: t[2], reverse=True)
+        # Support/добор side: the author works the NEAREST qualifying зона first, deeper
+        # доборы as a ladder below it (PDF стр.30 «закуп делить на зону и на уровень»;
+        # razbor §7 ❌3). Volume stays the existence GATE (find_accumulation_zones' touch/
+        # width census + the dist-band filter above) — but NOT the primary pick, else the
+        # deepest high-volume capitulation box (BTC 58955–60634, volume-ranked #1 by
+        # accumulation.py) outranks his actual добор (≈62850) and the signal enters far too
+        # deep (58962 live). Resistance/short side keeps volume-primary, unchanged.
+        if nearest_first:
+            ranked.sort(key=lambda t: t[1])  # smallest distance → nearest zone first
+        else:
+            ranked.sort(key=lambda t: t[2], reverse=True)
         return ranked[0]
 
     resistance = _best(above, near_edge_key="lo")
-    support = _best(below, near_edge_key="hi")
+    support = _best(below, near_edge_key="hi", nearest_first=True)
     if resistance is None and support is None:
         return None
 

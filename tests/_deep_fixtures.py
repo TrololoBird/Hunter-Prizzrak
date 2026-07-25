@@ -30,6 +30,7 @@ def _prizrak(
     signals: Any = (),
     abstain: Any = (),
     bias_liq_conflict: dict[str, Any] | None = None,
+    setups: dict[str, Any] | None = None,
 ) -> PrizrakOutput:
     return PrizrakOutput(
         symbol=symbol,
@@ -37,6 +38,7 @@ def _prizrak(
         summary=summary,
         structure=dict(structure or {}),
         interest_zones=dict(interest_zones or {}),
+        setups=dict(setups or {}),
         abstain=tuple(abstain or ()),
         bias_liq_conflict=bias_liq_conflict,
     )
@@ -70,6 +72,7 @@ def make_report(
     signals: Any = (),
     abstain: Any = (),
     bias_liq_conflict: dict[str, Any] | None = None,
+    setups: dict[str, Any] | None = None,
     spot: dict[str, Any] | None = None,
     quote_volume_24h: float | None = None,
     maps: Any = None,
@@ -93,6 +96,7 @@ def make_report(
             signals=signals,
             abstain=abstain,
             bias_liq_conflict=bias_liq_conflict,
+            setups=setups,
         ),
         view=view,
         maps=maps,
@@ -137,6 +141,7 @@ def make_native(
     signals: Any = (),
     abstain: Any = (),
     bias_liq_conflict: dict[str, Any] | None = None,
+    setups: dict[str, Any] | None = None,
     spot: dict[str, Any] | None = None,
     quote_volume_24h: float | None = None,
     maps: Any = None,
@@ -160,6 +165,7 @@ def make_native(
             signals=signals,
             abstain=abstain,
             bias_liq_conflict=bias_liq_conflict,
+            setups=setups,
         ),
         forecasts=dict(forecasts or {}),
         fusion=dict(fusion or {}),

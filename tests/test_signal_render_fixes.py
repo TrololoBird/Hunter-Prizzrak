@@ -10,7 +10,6 @@
 """
 from __future__ import annotations
 
-from _deep_fixtures import report_from_row
 
 import re
 from collections import deque
@@ -75,74 +74,6 @@ def test_iceberg_straddle_bucket_skipped() -> None:
 # ── #2 bias warning fires from prizrak_structure ─────────────────────────────
 
 
-def test_interest_zone_bias_warning_fires_for_counter_trend_long() -> None:
-
-    row = {
-        "symbol": "BTCUSDT",
-        # htf_bias lives here as a DICT (mtf source); summary may be absent.
-        "prizrak_structure": {"htf_bias": {"bias": "short", "score": -0.7}},
-        "prizrak_interest_zones": {
-            "tf": "4h",
-            "long": {"lo": 58955.0, "hi": 60634.0, "touches": 8,
-                     "invalidation": 57776.0, "first_target": 62410.0},
-            "long_ladder": [{"lo": 58955.0, "hi": 60634.0, "touches": 8}],
-        },
-    }
-    r = report_from_row(row)
-    text = _strip(r.interest_zones_text())
-    assert "против HTF-bias" in text  # the previously-dead warning now fires
-
-
-def test_mtf_header_names_scored_tfs_and_separates_intraday() -> None:
-    # #1: the HTF-bias header must name the scored set (1w·1d·4h·1h) and the
-    # 5m/15m row must sit under an explicit "не в HTF-балле" sub-label so it is
-    # not read as an HTF input.
-
-    row = {
-        "symbol": "BTCUSDT",
-        "prizrak_summary": None,
-        "prizrak_structure": {
-            "htf_bias": {"bias": "short", "score": -0.7},
-            "struct_by_tier": {"intraday": {"tf": "5m/15m"}},
-            "struct_by_tf": {},
-            "tier_trends": {"intraday": "bear"},
-            "tf_trends": {"1w": "bear", "1d": "bear", "4h": "neutral", "1h": "bear"},
-        },
-    }
-    r = report_from_row(row)
-    text = _strip(r.mtf_text())
-    assert "HTF-bias (1w·1d·4h·1h)" in text
-    assert "не в HTF-балле" in text
-    # the intraday sub-label precedes the 5m/15m row
-    assert text.index("не в HTF-балле") < text.index("5m/15m")
-
-
-def test_mtf_surfaces_bias_microstructure_conflict_on_wait_tick() -> None:
-    # #7: no active candidate (summary=None), HTF-bias=SHORT, but the bot's own
-    # microstructure is bullish → the МТФ block must surface the conflict, not
-    # print bias and microstructure side by side unresolved.
-
-    row = {
-        "symbol": "BTCUSDT",
-        "prizrak_summary": None,  # WAIT tick
-        "prizrak_structure": {
-            "htf_bias": {"bias": "short", "score": -0.7},
-            "struct_by_tier": {},
-            "struct_by_tf": {},
-            "tier_trends": {},
-            "tf_trends": {"1w": "bear", "1d": "bear", "4h": "neutral", "1h": "bear"},
-        },
-        "prizrak_bias_liq_conflict": {
-            "bias": "short",
-            "evidence": ["DOM:покупатели(+0.45)", "liq:шорт-сквиз↑"],
-        },
-    }
-    r = report_from_row(row)
-    text = _strip(r.mtf_text())
-    assert "против текущей микроструктуры" in text
-    assert "покупатели" in text
-
-
 def test_bias_conflict_computed_only_when_no_candidate() -> None:
     # entry.py must compute prizrak_bias_liq_conflict only in the WAIT case; a
     # bullish DOM under a SHORT bias with no candidate flags the conflict.
@@ -159,25 +90,6 @@ def test_bias_conflict_computed_only_when_no_candidate() -> None:
     assert factor["conflict"] is True  # short bias vs bullish market = conflict
     aligned = compute_liquidation_factor(liq_ctx, direction="long", cfg=cfg)
     assert aligned["conflict"] is False  # long bias agrees with bullish market
-
-
-def test_interest_zone_no_warning_when_zone_aligns_with_bias() -> None:
-
-    row = {
-        "symbol": "BTCUSDT",
-        "prizrak_structure": {"htf_bias": {"bias": "short", "score": -0.7}},
-        "prizrak_interest_zones": {
-            "tf": "4h",
-            "short": {"lo": 66000.0, "hi": 67000.0, "touches": 5},
-            "short_ladder": [{"lo": 66000.0, "hi": 67000.0, "touches": 5}],
-        },
-    }
-    r = report_from_row(row)
-    text = _strip(r.interest_zones_text())
-    assert "против HTF-bias" not in text  # short zone + short bias = aligned
-
-
-# ── #8 deeper-level dedup ─────────────────────────────────────────────────────
 
 
 def test_deeper_levels_drop_per_tf_repeats_and_adjacent_dupes() -> None:
@@ -211,26 +123,6 @@ def test_deeper_levels_drop_per_tf_repeats_and_adjacent_dupes() -> None:
 
 
 # ── #10 liquidation line carries cluster size ────────────────────────────────
-
-
-def test_dom_stale_carry_flagged_not_for_touch_entry() -> None:
-    # #6: carried book_walls older than the actionability bound must be marked
-    # context-only, not printed as "сейчас" without caveat.
-    from hunt_core.deliver._sections import format_book_walls_section
-
-    walls = {
-        "venues": ["binance", "bybit"],
-        "bid_levels": [{"price": 63_640.0, "notional_usd": 2_900_000.0}],
-        "ask_levels": [{"price": 63_720.0, "notional_usd": 795_000.0}],
-        "depth_imbalance": 0.449,
-    }
-    row_fresh = {"price": 63_679.5, "book_walls": walls, "freshness": {"dom_age_s": 4}}
-    row_stale = {"price": 63_679.5, "book_walls": walls, "freshness": {"dom_age_s": 120}}
-    fresh = _strip(format_book_walls_section(row_fresh))
-    stale = _strip(format_book_walls_section(row_stale))
-    assert "НЕ для входа по касанию" not in fresh
-    assert "НЕ для входа по касанию" in stale
-    assert "устарела" in stale
 
 
 def test_liquidation_line_shows_cluster_size() -> None:

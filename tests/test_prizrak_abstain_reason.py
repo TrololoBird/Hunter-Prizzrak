@@ -11,7 +11,7 @@ from typing import Any
 
 from hunt_core.prizrak.config import PrizrakConfig
 from hunt_core.prizrak.engines.calibration import aggregate_calibration
-from hunt_core.prizrak.format_telegram import _abstain_reason_line
+from hunt_core.prizrak.format_post import _abstain_reason_line
 from hunt_core.prizrak.orchestrator import _geometry_from_zone, _ABSTAIN_SINK
 
 CFG = PrizrakConfig.load()
