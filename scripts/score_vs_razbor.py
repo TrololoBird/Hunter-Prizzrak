@@ -77,6 +77,33 @@ BASELINE: list[dict[str, Any]] = [
         "levels": [(0.00797, "верх базы"), (0.00787, "низ базы"), (0.00716, "верх зелёной"),
                    (0.00640, "низ зелёной"), (0.01050, "отработанное сопр.")],
     },
+    # ── разборы прошлых дат: данные отматываются на день публикации (I-5) ──────────────────
+    {
+        "symbol": "BCH/USDT:USDT", "date": "2026-07-22", "src": "prizrak_bch_praktikum",
+        "levels": [(205.0, "верх лонг-зоны"), (196.0, "ПОК базы"), (190.0, "низ лонг-зоны"),
+                   (245.0, "верх шорт-зоны"), (236.0, "низ шорт-зоны"),
+                   (225.0, "верх mid"), (215.0, "низ mid")],
+    },
+    {
+        "symbol": "BTC/USDT:USDT", "date": "2026-07-22", "src": "prizrak_btc_eth_keyzone",
+        "levels": [(62850.0, "ПОК / перезакуп"), (66850.0, "шорт-зона")],
+    },
+    {
+        "symbol": "ETH/USDT:USDT", "date": "2026-07-12", "src": "prizrak_eth",
+        "levels": [(1750.0, "верх добора"), (1740.76, "уровень"), (1700.13, "BUY-зона"),
+                   (1700.0, "низ добора")],
+    },
+    {
+        "symbol": "POL/USDT:USDT", "date": "2026-07-22", "src": "prizrak_pol_matic",
+        "levels": [(0.1050, "верх шорт-зоны"), (0.1020, "низ шорт-зоны"),
+                   (0.0880, "локальное сопр."), (0.0800, "TP лонга"), (0.0780, "TP лонга"),
+                   (0.0754, "верх лонг-зоны"), (0.0705, "добор"), (0.0670, "floor зоны")],
+    },
+    {
+        "symbol": "AEVO/USDT:USDT", "date": "2026-07-02", "src": "prizrak_aevo",
+        "levels": [(0.01908, "пробитое 4ч сопр."), (0.01859, "верхний добор 1ч"),
+                   (0.01809, "ключевой добор 1ч"), (0.01720, "верх BUY"), (0.01700, "низ BUY")],
+    },
 ]
 
 
@@ -149,6 +176,7 @@ async def main() -> None:
     spot_eng = SpotEngine([])
     await spot_eng._ex.load_markets()
     tot_hit = tot_lvl = tot_zones = 0
+    widths: list[float] = []
     try:
         await ex.load_markets()
         for case in BASELINE:
@@ -174,6 +202,10 @@ async def main() -> None:
             ladder = await spot_weekly_ladder_native(sym, price=price, spot=spot_eng)
             zones = _zone_edges(setups, ladder)
             tot_zones += len(zones)
+            # Ширина зоны — вторая метрика, без которой recall врёт. Сужение зоны при СОХРАНЁННОМ
+            # покрытии его уровня recall не видит вообще, а это и есть выигрыш: точнее вход, честнее
+            # RR. Измерено на правке value area — 35% боксов сузились на медианные 31%, recall 54→54.
+            widths.extend((hi / lo - 1.0) * 100.0 for lo, hi, _p, _t in zones if hi > lo > 0)
 
             hits = 0
             misses: list[str] = []
@@ -200,6 +232,10 @@ async def main() -> None:
         print(f"\nЗНАК смещения промахов: выше его уровня {len(up)}, ниже {len(dn)}")
         if SIGNS:
             print(f"  среднее смещение: {sum(s for _, s in SIGNS)/len(SIGNS):+.2f}%")
+        if widths:
+            widths.sort()
+            print(f"\nШИРИНА ЗОН: медиана {widths[len(widths) // 2]:.2f}%"
+                  f"  ·  p90 {widths[int(len(widths) * 0.9)]:.2f}%  ·  измерено {len(widths)}")
         print(f"\n{'=' * 60}\nИТОГО recall {tot_hit}/{tot_lvl} = {tot_hit / tot_lvl * 100:.0f}%"
               f"   ·   зон напечатано: {tot_zones} (он публикует 2–4 на символ)")
 
