@@ -241,6 +241,31 @@ class SpotEngine:
                 return proxy
         return None
 
+    async def daily_ohlcv(self, symbol: str, *, limit: int = 1500) -> list[Bar] | None:
+        """Дневной спот-OHLCV для той же макро-лестницы — РАЗРЕШЕНИЕ там, где недельная его теряет.
+
+        Недельная лестница берёт ДАЛЬНОСТЬ (520 недель ≈ 10 лет), но её пивоты грубы: замер по 19
+        полосам, снятым с графиков автора (8 символов), дал попадание 47%. Дневная попадает в 58%
+        при меньшем числе ступеней, но не достаёт до старых эпох — у SAND её ближайшая ступень к
+        полосе 0.0294–0.0320 оказалась 0.0441, тогда как недельная давала 0.0288. Объединение
+        покрывает обе слабости: **68%**. На 7 полосах объединение было вничью с дневной — разницу
+        разрешил только больший набор, поэтому решение принято по нему.
+
+        Кэш и семантика те же, что у :meth:`weekly_ohlcv`; форминг-день отбрасывается (I-5).
+        """
+        spot_symbol = self.resolve_spot_symbol(symbol)
+        if spot_symbol is None:
+            return None
+        key = f"{spot_symbol}|1d"
+        cached = self._weekly.get(key)
+        if cached is not None and time.monotonic() - cached[1] <= _WEEKLY_TTL_S:
+            return cached[0]
+        bars = await rest.seed_ohlcv(self._ex, spot_symbol, "1d", limit=limit)
+        if not bars:
+            return None
+        self._weekly[key] = (bars, time.monotonic())
+        return bars
+
     async def weekly_ohlcv(self, symbol: str, *, limit: int = 520) -> list[Bar] | None:
         """Full-history weekly spot OHLCV for the macro ladder (lazy, cached, closed-only).
 

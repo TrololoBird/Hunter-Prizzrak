@@ -109,10 +109,57 @@ async def spot_weekly_ladder_native(
         max_levels_per_side=max_levels_per_side,
         merge_tol_pct=merge_tol_pct,
     )
+    # Дневная лестница ДОБАВЛЯЕТСЯ к недельной, а не заменяет её: они закрывают разные слабости.
+    # Замер по 19 полосам, снятым с графиков автора (8 символов): недельная попадает в 47%
+    # (дальность есть, пивоты грубы), дневная в 58% (разрешение есть, до старых эпох не достаёт —
+    # у SAND её ближайшая ступень к полосе 0.0294–0.0320 была 0.0441 против недельных 0.0288),
+    # объединение — 68%. На 7 полосах объединение было ВНИЧЬЮ с дневной; разницу разрешил только
+    # больший набор, поэтому и решение принято по нему, а не по первому замеру.
+    if spot is not None and weekly_bars is None:
+        daily = await spot.daily_ohlcv(symbol)
+        if daily:
+            d_ladder = spot_weekly_ladder(
+                daily, price=price,
+                max_levels_per_side=max_levels_per_side, merge_tol_pct=merge_tol_pct,
+            )
+            ladder = _merge_ladders(ladder, d_ladder, merge_tol_pct=merge_tol_pct)
+            source = f"{source}+1d"
     if ladder.get("below") or ladder.get("above"):
         ladder["source"] = source
         return ladder
     return None
+
+
+def _merge_ladders(
+    base: dict[str, Any], extra: dict[str, Any], *, merge_tol_pct: float
+) -> dict[str, Any]:
+    """Слить ступени двух лестниц, схлопывая соседей ближе ``merge_tol_pct``.
+
+    ATL/ATH берутся как истинные экстремумы обеих: дневное окно короче недельного, поэтому его
+    «исторический минимум» — минимум последних лет, а не всей истории, и подменять им недельный
+    нельзя (I-6: это выдало бы за ATL то, что им не является).
+    """
+    out = dict(base)
+    for side in ("below", "above"):
+        rows = list(base.get(side) or []) + list(extra.get(side) or [])
+        merged: list[dict[str, Any]] = []
+        for row in sorted(rows, key=lambda r: float(r.get("price") or 0.0)):
+            try:
+                px = float(row["price"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if px <= 0:
+                continue
+            if merged and abs(px / float(merged[-1]["price"]) - 1.0) * 100.0 <= merge_tol_pct:
+                continue
+            merged.append(row)
+        out[side] = merged
+    for key, pick in (("atl", min), ("ath", max)):
+        vals = [float(v) for v in (base.get(key), extra.get(key))
+                if isinstance(v, (int, float)) and float(v) > 0]
+        if vals:
+            out[key] = pick(vals)
+    return out
 
 
 def session_stats_native(
