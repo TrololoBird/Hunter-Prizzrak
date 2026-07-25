@@ -90,7 +90,7 @@ def _targets_line(vals: list[Any]) -> str:
     return f"💰 цели: {inner}" if inner else ""
 
 
-def _plan_line(setups: dict[str, Any], price: float) -> str:
+def _plan_line(setups: dict[str, Any], price: float, market: dict[str, Any]) -> str:
     """Строка плана в форме его разборов: ближайшая поддержка · сопротивление · зона закупа.
 
     Он всегда сводит разбор к этим трём вещам — «уровень поддержки 4ч 0.005059», «ближайший
@@ -128,6 +128,14 @@ def _plan_line(setups: dict[str, Any], price: float) -> str:
                     best = (touches, lo, hi)
     if best is not None:
         bits.append(f"закуп <code>{fmt_price(best[1])}</code>–<code>{fmt_price(best[2])}</code>")
+        # Кластер ликвидаций МЕЖДУ ценой и зоной закупа — второе независимое основание ждать, а не
+        # брать с текущих: путь к лимиткам проходит через съём ликвидности. Автор проговаривает это
+        # прямо в разборе ASTR («ликвидности снизу предостаточно, здесь наш часовой уровень…
+        # желательно как раз в этот момент будет проработка ликвидности»), и потому кладёт заявки
+        # заранее — проработка бывает импульсной.
+        magnet = market.get("liq_heatmap_nearest_long")
+        if isinstance(magnet, (int, float)) and best[2] < float(magnet) < price:
+            bits.append(f"⚡ ликвидность по пути <code>{fmt_price(float(magnet))}</code>")
     return f"🎯 <b>План</b>: {' · '.join(bits)}" if len(bits) >= 2 else ""
 
 
@@ -593,7 +601,7 @@ def format_prizrak_post(analysis: AnalystReport) -> str:
     hr = _headroom_line(setups)
     if hr:
         zlines.append(hr)
-    plan = _plan_line(setups, price)
+    plan = _plan_line(setups, price, market)
     if plan:
         zlines.append(plan)
     if zlines:
