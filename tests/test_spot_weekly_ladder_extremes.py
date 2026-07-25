@@ -9,6 +9,8 @@ and could even list a ladder level BELOW its own ATL.
 """
 from __future__ import annotations
 
+import pytest
+
 from hunt_core.prizrak.structure import spot_weekly_ladder
 
 
@@ -75,3 +77,24 @@ def test_all_bars_rejected_still_reports_a_number() -> None:
     atl = _traded_extreme(bars, low=True)
     assert atl is not None and abs(atl - 0.1) < 1e-9
     assert _traded_extreme([], low=True) is None  # nothing to measure ⇒ None, not a fabricated 0.0
+
+
+def test_the_atl_level_itself_survives_the_bounds_filter() -> None:
+    """★ The deepest rung IS usually the ATL — a bare `>=` bound dropped it on float noise.
+
+    A level merged from N pivots that all sit exactly AT the extreme gets a running-mean price a few
+    ULPs below it (7 × 49.95 → 49.949999999999996), so an exact `price >= atl` test discarded the
+    most-touched, deepest level in the ladder — silently, and precisely for the cleanest structures.
+    """
+    # Every low prints at the same price: the merged level lands a hair under it.
+    bars: list[list[float]] = []
+    for _ in range(8):
+        bars.append(_bar(60.0, 70.0, 59.4, 69.86))
+        bars.append(_bar(69.86, 70.0, 60.0, 60.0))
+        bars.append(_bar(60.0, 60.6, 50.0, 50.1))
+        bars.append(_bar(50.1, 60.0, 49.95, 60.0))
+    out = spot_weekly_ladder(bars, price=58.5, max_levels_per_side=24)
+    atl = float(out["atl"])
+    assert abs(atl - 49.95) < 1e-9
+    assert out["below"], "the ATL rung must survive its own bound"
+    assert min(float(lv["price"]) for lv in out["below"]) == pytest.approx(atl, rel=1e-9)

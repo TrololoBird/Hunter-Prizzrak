@@ -53,6 +53,17 @@ def _to_spot_symbol(symbol: str) -> str:
     return symbol.split(":", 1)[0]
 
 
+# Same-underlying spot proxies for perps whose settle-stripped symbol is NOT a listed spot market.
+# Binance lists gold/silver as its own tokenized perps (XAUUSDT/XAGUSDT) with no matching spot pair,
+# so the deterministic strip yields a symbol that does not exist and the macro ladder silently had
+# no source at all. PAXG (Paxos Gold) is the same 1 oz of gold: measured over their 33 overlapping
+# weeks the closes differ by a median 0.19% (max 1.32%) — inside the ladder's own 1.5% merge
+# tolerance, i.e. the SAME levels — while PAXG/USDT carries 309 weekly bars back to 2020-08 against
+# the perp's 33. Silver has no tokenized spot on Binance and deliberately gets no entry here: the
+# producer falls back to the instrument's own weekly bars rather than borrowing a different metal.
+_SPOT_BASE_ALIAS: dict[str, str] = {"XAU": "PAXG"}
+
+
 class SpotEngine:
     """Push-state spot data source for spot-vs-perp enrichment (public, own budget)."""
 
@@ -208,14 +219,39 @@ class SpotEngine:
                 out["spot_taker_buy_ratio"] = ratio
         return out
 
+    def resolve_spot_symbol(self, symbol: str) -> str | None:
+        """The listed spot market backing ``symbol``, or ``None`` when the venue lists none.
+
+        Settle-strip first (the deterministic perp→spot map); if that symbol is not a loaded spot
+        market, retry through :data:`_SPOT_BASE_ALIAS` for a same-underlying proxy. Returns ``None``
+        rather than a symbol that does not exist, so callers can choose a fallback source instead of
+        eating a per-tick fetch error (I-6).
+        """
+        direct = _to_spot_symbol(symbol)
+        markets = getattr(self._ex, "markets", None)
+        if not markets:  # markets not loaded yet — keep the old deterministic behaviour
+            return direct
+        if direct in markets and markets[direct].get("spot"):
+            return direct
+        base, _, quote = direct.partition("/")
+        alias = _SPOT_BASE_ALIAS.get(base.upper())
+        if alias and quote:
+            proxy = f"{alias}/{quote}"
+            if proxy in markets and markets[proxy].get("spot"):
+                return proxy
+        return None
+
     async def weekly_ohlcv(self, symbol: str, *, limit: int = 520) -> list[Bar] | None:
         """Full-history weekly spot OHLCV for the macro ladder (lazy, cached, closed-only).
 
         ``limit=520`` ≈ 10 yr (the whole listed life of any Binance spot market) in one call; the
-        forming week is dropped (I-5). Cached per symbol for 6h. ``None`` fail-loud on failure.
-        Accepts a futures OR spot symbol (normalized to the spot market for the REST fetch).
+        forming week is dropped (I-5). Cached per symbol for 6h. ``None`` fail-loud on failure —
+        including when the venue lists no spot market for this underlying at all.
+        Accepts a futures OR spot symbol (resolved via :meth:`resolve_spot_symbol`).
         """
-        spot_symbol = _to_spot_symbol(symbol)
+        spot_symbol = self.resolve_spot_symbol(symbol)
+        if spot_symbol is None:
+            return None
         cached = self._weekly.get(spot_symbol)
         if cached is not None and time.monotonic() - cached[1] <= _WEEKLY_TTL_S:
             return cached[0]

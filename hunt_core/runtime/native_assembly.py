@@ -157,7 +157,11 @@ async def assemble_native_analyst(
     # Fusion is display/journal-only (no emission gate reads it). lifecycle/structure and OI-%change
     # have no typed producer yet (tracked follow-up #38) → passed None, checks inert (not fabricated).
     fusion = compute_manipulation_fusion_native(view, panel, maps, session=session)
-    spot_ladder = await spot_weekly_ladder_native(symbol, price=view.last_price, spot=rt.spot)
+    # contract_weekly is the fallback source for underlyings the venue lists no spot market for
+    # (Binance's tokenized XAU/XAG perps) — without it those symbols lose the macro horizon entirely.
+    spot_ladder = await spot_weekly_ladder_native(
+        symbol, price=view.last_price, spot=rt.spot, contract_weekly=panel.frames.w1
+    )
     freshness = freshness_native(
         now_ms=int(time.time() * 1000),
         tick_ts_ms=int(view.now_ms),

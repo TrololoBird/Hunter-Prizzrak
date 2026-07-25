@@ -170,8 +170,17 @@ def _deep_horizons(ladder: dict[str, Any], price: float) -> list[str]:
             lines.append(f"{emoji} {tail.strip().lstrip('·').strip()}")
         out.extend(lines)
 
-    _horizon("Ближние · спот-история", "🟢", near)
-    _horizon("Снайпер · спот-история", "🎯", sniper)
+    # Name the source whenever it is NOT the plain spot sibling, so a thinner or proxied history is
+    # visible rather than inferred: Binance lists no spot pair for its tokenized XAU/XAG perps, so
+    # gold reads its levels off PAXG (same 1 oz, 309 weeks) and silver off its own contract (29).
+    src = str(ladder.get("source") or "spot_1w")
+    scope = "спот-история"
+    if src == "contract_1w":
+        scope = "история контракта"
+    elif src.startswith("spot_1w:"):
+        scope = f"спот-история {src.split(':', 1)[1].split('/')[0]}"
+    _horizon(f"Ближние · {scope}", "🟢", near)
+    _horizon(f"Снайпер · {scope}", "🎯", sniper)
     atl_tail = f"  ·  ATL <code>{fmt_price(atl)}</code>" if atl is not None else ""
     _horizon("Спот · накопление", "🟢", spot, tail=atl_tail)
     return out

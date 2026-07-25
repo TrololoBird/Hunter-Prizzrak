@@ -21,12 +21,33 @@ from hunt_core.prizrak.structure import spot_weekly_ladder
 LOG = structlog.get_logger("hunt.runtime.native_producers")
 
 
+def _frame_to_ohlcv_rows(frame: pl.DataFrame | None) -> list[list[float]] | None:
+    """Closed-only kline frame → the positional ``[ts, o, h, l, c, v]`` rows the geometry expects."""
+    if frame is None or frame.is_empty():
+        return None
+    need = ("time", "open", "high", "low", "close", "volume")
+    if any(c not in frame.columns for c in need):
+        return None
+    rows: list[list[float]] = []
+    for r in frame.select(need).iter_rows(named=True):
+        if r["close"] is None or r["low"] is None or r["high"] is None:
+            continue
+        ts = r["time"]
+        rows.append([
+            float(ts.timestamp() * 1000.0) if hasattr(ts, "timestamp") else 0.0,
+            float(r["open"] or 0.0), float(r["high"]), float(r["low"]),
+            float(r["close"]), float(r["volume"] or 0.0),
+        ])
+    return rows or None
+
+
 async def spot_weekly_ladder_native(
     symbol: str,
     *,
     price: float,
     spot: SpotEngine | None = None,
     weekly_bars: list[Bar] | None = None,
+    contract_weekly: pl.DataFrame | None = None,
     max_levels_per_side: int = 24,
     merge_tol_pct: float = 1.5,
 ) -> dict[str, Any] | None:
@@ -43,22 +64,41 @@ async def spot_weekly_ladder_native(
         spot: The engine spot sibling. Fetches ``weekly_ohlcv(symbol)`` when ``weekly_bars`` is not
             supplied. May be ``None`` if ``weekly_bars`` is passed directly.
         weekly_bars: Pre-fetched weekly bars; skips the fetch when given.
+        contract_weekly: The instrument's OWN weekly kline frame (``FeaturePanel.frames.w1``), used
+            when the venue lists no spot market for this underlying — see below.
         max_levels_per_side: Max merged levels kept per side (below/above).
         merge_tol_pct: Nearby-pivot merge tolerance in percent.
 
+    Every symbol gets this horizon built by the SAME geometry; only the SOURCE may differ, and the
+    returned ``source`` says which one was used. Binance lists gold/silver as tokenized perps with no
+    spot pair, so ``XAG/USDT``/``XAU/USDT`` simply do not exist — those symbols used to lose the macro
+    horizon entirely and, because an absent block is indistinguishable from an empty one, the card
+    said nothing about it. The 2026-07-25 обзор showed why that is not cosmetic: the author's deepest
+    zones live ONLY in full history (for CFX all five buy zones did), so a symbol without this horizon
+    carries a structurally incomplete map.
+
     Returns:
-        ``{"below": [...], "above": [...], ...}`` when the ladder has at least one level on either
-        side, else ``None`` (fail-loud: no weekly data / invalid price / no structural levels).
+        ``{"below": [...], "above": [...], "source": ...}`` when the ladder has at least one level on
+        either side, else ``None`` (fail-loud: no weekly data at all / invalid price / no structural
+        levels). ``source`` is ``"spot_1w"``, ``"spot_1w:<SYMBOL>"`` for a same-underlying proxy, or
+        ``"contract_1w"`` for the perp's own bars.
     """
     if price <= 0.0:
         return None
-    bars = weekly_bars
-    if bars is None:
-        if spot is None:
-            return None
+    bars: list[Bar] | list[list[float]] | None = weekly_bars
+    source = "spot_1w"
+    if bars is None and spot is not None:
         bars = await spot.weekly_ohlcv(symbol)
+        resolved = spot.resolve_spot_symbol(symbol)
+        if bars and resolved and resolved != symbol.split(":", 1)[0]:
+            source = f"spot_1w:{resolved}"
     if not bars:
-        return None
+        # No spot market for this underlying — build the same ladder from the contract's own weeks.
+        bars = _frame_to_ohlcv_rows(contract_weekly)
+        source = "contract_1w"
+        if not bars:
+            LOG.info("spot_ladder_native.no_source", symbol=symbol)
+            return None
     ladder = spot_weekly_ladder(
         bars,
         price=price,
@@ -66,6 +106,7 @@ async def spot_weekly_ladder_native(
         merge_tol_pct=merge_tol_pct,
     )
     if ladder.get("below") or ladder.get("above"):
+        ladder["source"] = source
         return ladder
     return None
 

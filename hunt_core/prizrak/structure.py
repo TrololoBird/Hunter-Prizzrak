@@ -157,10 +157,14 @@ def spot_weekly_ladder(
     # Keep the ladder inside its own extremes. A pivot outside [atl, ath] can only come from a bar
     # `_traded_extreme` rejected — i.e. a wick the market never did business at — and printing one
     # yields a self-contradicting card («🟢 0.01700 · ATL 0.02880», measured on SAND).
+    # The bound is inclusive with a relative epsilon: a level merged from N pivots that all sit AT
+    # the extreme gets a running-mean price a few ULPs below it (7×49.95 → 49.949999999999996), and
+    # a bare `>=` then discards the ATL level itself — the deepest, most-touched rung of the ladder.
+    _EPS = 1e-9
     if atl is not None:
-        levels = [lv for lv in levels if float(lv["price"]) >= atl]
+        levels = [lv for lv in levels if float(lv["price"]) >= atl * (1.0 - _EPS)]
     if ath is not None:
-        levels = [lv for lv in levels if float(lv["price"]) <= ath]
+        levels = [lv for lv in levels if float(lv["price"]) <= ath * (1.0 + _EPS)]
     below = sorted(
         (lv for lv in levels if float(lv["price"]) < price),
         key=lambda lv: price - float(lv["price"]),
