@@ -50,7 +50,16 @@ class Ingest:
         self._tasks: list[asyncio.Task[None]] = []
         self._stop = asyncio.Event()
         self._symbols: list[str] = []
+        self._symbol_set: set[str] = set()  # live membership — the universe-wide streams filter on THIS
         self._timeframes: tuple[str, ...] = ()
+        # Serializes reconnect against add_symbol: a spawn landing inside reconnect's
+        # gather()→clear() window would orphan the new symbol's tasks (untracked + uncancellable).
+        self._mutation_lock = asyncio.Lock()
+
+    @property
+    def mutation_lock(self) -> asyncio.Lock:
+        """The reconnect↔add_symbol serialization lock (held by ``Engine.add_symbol`` around commit)."""
+        return self._mutation_lock
 
     @property
     def exchange(self) -> Any:
@@ -62,6 +71,7 @@ class Ingest:
     def start(self, symbols: list[str], timeframes: tuple[str, ...]) -> None:
         """Spawn per-(symbol, stream) watch tasks + a universe-wide mark/funding task."""
         self._symbols = list(symbols)
+        self._symbol_set = set(self._symbols)
         self._timeframes = tuple(timeframes)
         for symbol in self._symbols:
             self.state_for(symbol)
@@ -69,30 +79,56 @@ class Ingest:
                 self._spawn(f"{symbol}:ohlcv.{tf}", self._step_ohlcv(symbol, tf))
             self._spawn(f"{symbol}:book", self._step_book(symbol))
             self._spawn(f"{symbol}:trades", self._step_trades(symbol))
-        # Universe-wide native streams (one subscription each), capability-gated on `has`.
-        self._spawn("*:marks", self._step_marks(self._symbols))
+        # Universe-wide native streams (one subscription each), capability-gated on `has`. Each filters
+        # against the LIVE `self._symbol_set`, so a symbol added later via `add_symbol` is picked up on
+        # the next frame with no re-subscribe.
+        self._spawn("*:marks", self._step_marks())
         if self._ex.has.get("watchBidsAsks"):
-            self._spawn("*:bidsasks", self._step_bidsasks(self._symbols))
+            self._spawn("*:bidsasks", self._step_bidsasks())
         if self._ex.has.get("watchTickers"):
-            self._spawn("*:tickers", self._step_tickers(self._symbols))
+            self._spawn("*:tickers", self._step_tickers())
         if self._ex.has.get("watchLiquidationsForSymbols"):
-            self._spawn("*:liquidations", self._step_liquidations(self._symbols))
+            self._spawn("*:liquidations", self._step_liquidations())
+
+    def add_symbol(self, symbol: str) -> bool:
+        """Add one symbol to the live warm-set — spawn its per-symbol watch loops (idempotent).
+
+        The universe-wide streams (marks/bbo/tickers/liquidations) already filter against the live
+        ``self._symbol_set``, so growing that set makes the next universe frame stamp the new symbol;
+        only the per-symbol ohlcv/book/trades loops need spawning. Kline REST-seeding is the caller's
+        job (``Engine.add_symbol``) — the WS ohlcv loop merges the fresh tail onto that seed. Returns
+        ``False`` if the symbol was already tracked (no-op). Survives a reconnect: ``reconnect`` respawns
+        from ``self._symbols``, which now includes it.
+        """
+        if symbol in self._symbol_set:
+            return False
+        self._symbols.append(symbol)
+        self._symbol_set.add(symbol)
+        self.state_for(symbol)
+        for tf in self._timeframes:
+            self._spawn(f"{symbol}:ohlcv.{tf}", self._step_ohlcv(symbol, tf))
+        self._spawn(f"{symbol}:book", self._step_book(symbol))
+        self._spawn(f"{symbol}:trades", self._step_trades(symbol))
+        return True
 
     async def reconnect(self) -> None:
         """Force a clean reconnect: cancel loops, drop the frozen client, respawn on a fresh one.
 
         Invoked by the health watchdog when the whole feed goes silent (ccxt reports ``errors=0``).
-        The ``last_frame_ms`` dict identity is preserved so the watchdog keeps observing.
+        The ``last_frame_ms`` dict identity is preserved so the watchdog keeps observing. Holds
+        ``_mutation_lock`` across the whole teardown→respawn so an ``add_symbol`` spawn cannot land in
+        the ``gather()``→``clear()`` window and get orphaned (untracked + uncancellable).
         """
-        for task in list(self._tasks):
-            task.cancel()
-        await asyncio.gather(*self._tasks, return_exceptions=True)
-        self._tasks.clear()
-        with contextlib.suppress(Exception):
-            await self._ex.close()
-        self.last_frame_ms.clear()
-        self._ex = self._make_exchange()
-        self.start(self._symbols, self._timeframes)
+        async with self._mutation_lock:
+            for task in list(self._tasks):
+                task.cancel()
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+            self._tasks.clear()
+            with contextlib.suppress(Exception):
+                await self._ex.close()
+            self.last_frame_ms.clear()
+            self._ex = self._make_exchange()
+            self.start(self._symbols, self._timeframes)
 
     def _spawn(self, key: str, step: Callable[[], Awaitable[None]]) -> None:
         task = asyncio.create_task(self._stream_loop(key, step), name=f"engine_ws:{key}")
@@ -196,8 +232,7 @@ class Ingest:
 
         return step
 
-    def _step_marks(self, symbols: list[str]) -> Callable[[], Awaitable[None]]:
-        wanted = set(symbols)
+    def _step_marks(self) -> Callable[[], Awaitable[None]]:
         bound_ms = int(params.FRESH_MARK_S * 1000.0)
         fund_bound_ms = int(params.FRESH_FUNDING_S * 1000.0)
 
@@ -207,7 +242,7 @@ class Ingest:
             marks = await self._ex.watch_mark_prices()
             now = _now_ms()
             for sym, mk in marks.items():
-                if sym not in wanted:
+                if sym not in self._symbol_set:  # live set — picks up add_symbol on the next frame
                     continue
                 st = self.state_for(sym)
                 st.put_value("mark", mk, PlaneStamp(Source.WS, now, int(mk.get("timestamp") or now), bound_ms))
@@ -222,8 +257,7 @@ class Ingest:
 
         return step
 
-    def _step_bidsasks(self, symbols: list[str]) -> Callable[[], Awaitable[None]]:
-        wanted = set(symbols)
+    def _step_bidsasks(self) -> Callable[[], Awaitable[None]]:
         bound_ms = int(params.FRESH_BBO_S * 1000.0)
 
         async def step() -> None:
@@ -231,15 +265,14 @@ class Ingest:
             bbos = await self._ex.watch_bids_asks()
             now = _now_ms()
             for sym, ba in bbos.items():
-                if sym in wanted:
+                if sym in self._symbol_set:  # live set — add_symbol members stamp on the next frame
                     self.state_for(sym).put_value(
                         "bbo", ba, PlaneStamp(Source.WS, now, int(ba.get("timestamp") or now), bound_ms)
                     )
 
         return step
 
-    def _step_tickers(self, symbols: list[str]) -> Callable[[], Awaitable[None]]:
-        wanted = set(symbols)
+    def _step_tickers(self) -> Callable[[], Awaitable[None]]:
         bound_ms = int(params.FRESH_TICKER_S * 1000.0)
 
         async def step() -> None:
@@ -247,25 +280,26 @@ class Ingest:
             tickers = await self._ex.watch_tickers()
             now = _now_ms()
             for sym, tk in tickers.items():
-                if sym in wanted:
+                if sym in self._symbol_set:  # live set — add_symbol members stamp on the next frame
                     self.state_for(sym).put_value(
                         "ticker", tk, PlaneStamp(Source.WS, now, int(tk.get("timestamp") or now), bound_ms)
                     )
 
         return step
 
-    def _step_liquidations(self, symbols: list[str]) -> Callable[[], Awaitable[None]]:
-        wanted = set(symbols)
+    def _step_liquidations(self) -> Callable[[], Awaitable[None]]:
         # Event-driven (!forceOrder): silence ≠ stale (no liquidation is normal). Data is read through
         # `exchange.liquidations[symbol]` at snapshot time; here we stamp only when one arrives.
         bound_ms = int(params.NO_MESSAGE_WATCHDOG_S * 1000.0)
 
         async def step() -> None:
-            liqs = await self._ex.watch_liquidations_for_symbols(symbols)
+            # `watch_liquidations_for_symbols` subscribes universe-wide (!forceOrder@arr) — the arg only
+            # scopes the initial subscription, so passing the live list keeps late-added symbols covered.
+            liqs = await self._ex.watch_liquidations_for_symbols(list(self._symbols))
             now = _now_ms()
             for liq in liqs if isinstance(liqs, list) else []:
                 sym = liq.get("symbol") if isinstance(liq, dict) else None
-                if sym in wanted:
+                if sym in self._symbol_set:
                     ev = int(liq.get("timestamp") or now) if isinstance(liq, dict) else now
                     self.state_for(sym).stamp_only("liq", PlaneStamp(Source.WS, now, ev, bound_ms))
 

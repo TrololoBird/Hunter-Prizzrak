@@ -105,11 +105,11 @@ async def probe_symbol_signal(
 
     Reads the engine-native :class:`~hunt_core.runtime.native_assembly.NativeAnalystView` off the
     live :class:`~hunt_core.view.runtime.MarketRuntime` and projects the handful of display fields
-    the ``/signals`` report renders (``price`` + ``lifecycle`` phase/bias). A symbol outside the
-    engine warm-set yields an honest "not tracked" error dict — NO legacy plane is rebuilt (dynamic
-    warm-set add is a later phase). This is a report serializer, not a legacy-row logic bridge: the
-    projected dict is only rendered, never routed back into in-memory logic. ``stagger_ms`` /
-    ``probe_kind`` are legacy-signature kwargs kept for callers; the native path ignores them.
+    the ``/signals`` report renders (``price`` + ``lifecycle`` phase/bias). A non-pinned symbol is
+    added to the warm-set on demand (``ensure_symbol``) so the report reflects a real live view; only
+    a symbol that still won't seed in time yields an honest transient error dict. This is a report
+    serializer, not a legacy-row logic bridge: the projected dict is only rendered, never routed back
+    into in-memory logic. ``stagger_ms`` / ``probe_kind`` are legacy-signature kwargs kept for callers.
     """
     _ = (stagger_ms, probe_kind)
     sym = normalize_symbol(symbol)
@@ -123,9 +123,10 @@ async def probe_symbol_signal(
     rt = live_market_runtime()
     if rt is None:
         return {"symbol": sym, "error": "движок недоступен"}
+    await rt.ensure_symbol(sym)  # on-demand warm-set add — a non-pinned queried coin gets a live view
     nav = await assemble_native_analyst(rt, _to_unified(sym), store=get_map_store())
     if nav is None:
-        return {"symbol": sym, "error": "символ не отслеживается движком (вне warm-set)"}
+        return {"symbol": sym, "error": "нет свежих данных по символу (сид не поспел) — повторите"}
 
     summary = nav.prizrak.summary or {}
     action = str(summary.get("action") or "").strip().lower()
@@ -180,7 +181,7 @@ async def deliver_signal_probe(
     if native is None:
         await broadcaster.send_html(
             f"⚠️ <b>/signal</b> {html.escape(sym)}\n"
-            "<i>символ не отслеживается движком (вне warm-set) — свежих данных нет</i>",
+            "<i>не удалось получить свежие данные по символу — попробуйте ещё раз</i>",
             no_split=True,
         )
         return None

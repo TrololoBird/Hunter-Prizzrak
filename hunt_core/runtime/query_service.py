@@ -93,9 +93,11 @@ async def resolve_query_row(
 ) -> tuple[NativeAnalystView | None, str, bool, float | None]:
     """Return ``(native, source, from_store, age_s)`` — deep store first unless ``live``.
 
-    ADR-0004 Phase 9: the deep view is composed off the engine ``MarketRuntime``. A symbol NOT in
-    the engine warm-set (or with no live price) yields ``None`` — the probe reports "not tracked"
-    honestly rather than fabricating a REST snapshot (dynamic warm-set add is a later phase).
+    ADR-0004 §1.6: the deep view is composed off the engine ``MarketRuntime``. A queried symbol
+    outside the warm-set is added on demand (``ensure_symbol``: REST-seed klines + spawn WS loops,
+    bounded wait for a live price) so a non-pinned coin gets a real analysis — this IS the query
+    path's purpose. Only a symbol that still won't seed in time yields ``None`` (an honest transient
+    "no data yet", never a fabricated REST snapshot).
     """
     from hunt_core.maps.engine import get_map_store
     from hunt_core.runtime.analyst_assembly import assemble_analyst_tick
@@ -113,6 +115,7 @@ async def resolve_query_row(
     rt = live_market_runtime()
     if rt is None:
         return None, "engine_unavailable", False, None
+    await rt.ensure_symbol(sym)  # on-demand warm-set add — a non-pinned queried coin gets a live view
     native = await assemble_analyst_tick(sym, rt, store=get_map_store())
     return native, ("deep_live" if live else "analyst_assembly"), False, None
 

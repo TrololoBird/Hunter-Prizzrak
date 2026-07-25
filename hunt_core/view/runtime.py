@@ -8,7 +8,11 @@ row-dict are deleted, and ``run_loop`` runs the deep/main tick + scanner off thi
 """
 from __future__ import annotations
 
+import asyncio
+import time
 from collections.abc import Sequence
+
+import structlog
 
 from hunt_core.engine import exchanges
 from hunt_core.engine.api import _DEFAULT_TFS
@@ -17,6 +21,17 @@ from hunt_core.engine.spot import SpotEngine
 from hunt_core.engine.state import MarketSnapshot
 from hunt_core.view.build import build_market_view
 from hunt_core.view.models import MarketView
+
+LOG = structlog.get_logger(__name__)
+
+
+def _to_unified(symbol: str) -> str:
+    """Compact ``BTCUSDT`` → ccxt-unified ``BTC/USDT:USDT`` (idempotent) for engine lookups."""
+    s = symbol.upper()
+    if "/" in s or ":" in s:
+        return s
+    base = s[:-4] if s.endswith("USDT") else s
+    return f"{base}/USDT:USDT"
 
 
 class MarketRuntime:
@@ -80,6 +95,35 @@ class MarketRuntime:
         return build_market_view(
             self._multi, symbol, spot=self._spot, timeframes=self._timeframes, now_ms=now_ms
         )
+
+    def is_tracked(self, symbol: str) -> bool:
+        """Whether the engine already holds warm WS planes for ``symbol`` (unified or compact form)."""
+        return _to_unified(symbol) in self._multi.primary.tracked_symbols()
+
+    async def ensure_symbol(self, symbol: str, *, timeout_s: float = 6.0) -> bool:
+        """Guarantee ``symbol`` is in the warm-set and its :class:`MarketView` resolves, on demand.
+
+        The native replacement for the deleted client's on-demand warm (ADR-0004 §1.6): a user querying
+        a non-pinned coin, or an open signal on a non-pinned symbol, gets a live freshness-proven view
+        rather than an "outside warm-set" stub. If already tracked and resolving, returns immediately;
+        otherwise grows the warm-set (REST-seeds klines, spawns WS loops) and waits — bounded by
+        ``timeout_s`` — for a price plane to arrive so ``view`` stops returning ``None``. Returns whether
+        the view resolves; ``False`` means the seed did not land in time (a transient "no data yet",
+        never a fabricated view). Idempotent and safe to call every tick for the same symbol.
+        """
+        unified = _to_unified(symbol)
+        if self.view(unified) is not None:
+            return True
+        await self._multi.add_symbol(unified)
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        while time.monotonic() < deadline:
+            if self.view(unified) is not None:
+                return True
+            await asyncio.sleep(0.25)
+        resolved = self.view(unified) is not None
+        if not resolved:
+            LOG.info("ensure_symbol_pending", symbol=unified, timeout_s=timeout_s)
+        return resolved
 
 
 def build_market_runtime(

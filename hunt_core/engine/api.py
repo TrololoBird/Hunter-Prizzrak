@@ -111,29 +111,66 @@ class Engine:
         LOG.info("engine_started", symbols=len(self._symbols), timeframes=self._timeframes)
 
     async def _seed(self) -> None:
+        # Concurrent (bounded) seeding: 7 symbols × 7 TFs used to be ~49 SEQUENTIAL round-trips
+        # (~40s startup). The fetches are latency-bound, not rate-limited (~245 weight ≪ 2400/min),
+        # so overlapping them cuts startup to a few seconds. State creation stays sequential (no race);
+        # seed_frame writes distinct kline.{tf} keys so concurrent writes never collide.
+        sem = asyncio.Semaphore(_SEED_CONCURRENCY)
+        await asyncio.gather(*(self._seed_symbol(symbol, sem=sem) for symbol in self._symbols))
+
+    async def _seed_symbol(self, symbol: str, *, sem: asyncio.Semaphore | None = None) -> None:
+        """REST-seed every timeframe's kline plane for one symbol (startup + dynamic ``add_symbol``)."""
         now = int(time.time() * 1000)
         ex = self._ingest.exchange
-        states = {symbol: self._ingest.state_for(symbol) for symbol in self._symbols}
-        sem = asyncio.Semaphore(_SEED_CONCURRENCY)
+        st = self._ingest.state_for(symbol)
+        gate = sem or asyncio.Semaphore(len(self._timeframes) or 1)
 
-        async def _seed_one(symbol: str, tf: str) -> None:
-            async with sem:
+        async def _seed_one(tf: str) -> None:
+            async with gate:
                 # Full-fidelity klines (fapiPublicGetKlines, 12-element) so the plane carries REAL
                 # taker_buy_base_volume — the orderflow CVD/delta features read it, never a zero-fill.
                 bars = await rest.fetch_klines_full(ex, symbol, tf, limit=params.OHLCV_LIMIT)
             if bars:
                 bound = int(params.fresh_kline_s(ex.parse_timeframe(tf)) * 1000.0)
-                states[symbol].seed_frame(
+                st.seed_frame(
                     f"kline.{tf}", bars, PlaneStamp(Source.REST_SEED, now, int(bars[-1][0]), bound)
                 )
 
-        # Concurrent (bounded) seeding: 7 symbols × 7 TFs used to be ~49 SEQUENTIAL round-trips
-        # (~40s startup). The fetches are latency-bound, not rate-limited (~245 weight ≪ 2400/min),
-        # so overlapping them cuts startup to a few seconds. State creation stays sequential (above,
-        # no race); seed_frame writes distinct kline.{tf} keys so concurrent writes never collide.
-        await asyncio.gather(
-            *(_seed_one(symbol, tf) for symbol in self._symbols for tf in self._timeframes)
-        )
+        await asyncio.gather(*(_seed_one(tf) for tf in self._timeframes))
+
+    async def add_symbol(self, symbol: str) -> bool:
+        """Grow the warm-set by one symbol on demand — REST-seed klines, then spawn its WS loops.
+
+        The native replacement for the deleted client's on-demand warm — a user querying a non-pinned
+        coin (``/signal COIN``) or an open signal on a non-pinned symbol gets a live, freshness-proven
+        :class:`MarketView` instead of an "outside warm-set" stub. Idempotent (``False`` if already
+        tracked). ``_poll_positioning`` iterates the live ``self._symbols`` each cycle, so the new
+        symbol's ``/futures/data`` planes fill on the next 5-min positioning poll with no extra wiring.
+
+        Cancellation-atomic: membership is committed only AFTER the (awaited) kline seed, inside a
+        no-await block under the ingest mutation lock — so a cancel at the seed await (e.g. the
+        ``/signal`` ``wait_for`` timeout) never leaves a half-added symbol (in ``_symbols`` but with no
+        WS loops), which would name-lie ``is_tracked`` True and block every retry (I-6).
+        """
+        if symbol in set(self._symbols):
+            return False
+        markets = getattr(self._ingest.exchange, "markets", None) or {}
+        if symbol not in markets:
+            # Unknown/delisted market id (a /signal typo) — never spawn ~9 forever-thrashing WS loops
+            # for a symbol Binance will never stream. Fail-loud: honest False, no membership committed.
+            LOG.info("engine_symbol_unknown", symbol=symbol)
+            return False
+        # Seed BEFORE committing membership. _seed_symbol only writes the (membership-independent)
+        # SymbolState; a cancel here commits nothing. fetch_klines_full is fail-loud ([] on error), so
+        # only a genuine CancelledError unwinds — and it unwinds to a clean, retryable state.
+        await self._seed_symbol(symbol)
+        async with self._ingest.mutation_lock:  # serialize vs reconnect; NO await between append+spawn
+            if symbol in set(self._symbols):  # a concurrent add won the race during our seed
+                return False
+            self._symbols.append(symbol)
+            self._ingest.add_symbol(symbol)  # spawn WS loops + join _symbol_set (synchronous, atomic)
+        LOG.info("engine_symbol_added", symbol=symbol, warm_set=len(self._symbols))
+        return True
 
     # The complete /futures/data statistic set (implicit method, response key, plane) — same
     # {symbol, period, limit} shape. basis differs (pair + contractType) and is handled separately.
@@ -154,7 +191,7 @@ class Engine:
         bound = int(params.FRESH_FUTURES_DATA_S * 1000.0)
         while True:
             ex = self._ingest.exchange
-            for symbol in self._symbols:
+            for symbol in list(self._symbols):  # snapshot — add_symbol may append mid-cycle
                 bsym = _binance_id(ex, symbol)
                 if bsym is None:
                     continue

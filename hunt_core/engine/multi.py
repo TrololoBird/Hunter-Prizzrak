@@ -87,17 +87,18 @@ class MultiEngine:
         f_bound = int(params.FRESH_CROSS_FUNDING_S * 1000.0)
         oi_bound = int(params.FRESH_FUTURES_DATA_S * 1000.0)
         while True:
+            symbols = list(self._symbols)  # snapshot — add_symbol may append mid-cycle
             for venue, ex in self._secondary_ex.items():
                 now = int(time.time() * 1000)
                 venue_state = self._cross[venue]
                 cap = self._cap.get(venue, {})
                 markets = getattr(ex, "markets", None) or {}
-                rates = await rest.poll_funding_rates(ex, self._symbols)
+                rates = await rest.poll_funding_rates(ex, symbols)
                 for sym, rate in rates.items():
                     venue_state.setdefault(sym, SymbolState(sym)).put_value(
                         "funding", rate, PlaneStamp(Source.REST_SEED, now, now, f_bound)
                     )
-                for sym in self._symbols:
+                for sym in symbols:
                     if sym not in markets:
                         continue
                     st = venue_state.setdefault(sym, SymbolState(sym))
@@ -116,6 +117,23 @@ class MultiEngine:
     def primary(self) -> Engine:
         """The primary Binance :class:`Engine` (single-venue planes) — used by the cutover adapters."""
         return self._primary
+
+    async def add_symbol(self, symbol: str) -> bool:
+        """Grow the warm-set by one unified symbol on demand (dynamic warm-set, ADR-0004 §1.6).
+
+        Delegates to the primary engine (klines seed + WS loops) and joins the symbol to the cross-poll
+        set so ``_cross_loop`` fills its secondary-venue funding/OI/LSR planes on the next cycle.
+        Idempotent — ``False`` if already tracked. Fail-loud everywhere: a symbol with no market on a
+        secondary is simply skipped by that venue's poll (never fabricated), exactly as for the pinned.
+
+        Commits to the cross-poll set only AFTER the primary actually added it — a junk/unknown symbol
+        or a cancelled add returns/propagates without committal here, so ``_cross_loop`` never carries a
+        symbol the primary is not streaming.
+        """
+        added = await self._primary.add_symbol(symbol)
+        if added and symbol not in set(self._symbols):
+            self._symbols.append(symbol)
+        return added
 
     def snapshot(self, symbol: str, required: Sequence[str]) -> MarketSnapshot:
         """Primary (Binance) freshness-proven snapshot — unchanged single-venue contract."""
