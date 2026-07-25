@@ -185,3 +185,50 @@ def test_stop_buffer_is_a_fraction_and_rejects_percent_scale() -> None:
             _stop_for(100.0, 110.0, buffer_frac=bad, direction="long")
     # реальное значение конфига обязано быть долей и проходить
     assert 0.0 < float(_CFG.stop_buffer_pct) < 0.5
+
+
+def test_rr_floor_blocks_a_handoff_with_broken_geometry() -> None:
+    """★ Живой дефект SOL 2026-07-25: вотчер заводил РЕАЛЬНЫЕ сделки в обход дисциплины RR.
+
+    Зона 69.32–74.35 (7.26% ширины), стоп за структуру 67.93, tp1 75.41. От НИЗА полосы RR 1:4.38,
+    от ВЕРХА — 1:0.17 при требовании курса 1:3. Путь эмиссии считает RR по худшему заливу
+    (orchestrator._rr_conservative) и режет по cfg.min_rr; вотчер не делал ни того, ни другого.
+    Алерт при этом обязан уйти — «уровень есть уровень», решает читатель.
+    """
+    from hunt_core.prizrak.zone_watch import _entry_band, _rr_worst_fill
+
+    assert _rr_worst_fill(direction="long", entry_lo=69.32, entry_hi=74.35,
+                          stop=67.93, tp1=75.41) == 0.17
+    assert float(_CFG.min_rr) > 0.17, "такая геометрия обязана не проходить пол"
+
+    state: dict[str, Any] = {}
+    z = _zone(69.32, 74.35, poc=73.10)
+    setups = _setups(perezakup=z, long_targets=[75.41])
+    _seed(state, setups=setups)
+    out = _run(state, price=73.5, setups=setups)
+    assert [e.event for e in out] == ["zone_entry"], "алерт уходит"
+    assert (state.get("signals") or {}) == {}, "но сделка НЕ регистрируется"
+
+    # ТВХ якорится на ПОК, а не на всю зону (стр.30) — полоса сузилась с 7.26% до 1.71%
+    lo, hi = _entry_band({"lo": 69.32, "hi": 74.35, "poc": 73.10, "direction": "long"})
+    assert (lo, hi) == (73.10, 74.35)
+
+
+def test_a_zone_that_flickers_back_does_not_re_alert() -> None:
+    """★ Живой дефект SOL: zone_entry «перезакуп» ушёл в чат дважды (14:16 и 14:25).
+
+    `seeding` был на весь СИМВОЛ, поэтому зона, которой нет в памяти, при непустом символе алертила
+    сразу. Карта дрожит и зона мигает: пропала на тик — вернулась — засчиталось как свежий вход.
+    Алерт обязан соответствовать НАБЛЮДАЕМОМУ переходу.
+    """
+    state: dict[str, Any] = {}
+    pk = _zone(190.0, 200.0, poc=196.0)
+    both = _setups(perezakup=pk, short=[_zone(230.0, 240.0)], long_targets=[260.0, 280.0])
+    _seed(state, setups=both)                                   # цена далеко, засеяно молча
+    first = _run(state, price=195.0, setups=both)               # НАСТОЯЩИЙ вход — алертит
+    assert [e.event for e in first] == ["zone_entry"]
+
+    only_short = _setups(short=[_zone(230.0, 240.0)], short_targets=[200.0])
+    assert _run(state, price=195.0, setups=only_short) == []     # перезакуп «мигнул» — исчез
+    # …и вернулся, цена всё это время внутри него: НОВОГО перехода не было ⇒ молчим
+    assert _run(state, price=195.5, setups=both) == []

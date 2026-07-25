@@ -182,13 +182,66 @@ def _followup(
     )
 
 
+def _entry_band(z: dict[str, Any]) -> tuple[float, float]:
+    """ТВХ вокруг ПОК, а не вся зона (стр.30: «надёжнее от POC»; 2–3 ордера: на зону + на POC).
+
+    Полоса берётся от якоря (ПОК, когда он внутри зоны) до ближайшей к рынку кромки — то есть та
+    часть зоны, которую ордера реально накрывают. Без ПОК остаётся зона целиком: выдумывать якорь
+    там, где профиля нет, значило бы фабриковать вход (I-6).
+    """
+    lo, hi = float(z["lo"]), float(z["hi"])
+    anchor = z.get("poc")
+    if not isinstance(anchor, (int, float)) or not lo <= float(anchor) <= hi:
+        return lo, hi
+    a = float(anchor)
+    return (a, hi) if z["direction"] == "long" else (lo, a)
+
+
+def _rr_worst_fill(
+    *, direction: str, entry_lo: float, entry_hi: float, stop: float, tp1: float | None
+) -> float | None:
+    """R:R по ХУДШЕМУ заливу в полосе (long → hi, short → lo) — широкая полоса не льстит отношению.
+
+    Тот же расчёт, что ``orchestrator._rr_conservative`` применяет к эмитируемым сигналам; здесь он
+    нужен ровно затем же — вотчер заводит РЕАЛЬНЫЕ сделки и обязан жить по той же дисциплине.
+    ``None`` при неполной геометрии — не 0.0 и не «сойдёт» (I-6).
+    """
+    try:
+        lo, hi, sl = float(entry_lo), float(entry_hi), float(stop)
+        tp = float(tp1) if tp1 is not None else 0.0
+    except (TypeError, ValueError):
+        return None
+    if min(lo, hi, sl, tp) <= 0:
+        return None
+    edge = hi if direction == "long" else lo
+    risk = (edge - sl) if direction == "long" else (sl - edge)
+    reward = (tp - edge) if direction == "long" else (edge - tp)
+    if risk <= 0 or reward <= 0:
+        return None
+    return round(reward / risk, 2)
+
+
 def _handoff(
-    state: dict[str, Any], sym: str, z: dict[str, Any], *, price: float, stop: float, now: datetime
+    state: dict[str, Any], sym: str, z: dict[str, Any], *, price: float, stop: float,
+    now: datetime, cfg: PrizrakConfig,
 ) -> None:
     """Price entered the zone → register it as a real tracked trade so SL/TP follow-ups take over.
 
     Never clobbers an already-open signal for that direction: a gated emitted setup is the
     higher-confidence object, and ``register_signal_open`` would overwrite it under the same key.
+
+    ДВЕ дисциплины курса, которых здесь раньше не было вообще (измерено на живом SOL 2026-07-25):
+
+    * **ТВХ якорится на ПОК, а не на всю полосу** (стр.30: «надёжнее от POC»). Регистрация входа
+      как ``[lo, hi]`` при зоне шириной 7.26% давала стоп в 2.01% от НИЗА и 8.63% от ВЕРХА —
+      сделка сходилась только при заливе по самому дну.
+    * **RR считается по ХУДШЕМУ заливу** и сверяется с полом ``cfg.min_rr``. У того же SOL:
+      от низа полосы RR 1:4.38, а от верха 1:0.17 при требовании курса 1:3. Путь эмиссии эту
+      дисциплину соблюдает (``orchestrator._rr_conservative`` + RR-floor), а вотчер её обходил и
+      заводил РЕАЛЬНЫЕ отслеживаемые сделки с заведомо нерабочей геометрией.
+
+    Не прошло по RR — алерт всё равно уходит (уровень есть уровень, читатель решает сам), но
+    сделка не регистрируется: трекер не должен вести то, что курс торговать не велит.
     """
     try:
         from hunt_core.track.tracker import has_active_signal, register_signal_open
@@ -196,8 +249,21 @@ def _handoff(
         if has_active_signal(state, symbol=sym, direction=z["direction"]):
             return
         tps = list(z.get("targets") or [])
+        entry_lo, entry_hi = _entry_band(z)
+        rr = _rr_worst_fill(
+            direction=z["direction"], entry_lo=entry_lo, entry_hi=entry_hi,
+            stop=stop, tp1=tps[0] if tps else None,
+        )
+        floor = float(getattr(cfg, "min_rr", 2.0) or 2.0)
+        if rr is None or rr < floor:
+            LOG.info(
+                "zone_watch_handoff_skipped_rr", symbol=sym, kind=z["kind"],
+                direction=z["direction"], rr=rr, floor=floor,
+            )
+            return
         setup = {
-            "entry_zone": [z["lo"], z["hi"]],
+            "entry_zone": [entry_lo, entry_hi],
+            "rr": rr,
             "stop_loss": stop,
             "tp1": tps[0] if len(tps) > 0 else None,
             "tp2": tps[1] if len(tps) > 1 else None,
@@ -281,6 +347,18 @@ def evaluate_zone_watch(
         }
         dist = _dist_pct(price, z["lo"], z["hi"])
         stop = _stop_for(z["lo"], z["hi"], buffer_frac=buf, direction=z["direction"])
+        # ТА ЖЕ логика, что и на холодном старте, но ПОЗОННО. `seeding` был на весь символ, поэтому
+        # зона, которой у нас ещё нет в памяти, при непустом символе алертила сразу — хотя перехода
+        # внутрь никто не наблюдал. А карта дрожит и зона МИГАЕТ: пропала на тик, вернулась — и это
+        # засчитывалось как свежий вход. Измерено на живом SOL 2026-07-25: zone_entry «перезакуп»
+        # ушёл в чат дважды (14:16 и 14:25), zone_approach «шорт» — тоже дважды (14:12 и 14:19).
+        # Алертим только НАБЛЮДАЕМЫЙ переход: незнакомая зона, в которой цена уже стоит, засеивается.
+        if not seeding and not prev and dist <= _APPROACH_PCT:
+            rec["approached_at"] = now.isoformat()
+            if dist == 0.0:
+                rec["entered_at"] = now.isoformat()
+            fresh.append(rec)
+            continue
         if seeding:
             # Record where price stands now, announce nothing. A zone price is already in/near counts
             # as already-fired, so it only re-alerts after price leaves (>_RESET_PCT) and comes back.
@@ -295,7 +373,7 @@ def evaluate_zone_watch(
             if not rec["entered_at"]:
                 rec["entered_at"] = now.isoformat()
                 out.append(_followup("zone_entry", sym, z, price=price, stop=stop, dist=0.0, now=now))
-                _handoff(state, sym, z, price=price, stop=stop, now=now)
+                _handoff(state, sym, z, price=price, stop=stop, now=now, cfg=cfg)
         elif dist > _RESET_PCT:
             # Genuinely left the area — re-arm both alerts for the next visit.
             rec["approached_at"] = None
