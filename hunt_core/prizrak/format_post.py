@@ -86,6 +86,47 @@ def _targets_line(vals: list[Any]) -> str:
     return f"💰 цели: {inner}" if inner else ""
 
 
+def _plan_line(setups: dict[str, Any], price: float) -> str:
+    """Строка плана в форме его разборов: ближайшая поддержка · сопротивление · зона закупа.
+
+    Он всегда сводит разбор к этим трём вещам — «уровень поддержки 4ч 0.005059», «ближайший
+    уровень сопротивления 0.005170», «диапазон интереса для набора 0.004855–0.0048» (ASTR).
+    Карточка печатает всю карту; эта строка выделяет из неё то, что он бы опубликовал, ничего
+    не удаляя — остальное остаётся контекстом ниже.
+    """
+    hr = setups.get("headroom") if isinstance(setups, dict) else None
+    bits: list[str] = []
+    if isinstance(hr, dict):
+        dn, up = hr.get("down_price"), hr.get("up_price")
+        if dn is not None:
+            bits.append(f"поддержка <code>{fmt_price(float(dn))}</code>")
+        if up is not None:
+            bits.append(f"сопротивление <code>{fmt_price(float(up))}</code>")
+    # Зона закупа — сильнейшая лонговая полоса под ценой: он берёт ту, где стоит объём.
+    best: tuple[float, float, float] | None = None
+    for hz in (setups.get("horizons") or {}).values():
+        if not isinstance(hz, dict):
+            continue
+        for kind in ("perezakup", "dobor"):
+            raw = hz.get(kind)
+            zs = raw if isinstance(raw, list) else ([raw] if isinstance(raw, dict) else [])
+            for z in zs:
+                if not isinstance(z, dict):
+                    continue
+                try:
+                    lo, hi = float(z["lo"]), float(z["hi"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if hi >= price:
+                    continue  # не «закуп ниже», а зона вокруг цены
+                touches = float(z.get("touches") or 0)
+                if best is None or touches > best[0]:
+                    best = (touches, lo, hi)
+    if best is not None:
+        bits.append(f"закуп <code>{fmt_price(best[1])}</code>–<code>{fmt_price(best[2])}</code>")
+    return f"🎯 <b>План</b>: {' · '.join(bits)}" if len(bits) >= 2 else ""
+
+
 def _horizon_block(title: str, hz: dict[str, Any]) -> list[str]:
     """One horizon's zone rungs + targets, or ``[]`` when the horizon carries nothing."""
     tf = hz.get("tf")
@@ -548,6 +589,9 @@ def format_prizrak_post(analysis: AnalystReport) -> str:
     hr = _headroom_line(setups)
     if hr:
         zlines.append(hr)
+    plan = _plan_line(setups, price)
+    if plan:
+        zlines.append(plan)
     if zlines:
         parts.extend(["", "🔎 <b>Зоны интереса</b>", *zlines])
     else:
