@@ -107,13 +107,25 @@ def _zone_view(
     cfg: PrizrakConfig,
     bias: str,
 ) -> dict[str, Any]:
-    """A tight добор/шорт rung: box + own ПОК (guarded to the box) + course flags + by_fact.
+    """A добор/шорт rung: **value area** of the box + its ПОК + course flags + by_fact.
 
-    ПОК is shown only when it falls INSIDE the box (a decomposed straddle edge-band carries the
-    parent box's indices, so its profile would peak outside — null it out then, never leak a
-    foreign ПОК; I-6). Entry tests the ПОК when inside, else the box edge (long=hi, short=lo)."""
+    Порядок у автора — ЗОНА → индикатор НА ней → УРОВЕНЬ: структурный бокс это ВХОД профиля, а
+    торгуемый уровень — его ВЫХОД (курс стр.24 и кейс ZEN стр.31 разделяют их прямо: «зона и POC —
+    два раздельных объекта отработки»). Перезакуп это уже делал (:func:`_perezakup_view` сужает
+    базу до [VAL, VAH]), а добор и шорт публиковали СЫРЫЕ кромки бокса, выбрасывая vah/val, —
+    то есть вход индикатора вместо выхода.
+
+    Сужение применяется ТОЛЬКО когда value area реально пересекает бокс: декомпозированная
+    straddle-полоса несёт индексы родительской структуры, поэтому её профиль считается по чужим
+    барам и может лежать целиком вне полосы — тогда остаётся бокс, а не подставная область (I-6).
+    ПОК показывается лишь внутри итоговой полосы. Вход — ПОК, иначе кромка (long=hi, short=lo)."""
     lo, hi = float(z["lo"]), float(z["hi"])
-    poc = _num(zone_poc(raw_window, zone=z, cfg=cfg).get("poc"))
+    info = zone_poc(raw_window, zone=z, cfg=cfg)
+    poc, val, vah = _num(info.get("poc")), _num(info.get("val")), _num(info.get("vah"))
+    if val is not None and vah is not None and val < vah and not (vah < lo or val > hi):
+        n_lo, n_hi = max(lo, val), min(hi, vah)
+        if n_lo < n_hi:
+            lo, hi = n_lo, n_hi
     poc_in = poc is not None and lo <= poc <= hi
     edge = poc if (poc_in and poc is not None) else (hi if side == "long" else lo)
     flags = _course_flags(bars, level=edge, side=side)
