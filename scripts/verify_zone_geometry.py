@@ -30,7 +30,10 @@ from typing import Any
 import ccxt.async_support as ccxt
 
 from hunt_core.prizrak.config import PrizrakConfig
+from hunt_core.toolkit.ohlcv import ccxt_ohlcv_to_frame
+from hunt_core.engine.spot import SpotEngine
 from hunt_core.prizrak.setups import build_symbol_setups
+from hunt_core.runtime.native_producers import spot_weekly_ladder_native
 
 CFG = PrizrakConfig.load()
 TFS = ("5m", "15m", "1h", "4h", "1d", "1w")
@@ -159,6 +162,8 @@ def check(sym: str, setups: dict[str, Any], price: float, raw: dict[str, list[li
 
 async def main(symbols: list[str]) -> None:
     ex = ccxt.binanceusdm({"enableRateLimit": True})
+    spot_eng = SpotEngine([])
+    await spot_eng._ex.load_markets()
     tot = {"zones": 0, "checked": 0}
     try:
         await ex.load_markets()
@@ -183,12 +188,34 @@ async def main(symbols: list[str]) -> None:
             st = check(sym, s, price, raw)
             tot["zones"] += st["zones"]
             tot["checked"] += st["checked"]
+            # Источник макро-лестницы — проверяется здесь, а не тестом: Binance листит золото и
+            # серебро как СВОИ токенизированные перпы без спот-пары, поэтому XAU обязан
+            # резолвиться на PAXG (то же золото, 309 недель против 33), а XAG — падать на бары
+            # собственного контракта. Синтетика это подтвердить не может: вопрос ровно в том,
+            # какие рынки биржа листит СЕЙЧАС.
+            # contract_weekly передаётся ИМЕННО как в проде (native_assembly.py): без него
+            # символ без спот-пары (XAG) выглядит потерявшим горизонт, хотя фолбэк на бары
+            # собственного контракта работает. Верификатор обязан зеркалить прод, иначе ловит
+            # себя, а не модуль — на этом я тут уже ошибся.
+            w1 = ccxt_ohlcv_to_frame(raw.get("1w") or [], "1w", exchange=ex)
+            lad = await spot_weekly_ladder_native(
+                sym, price=price, spot=spot_eng, contract_weekly=w1
+            )
+            if lad is None:
+                bad(sym, "макро-лестница отсутствует — символ теряет спот-горизонт целиком")
+                src = "—"
+            else:
+                src = str(lad.get("source") or "?")
+                if not (lad.get("below") or lad.get("above")):
+                    bad(sym, f"лестница пуста при источнике {src}")
+
             hzs = ",".join(sorted((s.get("horizons") or {}).keys())) or "—"
             hr = s.get("headroom") or {}
             wid = f"{hr.get('width_pct')}%" if hr.get("width_pct") is not None else "—"
-            print(f"{sym:16s} price={price:<12.8g} горизонты=[{hzs:24s}] зон={st['zones']:2d} коридор={wid}")
+            print(f"{sym:16s} price={price:<12.8g} горизонты=[{hzs:24s}] зон={st['zones']:2d} коридор={wid:6s} лестница={src}")
     finally:
         await ex.close()
+        await spot_eng.close()
     print(f"\nвсего зон: {tot['zones']}, из них заземлено на свечи: {tot['checked']}")
     if FAIL:
         print(f"\n❌ НАРУШЕНИЙ: {len(FAIL)}")
