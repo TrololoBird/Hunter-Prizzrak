@@ -98,3 +98,22 @@ async def test_no_source_at_all_is_fail_loud_none() -> None:
     """No spot market AND no contract frame ⇒ None, never an empty-but-present ladder."""
     eng = _engine(["BTC/USDT"])
     assert await spot_weekly_ladder_native("XAG/USDT:USDT", price=58.5, spot=eng) is None
+
+
+@pytest.mark.asyncio
+async def test_fallback_uses_raw_weeks_so_a_young_listing_is_not_trimmed_to_nothing() -> None:
+    """★ The fallback must read RAW weekly klines, not indicator-prepared ones.
+
+    ``_prepare_frame`` trims the indicator warm-up — BTC's 360 weeks prepare down to 161 rows, so any
+    listing younger than the runway prepares to ZERO (measured: XAG 29 → 0, XAU 33 → 0). Wiring the
+    fallback to ``panel.frames.w1`` therefore left exactly the symbols it exists for with no source
+    at all; it must read ``view.klines.w1``. Here: a 29-week frame — shorter than any indicator
+    runway — still yields a ladder.
+    """
+    eng = _engine(["BTC/USDT"])
+    frame = _weekly_frame(50.0, 70.0, cycles=8).head(29)
+    out = await spot_weekly_ladder_native(
+        "XAG/USDT:USDT", price=58.5, spot=eng, contract_weekly=frame
+    )
+    assert out is not None and out["source"] == "contract_1w"
+    assert out["below"] or out["above"]

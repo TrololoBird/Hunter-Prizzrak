@@ -159,8 +159,11 @@ async def assemble_native_analyst(
     fusion = compute_manipulation_fusion_native(view, panel, maps, session=session)
     # contract_weekly is the fallback source for underlyings the venue lists no spot market for
     # (Binance's tokenized XAU/XAG perps) — without it those symbols lose the macro horizon entirely.
+    # It must be the RAW weekly klines, not `panel.frames.w1`: `_prepare_frame` trims the indicator
+    # warm-up (BTC 360 weeks → 161 rows), so a young listing prepares to ZERO — XAG's 29 weeks and
+    # XAU's 33 both did. A level ladder reads swing pivots and needs no EMA200 runway.
     spot_ladder = await spot_weekly_ladder_native(
-        symbol, price=view.last_price, spot=rt.spot, contract_weekly=panel.frames.w1
+        symbol, price=view.last_price, spot=rt.spot, contract_weekly=view.klines.w1
     )
     freshness = freshness_native(
         now_ms=int(time.time() * 1000),

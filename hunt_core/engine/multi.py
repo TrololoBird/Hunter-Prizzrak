@@ -39,6 +39,10 @@ from hunt_core.toolkit.book_math import depth_snapshot_from_book
 LOG = structlog.get_logger(__name__)
 
 _PRIMARY = "binance"
+# Back-off before re-probing a (venue, symbol) whose long/short history came back empty. Long
+# enough that a permanently-uncovered symbol costs ~nothing, short enough that a venue extending
+# coverage is picked up within a day without a restart.
+_LSR_BLANK_RETRY_S = 6 * 3600.0
 
 
 class MultiEngine:
@@ -57,6 +61,13 @@ class MultiEngine:
         self._cross: dict[str, dict[str, SymbolState]] = {v: {} for v in secondaries}
         # per-venue optional-capability gate (filled at start from `has`) — poll only what's supported.
         self._cap: dict[str, dict[str, bool]] = {v: {} for v in secondaries}
+        # `has.fetchLongShortRatioHistory` is a VENUE capability, not a per-symbol one: Bitget
+        # advertises it but serves history only for its top tier — measured live, BTC/ETH/SOL return
+        # 30 rows while XRP, AVAX, XAU, XAG and PAXG all error with «data … is empty». Without a
+        # memory of that, every symbol outside the tier re-hit the endpoint on every cycle forever:
+        # rate-limit burnt on a call that cannot succeed, and a warning per symbol per cycle drowning
+        # the real failures. {venue: {symbol: monotonic deadline}}; re-probed so added coverage lands.
+        self._lsr_blank: dict[str, dict[str, float]] = {v: {} for v in secondaries}
         self._bg: list[asyncio.Task[None]] = []
 
     async def start(self) -> None:
@@ -74,6 +85,11 @@ class MultiEngine:
         LOG.info(
             "multi_engine_started", primary=_PRIMARY, secondaries=list(self._secondary_ex), caps=self._cap
         )
+
+    def _lsr_due(self, venue: str, symbol: str) -> bool:
+        """False while this (venue, symbol) is in its back-off after an empty long/short history."""
+        until = self._lsr_blank.get(venue, {}).get(symbol)
+        return until is None or time.monotonic() >= until
 
     async def _cross_loop(self) -> None:
         """Poll the uniform cross-venue signals per secondary: funding + OI + long/short + liquidations.
@@ -105,10 +121,13 @@ class MultiEngine:
                     oi = await rest.poll_open_interest(ex, sym)
                     if oi is not None:
                         st.put_value("oi", oi, PlaneStamp(Source.REST_SEED, now, now, oi_bound))
-                    if cap.get("lsr"):
+                    if cap.get("lsr") and self._lsr_due(venue, sym):
                         lsr = await rest.poll_long_short_ratio(ex, sym)
                         if lsr is not None:
+                            self._lsr_blank[venue].pop(sym, None)
                             st.put_value("lsr", lsr, PlaneStamp(Source.REST_SEED, now, now, oi_bound))
+                        else:
+                            self._lsr_blank[venue][sym] = time.monotonic() + _LSR_BLANK_RETRY_S
             await asyncio.sleep(params.CROSS_FUNDING_POLL_S)
 
     # --- consumer surface ---

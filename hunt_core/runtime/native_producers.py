@@ -64,8 +64,12 @@ async def spot_weekly_ladder_native(
         spot: The engine spot sibling. Fetches ``weekly_ohlcv(symbol)`` when ``weekly_bars`` is not
             supplied. May be ``None`` if ``weekly_bars`` is passed directly.
         weekly_bars: Pre-fetched weekly bars; skips the fetch when given.
-        contract_weekly: The instrument's OWN weekly kline frame (``FeaturePanel.frames.w1``), used
-            when the venue lists no spot market for this underlying — see below.
+        contract_weekly: The instrument's OWN **raw** weekly kline frame (``MarketView.klines.w1``),
+            used when the venue lists no spot market for this underlying — see below. Must NOT be the
+            prepared ``FeaturePanel.frames.w1``: that one is trimmed to rows where every indicator is
+            valid (BTC 360 weeks → 161), so a listing younger than the EMA runway prepares to ZERO —
+            XAG's 29 weeks and XAU's 33 both did, i.e. exactly the symbols this fallback exists for.
+            Level geometry reads swing pivots and needs no indicator runway.
         max_levels_per_side: Max merged levels kept per side (below/above).
         merge_tol_pct: Nearby-pivot merge tolerance in percent.
 
