@@ -12,11 +12,18 @@ separate longs. This module is the layer in between:
 * on entry, hands the trade to the normal tracker lifecycle (:func:`register_signal_open` →
   armed/triggered → SL/TP follow-ups), unless a gated emitted signal already owns that direction.
 
-**Anti-spam is the core design concern.** The map is recomputed every tick and zone edges JITTER, so a
-coordinate-keyed identity would mint a "new" zone every tick and re-alert forever. Zones are therefore
-matched to remembered ones by **anchor proximity** (``_MATCH_TOL_PCT``), each alert is one-shot, and the
-approach flag only re-arms after price has left by ``_RESET_PCT``. A zone the map stops producing is
-simply dropped (no orphan alerts).
+**Anti-spam is the core design concern** — this sends to a live chat, so every alert must correspond to
+a transition we actually OBSERVED:
+
+* the map is recomputed every tick and zone edges JITTER, so a coordinate-keyed identity would mint a
+  "new" zone every tick and re-alert forever — zones are matched to remembered ones by **anchor
+  proximity** (``_MATCH_TOL_PCT``);
+* each alert is one-shot and only re-arms after price has left by ``_RESET_PCT``;
+* on **cold start** (no memory for the symbol) nothing is announced at all: price may have been resting
+  in that zone for days, so the state is seeded silently and alerts begin from the next tick. Measured
+  live before this guard: a restart fired a 9-message burst across 7 pinned symbols in 15 seconds;
+* a zone the map stops producing is dropped, so the symbol re-seeds silently rather than re-announcing
+  a level price is already sitting on (a missed alert is cheaper than a false one).
 """
 from __future__ import annotations
 
@@ -246,6 +253,13 @@ def evaluate_zone_watch(
         cfg = _Cfg.load()
     buf = float(cfg.stop_buffer_pct)
 
+    # COLD START: with no memory for this symbol we have observed no TRANSITION — price may have been
+    # sitting in that zone for days. Seed the state silently and alert from the next tick on. Without
+    # this every restart fired one alert per symbol already resting in/near a zone (measured live:
+    # a 9-message burst across 7 pinned symbols in 15s), which is exactly the "stale state announced
+    # as a fresh event" defect the one-shot flags exist to prevent.
+    seeding = not stored
+
     out: list[HuntFollowUp] = []
     fresh: list[dict[str, Any]] = []
     for z in zones:
@@ -257,6 +271,16 @@ def evaluate_zone_watch(
         }
         dist = _dist_pct(price, z["lo"], z["hi"])
         stop = _stop_for(z["lo"], z["hi"], direction=z["direction"], buffer_pct=buf)
+        if seeding:
+            # Record where price stands now, announce nothing. A zone price is already in/near counts
+            # as already-fired, so it only re-alerts after price leaves (>_RESET_PCT) and comes back.
+            if dist == 0.0:
+                rec["entered_at"] = now.isoformat()
+                rec["approached_at"] = now.isoformat()
+            elif dist <= _APPROACH_PCT:
+                rec["approached_at"] = now.isoformat()
+            fresh.append(rec)
+            continue
         if dist == 0.0:
             if not rec["entered_at"]:
                 rec["entered_at"] = now.isoformat()

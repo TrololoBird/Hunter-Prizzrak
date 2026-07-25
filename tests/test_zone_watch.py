@@ -2,6 +2,8 @@
 
 These pin the behaviours that make the feature safe to run against a LIVE Telegram chat:
 
+* a **cold start announces nothing** — with no memory there is no observed transition, so a restart
+  cannot burst-alert every symbol already resting in a zone (that regression was measured live);
 * an approach alerts **once**, and survives the per-tick JITTER of a recomputed map (the spam risk —
   coordinate-keyed identity would re-alert every 60s forever);
 * entering a zone alerts once and hands the trade to the tracker (stop за структуру + цели), so
@@ -54,10 +56,39 @@ def _run(state: dict[str, Any], *, price: float, setups: dict[str, Any]) -> list
     return evaluate_zone_watch(state, native=nav, now=_NOW, cfg=_CFG)
 
 
+def _seed(state: dict[str, Any], *, setups: dict[str, Any], price: float = 1e9) -> None:
+    """Consume the silent cold-start pass so a test can exercise real transitions.
+
+    ``price`` defaults far above every fixture zone, i.e. "price is nowhere near" — the seed then
+    records no flags and the next call behaves as a genuine first approach.
+    """
+    assert _run(state, price=price, setups=setups) == [], "cold start must announce nothing"
+
+
+def test_cold_start_seeds_silently() -> None:
+    """★ No memory ⇒ no observed transition ⇒ NO alert, even standing inside the zone.
+
+    Regression: a restart fired one alert per symbol already resting in/near a zone (live: a
+    9-message burst across 7 pinned symbols). State is seeded instead, and alerting starts next tick.
+    """
+    setups = _setups(perezakup=_zone(190.0, 200.0, poc=196.0), long_targets=[240.0])
+    inside: dict[str, Any] = {}
+    assert _run(inside, price=195.0, setups=setups) == []  # standing INSIDE → silent
+    assert inside["zone_watch"]["BCHUSDT"], "state must still be recorded"
+    assert (inside.get("signals") or {}) == {}, "no silent handoff on a cold start either"
+
+    near: dict[str, Any] = {}
+    assert _run(near, price=201.4, setups=setups) == []  # standing in the approach band → silent
+
+    # …and the seeded zone does not re-announce while price merely loiters.
+    assert _run(inside, price=195.5, setups=setups) == []
+
+
 def test_approach_alerts_once_and_survives_map_jitter() -> None:
     """★ The anti-spam pin: one approach alert, and a jittered re-computation must NOT re-alert."""
     state: dict[str, Any] = {}
     setups = _setups(perezakup=_zone(190.0, 200.0, poc=196.0), long_targets=[240.0, 260.0])
+    _seed(state, setups=setups)
     out = _run(state, price=201.4, setups=setups)  # ~0.7% above hi → inside the approach band
     assert len(out) == 1 and out[0].event == "zone_approach"
     assert out[0].payload["stop_loss"] < 190.0  # стоп за структуру, ниже низа зоны
@@ -71,6 +102,7 @@ def test_entry_alert_hands_off_to_tracker_with_stop_and_targets() -> None:
     """Entering the zone alerts once and registers a tracked trade (стоп за структуру + цели)."""
     state: dict[str, Any] = {}
     setups = _setups(perezakup=_zone(190.0, 200.0, poc=196.0), long_targets=[240.0, 260.0, 280.0])
+    _seed(state, setups=setups)
     out = _run(state, price=195.0, setups=setups)
     assert len(out) == 1 and out[0].event == "zone_entry"
 
@@ -97,7 +129,9 @@ def test_handoff_never_clobbers_an_open_signal() -> None:
         now=_NOW,
     )
     before = dict((state["signals"] or {})["BCHUSDT:long"])
-    _run(state, price=195.0, setups=_setups(perezakup=_zone(190.0, 200.0, poc=196.0)))
+    zs = _setups(perezakup=_zone(190.0, 200.0, poc=196.0))
+    _seed(state, setups=zs)
+    _run(state, price=195.0, setups=zs)
     after = (state["signals"] or {})["BCHUSDT:long"]
     assert after["entry_lo"] == before["entry_lo"] and after["entry_hi"] == before["entry_hi"]
 
@@ -106,6 +140,7 @@ def test_flags_rearm_only_after_price_leaves() -> None:
     """Approach re-alerts on a genuine second visit, not while price loiters near the zone."""
     state: dict[str, Any] = {}
     setups = _setups(perezakup=_zone(190.0, 200.0, poc=196.0))
+    _seed(state, setups=setups)
     assert len(_run(state, price=201.4, setups=setups)) == 1
     assert _run(state, price=201.6, setups=setups) == []      # still loitering → silent
     assert _run(state, price=215.0, setups=setups) == []      # >3% away → re-arms, no alert itself
@@ -115,7 +150,9 @@ def test_flags_rearm_only_after_price_leaves() -> None:
 def test_no_zones_means_no_alerts_and_no_stale_memory() -> None:
     """I-6: an empty map produces nothing and forgets the symbol (no orphan alerts later)."""
     state: dict[str, Any] = {}
-    assert len(_run(state, price=201.4, setups=_setups(perezakup=_zone(190.0, 200.0, poc=196.0)))) == 1
+    zs = _setups(perezakup=_zone(190.0, 200.0, poc=196.0))
+    _seed(state, setups=zs)
+    assert len(_run(state, price=201.4, setups=zs)) == 1
     assert state["zone_watch"]["BCHUSDT"]
     assert _run(state, price=201.4, setups={"horizons": {}, "price": 0.0, "bias": ""}) == []
     assert "BCHUSDT" not in state.get("zone_watch", {})
@@ -125,6 +162,7 @@ def test_short_zone_stop_sits_above_the_zone() -> None:
     """A 🔴 шорт zone's стоп за структуру goes ABOVE its high (mirror of the long case)."""
     state: dict[str, Any] = {}
     setups = _setups(short=[_zone(230.0, 240.0)], short_targets=[200.0, 190.0])
+    _seed(state, setups=setups, price=1.0)  # far BELOW a short zone → nowhere near
     out = _run(state, price=228.0, setups=setups)  # ~0.9% below lo → approach band
     assert len(out) == 1 and out[0].event == "zone_approach"
     assert out[0].direction == "short"
