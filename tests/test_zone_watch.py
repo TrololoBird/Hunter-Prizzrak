@@ -167,3 +167,21 @@ def test_short_zone_stop_sits_above_the_zone() -> None:
     assert len(out) == 1 and out[0].event == "zone_approach"
     assert out[0].direction == "short"
     assert out[0].payload["stop_loss"] > 240.0
+
+
+def test_stop_buffer_is_a_fraction_and_rejects_percent_scale() -> None:
+    """★ Имя `buffer_pct` было ложью: поле хранит ДОЛЮ (0.02 == 2%), и подстановка «2.0» молча
+    давала лонговый стоп `lo * (1 - 2.0)` — ОТРИЦАТЕЛЬНУЮ цену, а шортовый — втрое выше уровня.
+    Конфиг защищён границами поля, вызов из кода не был — теперь не пройдёт и он.
+    """
+    import pytest
+
+    from hunt_core.prizrak.zone_watch import _stop_for
+
+    assert _stop_for(100.0, 110.0, buffer_frac=0.02, direction="long") == pytest.approx(98.0)
+    assert _stop_for(100.0, 110.0, buffer_frac=0.02, direction="short") == pytest.approx(112.2)
+    for bad in (2.0, 100.0, 0.0, -0.02):
+        with pytest.raises(ValueError):
+            _stop_for(100.0, 110.0, buffer_frac=bad, direction="long")
+    # реальное значение конфига обязано быть долей и проходить
+    assert 0.0 < float(_CFG.stop_buffer_pct) < 0.5

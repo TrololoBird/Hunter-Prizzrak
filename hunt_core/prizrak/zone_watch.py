@@ -125,9 +125,19 @@ def _actionable_zones(setups: dict[str, Any]) -> list[dict[str, Any]]:
     return out[:_MAX_ZONES]
 
 
-def _stop_for(lo: float, hi: float, *, direction: str, buffer_pct: float) -> float:
-    """Стоп за структуру с запасом (курс стр.33) — behind the zone's far edge, not inside it."""
-    return lo * (1.0 - buffer_pct) if direction == "long" else hi * (1.0 + buffer_pct)
+def _stop_for(lo: float, hi: float, *, buffer_frac: float, direction: str) -> float:
+    """Стоп за структуру с запасом (курс стр.33) — behind the zone's far edge, not inside it.
+
+    ``buffer_frac`` — ДОЛЯ, не проценты: 0.02 == 2%. Так во всём модуле (``cfg.stop_buffer_pct``
+    тоже хранит долю вопреки своему имени), поэтому параметр назван честно — прежнее имя
+    ``buffer_pct`` было ложью и работающей ловушкой: подстановка «2.0», прочитанной как «2%»,
+    молча даёт лонговый стоп ``lo * (1 - 2.0)`` — ОТРИЦАТЕЛЬНУЮ цену, а шортовый — втрое выше
+    уровня. Конфиг от этого защищён границами поля (``ge=0.01, le=0.05``), вызов из кода — не был.
+    Ассерт ниже закрывает и его: масштаб процентов сюда физически не пройдёт.
+    """
+    if not 0.0 < buffer_frac < 0.5:
+        raise ValueError(f"buffer_frac must be a fraction in (0, 0.5), got {buffer_frac!r}")
+    return lo * (1.0 - buffer_frac) if direction == "long" else hi * (1.0 + buffer_frac)
 
 
 def _find_stored(stored: list[Any], z: dict[str, Any]) -> dict[str, Any]:
@@ -270,7 +280,7 @@ def evaluate_zone_watch(
             "entered_at": prev.get("entered_at"),
         }
         dist = _dist_pct(price, z["lo"], z["hi"])
-        stop = _stop_for(z["lo"], z["hi"], direction=z["direction"], buffer_pct=buf)
+        stop = _stop_for(z["lo"], z["hi"], buffer_frac=buf, direction=z["direction"])
         if seeding:
             # Record where price stands now, announce nothing. A zone price is already in/near counts
             # as already-fired, so it only re-alerts after price leaves (>_RESET_PCT) and comes back.
