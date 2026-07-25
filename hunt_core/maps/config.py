@@ -21,6 +21,15 @@ class MapsConfig:
     multi_exchange: bool = True
     n_buckets: int = 20
     price_range_pct: float = 5.0
+    # Ликвидациям нужно СВОЁ окно, шире стаканного. ``price_range_pct``/``n_buckets`` общие для
+    # карты стакана, кросс-карты и ликвидаций, но объекты у них разные: живой стакан ±5% — это по
+    # делу, а кластеры ликвидаций суть исторические позиции и законно уходят дальше. Сверка с
+    # картой ликвидаций Coinglass по ASTR (2026-07-25) это и показала: при цене 0.005119 окно ±5%
+    # даёт 0.004863–0.005375, из-за чего его верхний кластер 0.00527–0.00548 покрывался лишь на
+    # 50%, а нижний 0.00483–0.00502 — на 83%. Число корзин масштабировано вместе с окном, чтобы
+    # разрешение осталось прежним (0.5% на корзину), а не размылось вдвое.
+    liq_price_range_pct: float = 12.0
+    liq_n_buckets: int = 48
     window_seconds: int = 300
     retention_samples: int = 120
     max_symbols: int = 48
@@ -121,6 +130,11 @@ class MapsConfig:
             price_range_pct=_env_float(
                 "HUNT_MAPS_PRICE_RANGE_PCT",
                 section.get("price_range_pct", 5.0),
+            ),
+            liq_n_buckets=_env_int("HUNT_MAPS_LIQ_BUCKETS", section.get("liq_n_buckets", 48)),
+            liq_price_range_pct=_env_float(
+                "HUNT_MAPS_LIQ_PRICE_RANGE_PCT",
+                section.get("liq_price_range_pct", 12.0),
             ),
             window_seconds=_env_int(
                 "HUNT_MAPS_WINDOW_S",

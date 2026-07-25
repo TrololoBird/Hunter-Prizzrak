@@ -806,8 +806,8 @@ def build_liquidation_map(
         symbol=symbol,
         current_price=current_price,
         window_seconds=cfg.window_seconds,
-        n_buckets=cfg.n_buckets,
-        price_range_pct=cfg.price_range_pct,
+        n_buckets=cfg.liq_n_buckets,
+        price_range_pct=cfg.liq_price_range_pct,
         leverage_tiers=lev_tiers,
         maintenance_margin_rates=mm_rates,
         bracket_tiers=bracket_tiers,
@@ -818,17 +818,17 @@ def build_liquidation_map(
     forward_zones: list[dict[str, Any]] = []
     effective_lev = lev_tiers or _DEFAULT_LEVERAGE_TIERS
     fwd: dict[int, dict[str, float]] = {}
-    fwd_price_min = current_price - current_price * cfg.price_range_pct / 100.0
-    fwd_bucket_size = (2.0 * (current_price * cfg.price_range_pct / 100.0)) / max(1, cfg.n_buckets)
+    fwd_price_min = current_price - current_price * cfg.liq_price_range_pct / 100.0
+    fwd_bucket_size = (2.0 * (current_price * cfg.liq_price_range_pct / 100.0)) / max(1, cfg.liq_n_buckets)
     if oi_bars:
-        span = current_price * cfg.price_range_pct / 100.0
+        span = current_price * cfg.liq_price_range_pct / 100.0
         price_min = current_price - span
-        bucket_size = (2.0 * span) / max(1, cfg.n_buckets)
+        bucket_size = (2.0 * span) / max(1, cfg.liq_n_buckets)
         fwd = entry_anchored_forward_zones(
             oi_bars,
             current_price=current_price,
-            n_buckets=cfg.n_buckets,
-            price_range_pct=cfg.price_range_pct,
+            n_buckets=cfg.liq_n_buckets,
+            price_range_pct=cfg.liq_price_range_pct,
             leverage_tiers=effective_lev,
             maintenance_margin_rates=mm_rates,
             leverage_weights=cfg.leverage_weights,
@@ -868,7 +868,7 @@ def build_liquidation_map(
             current_price=current_price,
             price_min=fwd_price_min,
             bucket_size=fwd_bucket_size,
-            n_buckets=cfg.n_buckets,
+            n_buckets=cfg.liq_n_buckets,
             forward_confidence=_resolved_forward_confidence(symbol, event_count=0, forward_blend=cfg.forward_blend_ratio),
             realized_events=0,
             zone_source="forward_only",
