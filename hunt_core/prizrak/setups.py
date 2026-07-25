@@ -39,7 +39,14 @@ from hunt_core.prizrak.traps import detect_level_saw
 # Horizon → ordered TF preference (first with usable zones wins per horizon). Local = the near
 # 4h/1h map the trader trades intraday-to-swing; weekly = the 1d/1w levels his «шорт от недельного»
 # / «глобальный» setups anchor to. Spot is merged separately from the full-history spot ladder.
+# Разбор ASTR (2026-07-25) показал, что автор работает на ТРЁХ горизонтах сразу и называет их
+# явно: «уровень поддержки 4ч ТФ — 0.005059», «ближайший уровень сопротивления 0.005170» и
+# «лонг от уровня поддержки 1ч ТФ». Ключевое — на кадре 27 он ПЕРЕКЛЮЧАЕТСЯ на 15-минутный
+# график и размечает 0.005177/0.005165 именно там. Без внутридневного горизонта этот уровень
+# физически не выражался: на 4ч его нет, на 1ч он размазан в зону 0.005093–0.005282 шириной
+# 3.71%, а на 15м это 0.005150–0.005186 — 0.70% и 56 касаний, почти точно его кромки.
 _HORIZONS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("intraday", ("15m", "5m")),
     ("local", ("4h", "1h")),
     ("weekly", ("1d", "1w")),
 )
@@ -230,6 +237,63 @@ def _horizon_zones(
     return out
 
 
+def _headroom(horizons: dict[str, Any], *, price: float) -> dict[str, Any] | None:
+    """Ход до БЛИЖАЙШЕГО встречного уровня по всем горизонтам, вверх и вниз.
+
+    Разбор ASTR (2026-07-25) вскрыл, что «есть уровень» и «есть сделка» — разные вопросы. Уровень
+    0.005059 у автора отличный (204 касания на 700 барах, самый нагруженный в серии), и он всё
+    равно отказался: «процент движения между уровнями слишком небольшой». Арифметика его отказа:
+    от цены до встречного сопротивления 2.33%, а от его зоны закупа до того же уровня 7.27% —
+    в 3.1 раза больше при том же типе стопа (за структуру 1–3%, PDF стр. 33).
+
+    Карточка при этом показывала R:R 8.2, потому что мерила до ДАЛЬНЕЙ цели и не видела стену в
+    137 касаний на +1.31%. Здесь считается честное расстояние до первого препятствия; решение
+    ((«тесно») принимает форматтер, а гейтом эмиссии это сознательно НЕ становится — 2.33%/7.27%
+    пока одно наблюдение, и порог по одной точке — ровно тот класс ошибки, от которого защищает
+    ``docs/HUNTER_TARGET_SPEC.md`` §1.
+
+    Меряется КОРИДОР, а не одна сторона: он формулирует это как «от этого уровня до этого уровня»,
+    то есть его интересует ширина между ближайшей поддержкой и ближайшим сопротивлением, а не
+    расстояние до одного из них. Односторонняя цифра к тому же вырождается: когда цена стоит у
+    кромки зоны, «до встречного уровня 0.04%» технически верно и совершенно бесполезно.
+
+    Returns:
+        ``{"up_price", "down_price", "width_pct"}`` — ``width_pct`` только когда найдены ОБЕ
+        стороны (иначе коридора нет и ширину считать не из чего); ``None``, если встречных
+        уровней нет вообще (не 0.0 — I-6).
+    """
+    if price <= 0:
+        return None
+    ups: list[float] = []
+    downs: list[float] = []
+    for hz in horizons.values():
+        if not isinstance(hz, dict):
+            continue
+        for key in ("perezakup", "dobor", "short"):
+            raw = hz.get(key)
+            zones = raw if isinstance(raw, list) else ([raw] if isinstance(raw, dict) else [])
+            for z in zones:
+                if not isinstance(z, dict):
+                    continue
+                for edge in ("lo", "hi"):
+                    try:
+                        lv = float(z[edge])
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    if lv > price:
+                        ups.append(lv)
+                    elif lv < price:
+                        downs.append(lv)
+    out: dict[str, Any] = {}
+    if ups:
+        out["up_price"] = min(ups)
+    if downs:
+        out["down_price"] = max(downs)
+    if "up_price" in out and "down_price" in out and out["down_price"] > 0:
+        out["width_pct"] = round((out["up_price"] / out["down_price"] - 1.0) * 100.0, 2)
+    return out or None
+
+
 def build_symbol_setups(
     ohlcv_by_tf: dict[str, list[list[float]]],
     *,
@@ -237,11 +301,11 @@ def build_symbol_setups(
     cfg: PrizrakConfig,
     structure: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Мульти-горизонт карта зон (local + weekly), ПОК-якорена. Спот мёржится в форматтере.
+    """Мульти-горизонт карта зон (intraday + local + weekly), ПОК-якорена. Спот мёржится в форматтере.
 
     Returns ``{"horizons": {name: {tf, perezakup?, dobor?, short?, long_targets?, short_targets?}},
-    "price": price}`` — empty ``horizons`` when no usable zone on any TF. Never fabricates: a horizon
-    is absent when its TFs have no qualifying accumulation box (I-6).
+    "price": price, "headroom": {...}}`` — empty ``horizons`` when no usable zone on any TF. Never
+    fabricates: a horizon is absent when its TFs have no qualifying accumulation box (I-6).
     """
     if price <= 0:
         return {"horizons": {}, "price": price}
@@ -257,7 +321,11 @@ def build_symbol_setups(
             if hz is not None:
                 horizons[name] = hz
                 break  # first TF with usable zones wins for this horizon
-    return {"horizons": horizons, "price": float(price), "bias": bias}
+    out: dict[str, Any] = {"horizons": horizons, "price": float(price), "bias": bias}
+    headroom = _headroom(horizons, price=float(price))
+    if headroom is not None:
+        out["headroom"] = headroom
+    return out
 
 
 __all__ = ["build_symbol_setups"]

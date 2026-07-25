@@ -186,6 +186,30 @@ def _deep_horizons(ladder: dict[str, Any], price: float) -> list[str]:
     return out
 
 
+# Ниже этой ШИРИНЫ КОРИДОРА между ближайшими встречными уровнями сетап помечается «тесно».
+# Измерено на разборе ASTR (2026-07-25), где автор отказался от сделки на отличном уровне
+# (204 касания) со словами «процент движения между уровнями слишком небольшой»: у него коридор
+# 0.005059→0.005177 = 2.33%, а от его зоны закупа до той же стены — 7.27%. Порог между ними.
+# ЭТО МЕТКА, А НЕ ГЕЙТ: одно наблюдение не даёт права отсекать эмиссию, а читатель, увидев
+# «тесно», принимает решение сам — ровно так же, как он сам сказал «поторговать по желанию можно».
+_TIGHT_HEADROOM_PCT = 4.0
+
+
+def _headroom_line(setups: dict[str, Any]) -> str:
+    """Строка коридора между ближайшими встречными уровнями, или пусто, если мерить не по чему."""
+    hr = setups.get("headroom") if isinstance(setups, dict) else None
+    if not isinstance(hr, dict):
+        return ""
+    lo, hi, width = hr.get("down_price"), hr.get("up_price"), hr.get("width_pct")
+    if lo is None or hi is None or not isinstance(width, int | float):
+        return ""  # односторонний коридор — не коридор; молчим, а не печатаем половину
+    tight = " · <b>тесно</b>" if float(width) < _TIGHT_HEADROOM_PCT else ""
+    return (
+        f"📏 коридор <code>{fmt_price(float(lo))}</code>–<code>{fmt_price(float(hi))}</code>"
+        f" = {float(width):.2f}%{tight}"
+    )
+
+
 # ── narrative ──────────────────────────────────────────────────────────────────
 
 
@@ -512,12 +536,18 @@ def format_prizrak_post(analysis: AnalystReport) -> str:
     parts.extend(_active_signal_block(summary))
 
     zlines: list[str] = []
-    for name, title in (("local", "Локально"), ("weekly", "Старший ТФ")):
+    # Внутридневной горизонт первый: в разборе ASTR (2026-07-25) именно 15м нёс его «ближайший
+    # уровень сопротивления», а 4ч его не содержал вовсе — ближайшее встречное препятствие
+    # практически всегда живёт на младшем ТФ, и читать карту снизу вверх ближе к его порядку.
+    for name, title in (("intraday", "Внутри дня"), ("local", "Локально"), ("weekly", "Старший ТФ")):
         hz = horizons.get(name)
         if isinstance(hz, dict):
             zlines.extend(_horizon_block(title, hz))
     _ladder = analysis.spot_ladder
     zlines.extend(_deep_horizons(_ladder if isinstance(_ladder, dict) else {}, price))
+    hr = _headroom_line(setups)
+    if hr:
+        zlines.append(hr)
     if zlines:
         parts.extend(["", "🔎 <b>Зоны интереса</b>", *zlines])
     else:
