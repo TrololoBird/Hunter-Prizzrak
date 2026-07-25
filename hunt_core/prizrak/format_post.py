@@ -90,6 +90,29 @@ def _targets_line(vals: list[Any]) -> str:
     return f"💰 цели: {inner}" if inner else ""
 
 
+def _first_opposing(setups: dict[str, Any], *, entry: float, direction: str) -> float | None:
+    """Ближайшая кромка зоны ЗА входом по всем горизонтам — первая стена на пути сделки."""
+    best: float | None = None
+    for hz in (setups.get("horizons") or {}).values():
+        if not isinstance(hz, dict):
+            continue
+        for kind in ("perezakup", "dobor", "short"):
+            raw = hz.get(kind)
+            zs = raw if isinstance(raw, list) else ([raw] if isinstance(raw, dict) else [])
+            for z in zs:
+                if not isinstance(z, dict):
+                    continue
+                for edge in ("lo", "hi"):
+                    v = _num(z.get(edge))
+                    if v is None:
+                        continue
+                    if direction == "long" and v > entry and (best is None or v < best):
+                        best = v
+                    if direction == "short" and v < entry and (best is None or v > best):
+                        best = v
+    return best
+
+
 def _plan_line(setups: dict[str, Any], price: float, market: dict[str, Any]) -> str:
     """Строка плана в форме его разборов: ближайшая поддержка · сопротивление · зона закупа.
 
@@ -292,7 +315,7 @@ def _tp_values(summary: dict[str, Any]) -> list[float]:
     return out[:3]
 
 
-def _active_signal_block(summary: dict[str, Any]) -> list[str]:
+def _active_signal_block(summary: dict[str, Any], setups: dict[str, Any]) -> list[str]:
     """The EMITTED signal's trade plan — вход / стоп / цели / R:R. This is the setup the tracker
     actually watches (``register_signal_open`` → armed→triggered → SL/TP follow-ups on the tick), so
     «сетап активен» must carry its numbers, not just the label. Empty unless a long/short with a real
@@ -302,6 +325,7 @@ def _active_signal_block(summary: dict[str, Any]) -> list[str]:
     lo, hi = _num(summary.get("entry_lo")), _num(summary.get("entry_hi"))
     if lo is None or hi is None:
         return []
+    direction = str(summary.get("action") or "").lower()
     bits: list[str] = []
     kind = SETUP_KIND_RU.get(str(summary.get("setup_kind") or ""))
     if kind:  # unknown/absent kind → no label, never a raw id (I-6)
@@ -319,6 +343,18 @@ def _active_signal_block(summary: dict[str, Any]) -> list[str]:
     rr = _num(summary.get("rr_primary"))
     if rr is not None:
         bits.append(f"R:R <code>{rr:.1f}</code>")
+        # R:R меряется до ДАЛЬНЕЙ цели, и на живых данных это систематически льстит: замер по 12
+        # сигналам дал медианное расхождение 22.1x с R:R до ПЕРВОГО встречного уровня, а 9 из 12
+        # прошли пол по первому и провалились бы по второму (крайний случай AVAX: 6.28 против 0.06).
+        # Заменять одно другим НЕЛЬЗЯ — автор фиксирует часть на первом уровне и держит остаток
+        # («частично фиксировать… смотреть, будет ли пробой закреп»), его 1к3 про сделку целиком.
+        # Поэтому показываем ОБА: ambition и ближайшую стену. Гейт эмиссии не трогаем.
+        first = _first_opposing(setups, entry=(lo + hi) / 2.0, direction=direction)
+        if first is not None and stop is not None:
+            risk = ((lo + hi) / 2.0 - stop) if direction == "long" else (stop - (lo + hi) / 2.0)
+            gain = (first - (lo + hi) / 2.0) if direction == "long" else ((lo + hi) / 2.0 - first)
+            if risk > 0 and gain > 0:
+                bits.append(f"до 1-го уровня <code>{fmt_price(first)}</code> = {gain / risk:.1f}R")
     lines = [" · ".join(bits)]
     tps = _tp_values(summary)
     if tps:
@@ -586,7 +622,7 @@ def format_prizrak_post(analysis: AnalystReport) -> str:
         header += f" · <code>{fmt_price(price)}</code>"
     parts: list[str] = [header, _regime_line(structure, summary)]
     # The emitted signal's actual trade plan (entry/stop/цели/RR) — the setup the tracker watches.
-    parts.extend(_active_signal_block(summary))
+    parts.extend(_active_signal_block(summary, setups))
 
     zlines: list[str] = []
     # Внутридневной горизонт первый: в разборе ASTR (2026-07-25) именно 15м нёс его «ближайший
