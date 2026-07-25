@@ -785,7 +785,7 @@ def _add_advanced_indicators(
 
     # --- Stochastic ---------------------------------------------------------
     if group_active(active_groups, "stoch"):
-        stoch_k, stoch_d = stochastic_series(df, period=14, smooth_k=3, smooth_d=3)
+        stoch_k, stoch_d = stochastic_series(df, period=14, smooth_d=3)
         result = result.with_columns(
             [
                 stoch_k.alias("stoch_k14"),
