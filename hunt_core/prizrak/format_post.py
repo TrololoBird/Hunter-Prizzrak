@@ -72,6 +72,10 @@ def _band(z: dict[str, Any]) -> str:
 def _perezakup_line(pk: dict[str, Any]) -> str:
     poc = _num(pk.get("poc"))
     poc_s = f" (ПОК <code>{fmt_price(poc)}</code>)" if poc is not None else ""
+    # Профиль бимодален — ПОК как точка недостоверен, и вход на него не якорится. Курс это
+    # предвидит: «до POC может не дойти» (стр.30), поэтому там и 2–3 ордера вместо одного.
+    if pk.get("poc_unstable"):
+        poc_s = " (ПОК <i>неустойчив — профиль двугорбый</i>)"
     return f"🟢 перезакуп {_band(pk)}{poc_s}{_fact_tag(pk)}"
 
 

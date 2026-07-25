@@ -126,13 +126,18 @@ def _zone_view(
         n_lo, n_hi = max(lo, val), min(hi, vah)
         if n_lo < n_hi:
             lo, hi = n_lo, n_hi
-    poc_in = poc is not None and lo <= poc <= hi
+    # Неустойчивый ПОК (бимодальный профиль) не годится в якорь — это ложная точность; падаем
+    # на кромку, как при отсутствии ПОК. Флаг считает poc._poc_is_stable по перескоку при смене
+    # разбиения: измерено на LTC 40.78–45.59, где якорь гулял на 5.7%.
+    stable = bool(info.get("poc_stable", True))
+    poc_in = poc is not None and lo <= poc <= hi and stable
     edge = poc if (poc_in and poc is not None) else (hi if side == "long" else lo)
     flags = _course_flags(bars, level=edge, side=side)
     by_fact, reason = _fact_reason(flags, side=side, bias=bias, is_perezakup=False)
     return {
         "lo": round(lo, 8), "hi": round(hi, 8),
         "poc": (round(poc, 8) if (poc_in and poc is not None) else None),
+        "poc_unstable": bool(poc is not None and lo <= poc <= hi and not stable),
         "touches": int(z.get("touches") or 0), "entry": round(edge, 8),
         "by_fact": by_fact, "fact_reason": reason, **flags,
     }
@@ -168,12 +173,14 @@ def _perezakup_view(
     lo = min(val if val is not None else lo_box, hi)
     if not lo < hi:
         return None
-    anchor = poc if (poc is not None and lo <= poc <= hi) else hi
+    stable = bool(info.get("poc_stable", True))
+    anchor = poc if (poc is not None and lo <= poc <= hi and stable) else hi
     flags = _course_flags(bars, level=anchor, side="long")
     by_fact, reason = _fact_reason(flags, side="long", bias=bias, is_perezakup=True)
     return {
         "lo": round(lo, 8), "hi": round(hi, 8),
-        "poc": (round(poc, 8) if (poc is not None and lo <= poc <= hi) else None),
+        "poc": (round(poc, 8) if (poc is not None and lo <= poc <= hi and stable) else None),
+        "poc_unstable": bool(poc is not None and lo <= poc <= hi and not stable),
         "touches": int(base.get("touches") or 0), "entry": round(anchor, 8),
         "by_fact": by_fact, "fact_reason": reason, **flags,
     }
