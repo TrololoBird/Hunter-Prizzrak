@@ -199,13 +199,39 @@ def test_no_active_plan_on_wait() -> None:
     assert "вход <code>" not in out and "стоп <code>" not in out
 
 
+def test_deep_horizons_bands_tile_and_keep_the_nearest_rungs() -> None:
+    """★ No level below price may fall between the bands and vanish.
+
+    Regression (measured against the author's 2026-07-25 alts обзор): the bands stopped at
+    0.82·price, so every spot-history rung inside 18% under price matched neither ``sniper`` nor
+    ``spot`` and was dropped silently — SAND 0.045 (his active 0.044–0.046 buy zone), CHZ 0.0125,
+    THETA 0.1230 «LONG». The card then began one horizon BELOW his nearest zone.
+    """
+    ladder = {
+        "below": [
+            {"price": 199.0, "touches": 1},  # 0.995·price — the dropped band, right under price
+            {"price": 170.0, "touches": 2},  # 0.850·price — the dropped band's floor
+            {"price": 150.0, "touches": 1},  # sniper
+            {"price": 100.0, "touches": 1},  # spot
+        ],
+        "above": [], "atl": 80.0, "ath": 500.0,
+    }
+    out = _post(
+        symbol="BCHUSDT", price=200.0, setups={"horizons": {}, "price": 200.0, "bias": ""},
+        spot_ladder=ladder, features=_features(50.0, 50.0),
+    )
+    assert "Ближние" in out and "199" in out and "170" in out
+    assert "Снайпер" in out and "150" in out
+    assert "Спот · накопление" in out and "100" in out
+
+
 def test_deep_horizons_empty_ladder_omitted() -> None:
     """I-6: an empty ladder yields no spot/sniper block (never a fabricated floor)."""
     out = _post(
         symbol="BCHUSDT", price=200.0, setups={"horizons": {}, "price": 200.0, "bias": ""},
         spot_ladder={"below": [], "above": [], "atl": None}, features=_features(50.0, 50.0),
     )
-    assert "Снайпер" not in out and "Спот · накопление" not in out
+    assert "Снайпер" not in out and "Спот · накопление" not in out and "Ближние" not in out
 
 
 def test_no_pochemu_net_sdelki_when_signal_active() -> None:

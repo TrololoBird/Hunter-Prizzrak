@@ -77,6 +77,37 @@ def _tier_structure(
     return {}
 
 
+# A bar that closed more than 3× away from its own extreme never TRADED there — it printed a
+# single liquidation wick. «Уровень есть уровень» means the market did business at the price, so
+# such a bar cannot define ATL/ATH. Measured on the 2025-10-06 Binance cascade: 3 of the author's
+# 10 alts had their raw weekly ATL captured by that one wick — ANKR 0.00001 (bar closed 0.01117,
+# low/close 0.001), UNI 0.30 (close 5.223) and SAND 0.008333 (close 0.060852) — against real ATLs
+# of 0.000637 / 1.7563 / 0.017. The observed split is wide: artifacts ≤0.14, genuine extremes ≥0.57.
+_TRADED_EXTREME_MIN_RATIO = 1.0 / 3.0
+
+
+def _traded_extreme(ohlcv: list[list[float]], *, low: bool) -> float | None:
+    """All-time low (``low=True``) / high over bars that actually traded at their extreme.
+
+    Falls back to the raw extreme when EVERY bar is rejected, so a thin or unusual series still
+    reports a number rather than silently losing the field (I-6: no fabricated ``None``).
+    """
+    idx = 3 if low else 2
+    vals = [
+        (float(r[idx]), float(r[4]))
+        for r in ohlcv
+        if len(r) > 4 and float(r[idx]) > 0.0 and float(r[4]) > 0.0
+    ]
+    if not vals:
+        return None
+    kept = [
+        ext for ext, close in vals
+        if (ext / close if low else close / ext) >= _TRADED_EXTREME_MIN_RATIO
+    ]
+    pool = kept or [ext for ext, _ in vals]
+    return min(pool) if low else max(pool)
+
+
 def spot_weekly_ladder(
     ohlcv: list[list[float]],
     *,
@@ -121,6 +152,15 @@ def spot_weekly_ladder(
             levels[-1] = {"price": merged, "touches": touches}
         else:
             levels.append({"price": px, "touches": 1})
+    atl = _traded_extreme(ohlcv, low=True)
+    ath = _traded_extreme(ohlcv, low=False)
+    # Keep the ladder inside its own extremes. A pivot outside [atl, ath] can only come from a bar
+    # `_traded_extreme` rejected — i.e. a wick the market never did business at — and printing one
+    # yields a self-contradicting card («🟢 0.01700 · ATL 0.02880», measured on SAND).
+    if atl is not None:
+        levels = [lv for lv in levels if float(lv["price"]) >= atl]
+    if ath is not None:
+        levels = [lv for lv in levels if float(lv["price"]) <= ath]
     below = sorted(
         (lv for lv in levels if float(lv["price"]) < price),
         key=lambda lv: price - float(lv["price"]),
@@ -129,8 +169,6 @@ def spot_weekly_ladder(
         (lv for lv in levels if float(lv["price"]) >= price),
         key=lambda lv: float(lv["price"]) - price,
     )[:max_levels_per_side]
-    atl = min((r[3] for r in ohlcv if len(r) > 3), default=None)
-    ath = max((r[2] for r in ohlcv if len(r) > 2), default=None)
     return {
         "below": below, "above": above, "bars_used": len(bars), "source": "spot_1w",
         "atl": atl, "ath": ath,

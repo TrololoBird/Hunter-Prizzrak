@@ -127,25 +127,34 @@ def _perezakup_view(
     cfg: PrizrakConfig,
     bias: str,
     price: float,
-) -> dict[str, Any]:
+) -> dict[str, Any] | None:
     """🟢 Перезакуп = the **value area [VAL, VAH] of the dominant volume base**, anchored at ПОК.
 
     This is the author's «перезакуп лонга … здесь ПОК крупной структуры» (стр.30): re-buy the
     volume core of the whole base, NOT a tight near-price box. Measured fix — BCH gave the box top
     218; the base's value area is 190–205 with ПОК 196, exactly the author's zone. Falls back to the
-    box range when VRVP has no profile (crypto-spot etc.)."""
+    box range when VRVP has no profile (crypto-spot etc.).
+
+    A re-buy band lives BELOW price, so both edges are clipped there: the base's BOX sits below
+    price, but the structure bars it spans may wick above, which drags VAL/VAH/ПОК up with them.
+    Returns ``None`` when the whole value area sits above price — that base has no re-buy band left,
+    and inventing one by re-ordering the edges would advertise a "buy zone" you can only enter by
+    buying INTO resistance (measured on ARPA: VAL 0.008686 > price 0.008320 rendered as a
+    «перезакуп 0.008320–0.008686», i.e. a long entry above spot). ПОК is likewise reported only when
+    it lands inside the final band — never a foreign ПОК (I-6), same guard as :func:`_zone_view`."""
     lo_box, hi_box = float(base["lo"]), float(base["hi"])
     info = zone_poc(raw_window, zone=base, cfg=cfg)
     poc, val, vah = _num(info.get("poc")), _num(info.get("val")), _num(info.get("vah"))
-    lo = val if val is not None else lo_box
-    # A re-buy zone lives BELOW price — clip the value-area high (its bars can wick above price).
     hi = min(vah if vah is not None else hi_box, price)
-    anchor = min(poc, hi) if poc is not None else hi
+    lo = min(val if val is not None else lo_box, hi)
+    if not lo < hi:
+        return None
+    anchor = poc if (poc is not None and lo <= poc <= hi) else hi
     flags = _course_flags(bars, level=anchor, side="long")
     by_fact, reason = _fact_reason(flags, side="long", bias=bias, is_perezakup=True)
     return {
-        "lo": round(min(lo, hi), 8), "hi": round(max(lo, hi), 8),
-        "poc": (round(poc, 8) if poc is not None else None),
+        "lo": round(lo, 8), "hi": round(hi, 8),
+        "poc": (round(poc, 8) if (poc is not None and lo <= poc <= hi) else None),
         "touches": int(base.get("touches") or 0), "entry": round(anchor, 8),
         "by_fact": by_fact, "fact_reason": reason, **flags,
     }
@@ -180,9 +189,13 @@ def _horizon_zones(
     base = max(below_boxes, key=lambda z: float(z.get("zone_volume") or 0)) if below_boxes else None
     vah: float | None = None
     if base is not None:
+        # None ⇒ that base's value area sits entirely above price: no re-buy band, and `vah` stays
+        # None so the добор/цели filters below fall back to "no value-area floor" instead of
+        # inheriting a bogus one.
         pk = _perezakup_view(window, bars, base, cfg=cfg, bias=bias, price=price)
-        out["perezakup"] = pk
-        vah = pk["hi"]
+        if pk is not None:
+            out["perezakup"] = pk
+            vah = pk["hi"]
     # 🟡 ДОБОР — tight support boxes ABOVE the value area, below price (nearer add-to-long rungs);
     # straddle floors included via the long-side decomposition.
     below_long, _ = _split_below_above(zones, price=price, decompose_short=False)

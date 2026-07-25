@@ -116,6 +116,13 @@ def _horizon_block(title: str, hz: dict[str, Any]) -> list[str]:
 # the 4h horizon (above the sniper band).
 _SPOT_BAND_HI = 0.58   # below this fraction of price → «Спот» (macro accumulation floor + ATL)
 _SNIPER_BAND_HI = 0.82  # [0.58, 0.82)·price → «Снайпер» (deep levels below the local base, above spot)
+# [0.82, 1.0)·price → «Ближние». The bands must TILE (0, price): they used to stop at _SNIPER_BAND_HI,
+# so every spot-history rung within 18% under price matched no band and was dropped without a trace —
+# and that is the band the author actually trades. Measured on his 2026-07-25 alts обзор: the ladder
+# already held SAND 0.045 (his active 0.044–0.046 buy zone, ratio 0.994), CHZ 0.012993/0.012348 (his
+# 0.0125; 0.916/0.870) and THETA 0.1225/0.11968/0.113 (his 0.1230 «LONG»; 0.892/0.872/0.823) — all
+# three coins rendered a card that silently began one horizon deeper than his nearest zone.
+_NEAR_BAND_HI = 1.0
 
 
 def _lvl_str(lv: dict[str, Any], *, strong: bool) -> str:
@@ -126,9 +133,10 @@ def _lvl_str(lv: dict[str, Any], *, strong: bool) -> str:
 
 
 def _deep_horizons(ladder: dict[str, Any], price: float) -> list[str]:
-    """🎯 Снайпер (deep untested levels) + 🟢 Спот (macro accumulation floor + ATL), sliced by depth
+    """🟢 Ближние + 🎯 Снайпер (deep untested levels) + 🟢 Спот (macro floor + ATL), sliced by depth
     from the full-history spot ladder — the author's «глубокий спот-ladder … от ATL» (POL/MATIC разбор).
 
+    The three bands TILE the whole ``(0, price)`` range, so no rung can fall between them and vanish.
     The strongest-touch level in each band is bolded as its volume core (the author's «ПОК» of that
     horizon; touch-density is our public proxy — VRVP-over-a-band is unavailable). Empty when the ladder
     has no level in the band (I-6: no fabricated floor)."""
@@ -138,6 +146,7 @@ def _deep_horizons(ladder: dict[str, Any], price: float) -> list[str]:
     ]
     if price <= 0 or not below:
         return []
+    near = [lv for lv in below if _SNIPER_BAND_HI * price <= float(lv["price"]) < _NEAR_BAND_HI * price]
     sniper = [lv for lv in below if _SPOT_BAND_HI * price <= float(lv["price"]) < _SNIPER_BAND_HI * price]
     spot = [lv for lv in below if float(lv["price"]) < _SPOT_BAND_HI * price]
     atl = _num(ladder.get("atl"))
@@ -156,9 +165,12 @@ def _deep_horizons(ladder: dict[str, Any], price: float) -> list[str]:
             )
             lines.append(f"{emoji} {parts}{tail}")
         elif tail:
-            lines.append(f"{emoji}{tail}")
+            # No level in the band — the tail is the whole line, so drop its leading separator
+            # («🟢  ·  ATL 0.0288» read as a missing value; it is simply «🟢 ATL 0.0288»).
+            lines.append(f"{emoji} {tail.strip().lstrip('·').strip()}")
         out.extend(lines)
 
+    _horizon("Ближние · спот-история", "🟢", near)
     _horizon("Снайпер · спот-история", "🎯", sniper)
     atl_tail = f"  ·  ATL <code>{fmt_price(atl)}</code>" if atl is not None else ""
     _horizon("Спот · накопление", "🟢", spot, tail=atl_tail)

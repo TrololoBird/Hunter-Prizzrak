@@ -100,3 +100,30 @@ def test_near_resistance_surfaces_and_by_fact_marks_counter_trend() -> None:
     assert min(abs(z["hi"] - 110.0) for z in shorts) < 1.5
     # A short against a long bias is «по факту», not a set-and-forget limit.
     assert all(z["by_fact"] for z in shorts)
+
+
+def test_perezakup_never_reports_a_poc_outside_its_own_zone() -> None:
+    """★ I-6: the rendered ПОК must lie INSIDE the зона it labels — never a foreign number.
+
+    Regression (measured on ARPA, 2026-07-25): the base's box sat below price, but the structure
+    bars it spans wicked above, so VRVP returned VAL/VAH/ПОК above price. ``_perezakup_view`` clipped
+    the entry but printed the raw ПОК and then re-ordered the edges with min/max, yielding
+    «перезакуп 0.008320–0.008686 (ПОК 0.01036)» — a buy zone at/above spot, anchored on a ПОК 19%
+    outside it. The sibling ``_zone_view`` had always guarded this; only this path did not.
+    """
+    checked = 0
+    for price in (105.0, 109.0, 111.0, 128.0):
+        bars = _flat_base(lo=100.0, hi=110.0, cycles=10, vol=500.0)
+        bars.append(_bar(price, price * 1.002, price * 0.998, price))
+        hz = build_symbol_setups({"4h": bars}, price=price, cfg=_CFG)["horizons"].get("local")
+        pk = (hz or {}).get("perezakup")
+        if pk is None:
+            continue  # no re-buy band left below price — a legal, fail-loud outcome
+        checked += 1
+        lo, hi = float(pk["lo"]), float(pk["hi"])
+        assert lo < hi, f"degenerate зона at price={price}: {pk}"
+        assert hi <= price + 1e-9, f"перезакуп must sit BELOW price ({price}): {pk}"
+        if pk["poc"] is not None:
+            assert lo <= float(pk["poc"]) <= hi, f"ПОК outside its зона at price={price}: {pk}"
+        assert lo <= float(pk["entry"]) <= hi, f"entry outside its зона at price={price}: {pk}"
+    assert checked, "vacuous test — no fixture produced a перезакуп to check"
