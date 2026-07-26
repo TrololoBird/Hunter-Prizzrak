@@ -20,6 +20,7 @@ from hunt_core.engine.health import Watchdog
 from hunt_core.engine.ingest import Ingest
 from hunt_core.engine.liquidations import market_contract_size
 from hunt_core.engine.state import MarketSnapshot, Plane, PlaneStamp, Source, SymbolState
+from hunt_core.market.symbols import is_crypto_underlying
 
 LOG = structlog.get_logger(__name__)
 
@@ -205,15 +206,24 @@ class Engine:
                     val = _last_float(await rest.poll_futures_data(ex, method, base), key)
                     if val is not None:
                         st.put_value(plane, val, PlaneStamp(Source.REST_SEED, now, now, bound))
-                basis = _last_float(
-                    await rest.poll_futures_data(
-                        ex, "fapiDataGetBasis",
-                        {"pair": bsym, "contractType": "PERPETUAL", "period": "5m", "limit": 1},
-                    ),
-                    "basis",
-                )
-                if basis is not None:
-                    st.put_value("basis", basis, PlaneStamp(Source.REST_SEED, now, now, bound))
+                # Базис существует только у КРИПТО-перпов. Binance USDⓈ-M листит и токенизированные
+                # товары/акции (XAUUSDT, XAGUSDT, …), и для них /futures/data/basis отвечает
+                # -4104 «Invalid contract type» — навсегда, а не транзиентно. Замечено на живом
+                # прогоне 2026-07-25: два символа из семи пиннед-набора били по эндпоинту каждый
+                # цикл. Это не только шум в логе: /futures/data — тот самый лимит, по которому
+                # репозиторий уже ловил бан -1003, и жечь его на заведомо невозможный ответ нельзя.
+                # Фильтр — уже существующий ``is_crypto_underlying`` (fail-open на неизвестном типе,
+                # чтобы смена формата exchangeInfo не выключила базис всем разом).
+                if is_crypto_underlying((getattr(ex, "markets", None) or {}).get(symbol)):
+                    basis = _last_float(
+                        await rest.poll_futures_data(
+                            ex, "fapiDataGetBasis",
+                            {"pair": bsym, "contractType": "PERPETUAL", "period": "5m", "limit": 1},
+                        ),
+                        "basis",
+                    )
+                    if basis is not None:
+                        st.put_value("basis", basis, PlaneStamp(Source.REST_SEED, now, now, bound))
             await asyncio.sleep(params.FUTURES_DATA_POLL_S)
 
     def snapshot(self, symbol: str, required: Sequence[str]) -> MarketSnapshot:
