@@ -45,6 +45,19 @@ CROSS_FUNDING_POLL_S: float = 60.0
 FRESH_CROSS_FUNDING_S: float = 180.0
 # DOC: /futures/data/* are computed every 5 min — polling faster returns duplicates + burns budget.
 FUTURES_DATA_POLL_S: float = 300.0
+# Пауза МЕЖДУ отдельными запросами /futures/data внутри одного цикла опроса.
+#
+# Цикл делает 7 запросов на символ (open-interest + 5 статистик + базис). На семи пиннед-символах
+# это 49 запросов подряд, вплотную, раз в 300 с. У /futures/data свой IP-лимит, гораздо более
+# тесный, чем у основного fapi, и такой залп его срывает: живой прогон 2026-07-25 поймал -1003
+# четыре раза за 83 минуты (22:16, 23:11, 23:16, 23:32) — всегда на fapiDataGetBasis, потому что
+# он идёт последним и упирается в стену, а не потому, что он чем-то особенный. Бан глобальный
+# (``rest._BAN_UNTIL_MS``), то есть валит ВСЕ планы позиционирования, а не только базис.
+#
+# 1.2 с × 49 ≈ 59 с на полный обход — с запасом внутри 300-секундного периода, мгновенная частота
+# падает примерно в 50 раз, свежесть не страдает: данные и так пятиминутной гранулярности
+# (FRESH_FUTURES_DATA_S = 360 с).
+FUTURES_DATA_SPACING_S: float = 1.2
 
 # --- Per-plane freshness bounds (Plane.read) ---
 FRESH_BBO_S: float = 5.0  # LIVE age 0.4s + DOC bookTicker real-time

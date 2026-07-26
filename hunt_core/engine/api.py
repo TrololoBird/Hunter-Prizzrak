@@ -206,6 +206,7 @@ class Engine:
                     val = _last_float(await rest.poll_futures_data(ex, method, base), key)
                     if val is not None:
                         st.put_value(plane, val, PlaneStamp(Source.REST_SEED, now, now, bound))
+                    await asyncio.sleep(params.FUTURES_DATA_SPACING_S)
                 # Базис существует только у КРИПТО-перпов. Binance USDⓈ-M листит и токенизированные
                 # товары/акции (XAUUSDT, XAGUSDT, …), и для них /futures/data/basis отвечает
                 # -4104 «Invalid contract type» — навсегда, а не транзиентно. Замечено на живом
@@ -224,6 +225,7 @@ class Engine:
                     )
                     if basis is not None:
                         st.put_value("basis", basis, PlaneStamp(Source.REST_SEED, now, now, bound))
+                    await asyncio.sleep(params.FUTURES_DATA_SPACING_S)
             await asyncio.sleep(params.FUTURES_DATA_POLL_S)
 
     def snapshot(self, symbol: str, required: Sequence[str]) -> MarketSnapshot:
