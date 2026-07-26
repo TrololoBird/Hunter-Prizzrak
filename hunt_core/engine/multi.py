@@ -105,6 +105,22 @@ class MultiEngine:
         while True:
             symbols = list(self._symbols)  # snapshot — add_symbol may append mid-cycle
             for venue, ex in self._secondary_ex.items():
+                # ``load_markets`` зовётся ОДИН раз на старте, и его падение здесь не лечится ничем:
+                # словарь маркетов остаётся пустым НАВСЕГДА, а `if sym not in markets: continue`
+                # ниже молча выключает площадку на всю сессию. Живой прогон 2026-07-26 04:41: bybit
+                # упал на options-эндпоинте (``instruments-info?category=option``) — и продолжил
+                # числиться живым, потому что ``caps`` считается по ``has`` (статическое объявление
+                # ccxt), а не по наличию данных. Лог утверждал ровно обратное происходящему.
+                #
+                # Цикл идёт раз в CROSS_FUNDING_POLL_S, так что повтор здесь — это самолечение
+                # с естественным бэк-оффом, а не опрос в тесной петле.
+                if not (getattr(ex, "markets", None) or {}):
+                    try:
+                        await ex.load_markets()
+                        LOG.info("engine_secondary_markets_recovered", venue=venue)
+                    except Exception as exc:  # noqa: BLE001 — мёртвая вторичка не топит основную
+                        LOG.warning("engine_secondary_markets_unavailable", venue=venue, err=str(exc))
+                        continue
                 now = int(time.time() * 1000)
                 venue_state = self._cross[venue]
                 cap = self._cap.get(venue, {})
