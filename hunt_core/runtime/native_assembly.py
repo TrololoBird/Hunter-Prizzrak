@@ -18,6 +18,8 @@ from hunt_core.features.models import FeaturePanel
 from hunt_core.maps.cross import aggregate_cross_walls
 from hunt_core.maps.engine import MapBundle, MapTimeSeriesStore
 from hunt_core.maps.feed import build_map_bundle
+from hunt_core.engine.funding_stats import funding_trend, funding_zscore
+from hunt_core.engine.oi_stats import oi_change, oi_series
 from hunt_core.maps.oi import oi_bars_from_frames
 from hunt_core.prizrak.assemble import assemble_prizrak
 from hunt_core.prizrak.models import PrizrakOutput
@@ -86,18 +88,42 @@ def _to_unified(symbol: str) -> str:
 # join is cheap; only the REST call is throttled). Fail-loud absent stays absent (not cached).
 _OI_BARS_TTL_S = 300.0
 _OI_BARS_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+# 24 bars of 1h-period OI history = a 24h move. Not a round number picked for looks (I-7): the
+# consumer `classify_oi_regime` bands OI at ±15%, and a 2026-07-26 measurement over 8 majors put the
+# hour-over-hour move at ≤0.33% and the 24h move at ≤2.54% — only the latter is on the band's order
+# of magnitude. The fetched series is 48 bars, so this window always has its baseline.
+_OI_CHANGE_WINDOW_BARS = 24
+
+# Funding history TTL. NOT a "reasonable value" (I-7): Binance settles funding every **8h**, so the
+# derived z-score/trend can only change when a new record settles. A 3600s TTL therefore cannot miss
+# a settlement by more than 1h — an 8× margin — while cutting the fetch to one call per symbol per
+# hour. `fetch_funding_rate_history` is a normal REST endpoint, NOT `/futures/data`, so it is outside
+# the IP-window that produced the -1003 bans; the limit of 16 records spans ~5 days, enough for both
+# `funding_zscore(min_records=6)` and `funding_trend(window=4)`.
+_FUNDING_TTL_S = 3600.0
+_FUNDING_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 
 
-async def _fetch_oi_bars(exchange: Any, symbol: str, view: MarketView) -> list[dict[str, Any]] | None:
-    """1h open-interest history (48 bars) as-of-joined to the 1h kline frame, or ``None`` fail-loud.
+async def _fetch_oi_bars(
+    exchange: Any, symbol: str, view: MarketView
+) -> tuple[list[dict[str, Any]] | None, float | None]:
+    """1h OI history (48 bars) joined to the 1h frame, plus the OI %-change over that window.
 
     The raw OI rows are cached per symbol for ``_OI_BARS_TTL_S`` (they change on Binance's ~5-min
     cadence); the as-of join to the live 1h frame runs every call. This throttles the /futures/data
     REST volume that a live run showed was tripping -1003 IP bans.
+
+    The %-change is derived from the SAME already-fetched rows via ``engine/oi_stats.py``, so
+    closing the ``oi_change_pct`` gap costs **zero** extra requests. That producer was built
+    2026-07-19 (`f040786`, ADR-0004 S8) and sat unconsumed until 2026-07-26 — meanwhile
+    ``oi_regime_from_row`` resolved every regime to ``"unknown"`` for want of this one number.
+
+    Returns:
+        ``(bars, oi_change_pct)`` — each independently ``None`` when its input is absent.
     """
     h1 = view.klines.h1
     if h1 is None:
-        return None
+        return None, None
     now = time.monotonic()
     cached = _OI_BARS_CACHE.get(symbol)
     if cached is not None and now - cached[0] < _OI_BARS_TTL_S:
@@ -111,9 +137,59 @@ async def _fetch_oi_bars(exchange: Any, symbol: str, view: MarketView) -> list[d
         if rows:
             _OI_BARS_CACHE[symbol] = (now, rows)  # cache only real data (fail-loud absent isn't cached)
     if not rows:
-        return None
+        return None, None
+    # ×100: `oi_change` returns a FRACTION, the field is named `_pct`. This project has already
+    # shipped a fraction under a percent name once (`buffer_pct` → negative stop price), so the
+    # conversion is explicit and local. window=24 over 1h-period rows = a 24h move, the only
+    # pairing that can reach `classify_oi_regime`'s ±15% band (measurement in `oi_stats.oi_change`).
+    raw = oi_change(oi_series(rows), window=_OI_CHANGE_WINDOW_BARS)
+    oi_change_pct = raw * 100.0 if raw is not None else None
     bars = oi_bars_from_frames(rows, h1)
-    return bars or None
+    return (bars or None), oi_change_pct
+
+
+def _price_change_pct(view: MarketView, *, window: int = _OI_CHANGE_WINDOW_BARS) -> float | None:
+    """Close-to-close %-change over the SAME ``window`` of 1h bars the OI change uses, or ``None``.
+
+    Pairing matters: ``classify_oi_regime`` reads OI-move against price-move, and comparing a 24h OI
+    change to, say, a 1h price change would label ordinary drift as a squeeze. Both sides therefore
+    come from the same window and the same 1h cadence.
+
+    Frames are closed-only post-finalize, so ``-1`` IS the newest closed bar (I-5) — no ``-2``
+    "safety" offset, which would serve a stale bar.
+    """
+    h1 = view.klines.h1
+    if h1 is None or "close" not in h1.columns or h1.height < window + 1:
+        return None
+    closes = h1.get_column("close")
+    last = closes[-1]
+    prev = closes[-1 - window]
+    if last is None or prev is None or float(prev) <= 0:
+        return None
+    return (float(last) / float(prev) - 1.0) * 100.0
+
+
+async def _funding_stats(exchange: Any, symbol: str) -> tuple[float | None, str | None]:
+    """``(funding_zscore, funding_trend)`` over settled history, or ``(None, None)`` fail-loud.
+
+    ``view/build.py`` deliberately leaves both fields ``None`` — they need funding *history*, not a
+    per-tick plane — and marks them "deferred to features/". The deferral was never collected: the
+    pure producer ``engine/funding_stats.py`` shipped 2026-07-18 (`08ae584`, ADR-0003 E4a) and stayed
+    unconsumed, so ``features/feature_engine.py`` derived ``funding_velocity`` from a field that was
+    ALWAYS ``None``. Fetched here rather than in ``features/`` because this is the async layer that
+    may do REST; the statistics themselves stay pure. Wired 2026-07-26.
+    """
+    now = time.monotonic()
+    cached = _FUNDING_CACHE.get(symbol)
+    if cached is not None and now - cached[0] < _FUNDING_TTL_S:
+        records: list[dict[str, Any]] = cached[1]
+    else:
+        records = await rest.fetch_funding_history(exchange, symbol, limit=16)
+        if records:  # fail-loud: an empty fetch is not an empty history, so it is not cached
+            _FUNDING_CACHE[symbol] = (now, records)
+    if not records:
+        return None, None
+    return funding_zscore(records), funding_trend(records)
 
 
 async def assemble_native_analyst(
@@ -127,12 +203,23 @@ async def assemble_native_analyst(
     eng = rt.multi.primary
     ex = eng.exchange
 
+    # Collect the funding-history deferral `view/build.py` declares. The view is rebuilt per call
+    # (`MarketRuntime.view` → `build_market_view`), so copying it mutates no shared state; the
+    # frozen/strict models are honoured by passing already-correct types to `model_copy`.
+    fz, ftrend = await _funding_stats(ex, symbol)
+    if fz is not None or ftrend is not None:
+        view = view.model_copy(
+            update={"derivs": view.derivs.model_copy(
+                update={"funding_zscore": fz, "funding_trend": ftrend}
+            )}
+        )
+
     panel = compute_features(view)
 
     trades = list((getattr(ex, "trades", {}) or {}).get(symbol) or [])
     cross_liq = rt.multi.cross_liquidations(symbol)
     contract_sizes: dict[str, float | None] = {"binance": eng.contract_size(symbol)}
-    oi_bars = await _fetch_oi_bars(ex, symbol, view)
+    oi_bars, oi_change_pct = await _fetch_oi_bars(ex, symbol, view)
     cross_walls = aggregate_cross_walls(await rt.multi.cross_orderbook(symbol))
 
     maps = build_map_bundle(
@@ -154,9 +241,19 @@ async def assemble_native_analyst(
         "structural_up": build_structural_up_forecast_native(view, maps),
         "structural_down": build_structural_down_forecast_native(view, maps, session=session),
     }
-    # Fusion is display/journal-only (no emission gate reads it). lifecycle/structure and OI-%change
-    # have no typed producer yet (tracked follow-up #38) → passed None, checks inert (not fabricated).
-    fusion = compute_manipulation_fusion_native(view, panel, maps, session=session)
+    # Fusion is display/journal-only (no emission gate reads it). `oi_change_pct` is now supplied
+    # from the OI rows this function already fetched (follow-up #38 closed 2026-07-26 — the typed
+    # producer `engine/oi_stats.py` had existed since 2026-07-19 unconsumed, so every OI regime
+    # resolved to "unknown"). lifecycle/structure still have no typed producer → None, checks stay
+    # inert rather than fabricated (I-6).
+    fusion = compute_manipulation_fusion_native(
+        view,
+        panel,
+        maps,
+        session=session,
+        oi_change_pct=oi_change_pct,
+        price_change_pct=_price_change_pct(view),
+    )
     # contract_weekly is the fallback source for underlyings the venue lists no spot market for
     # (Binance's tokenized XAU/XAG perps) — without it those symbols lose the macro horizon entirely.
     # It must be the RAW weekly klines, not `panel.frames.w1`: `_prepare_frame` trims the indicator

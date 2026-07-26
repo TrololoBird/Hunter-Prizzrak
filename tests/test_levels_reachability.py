@@ -32,19 +32,18 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 PKG = REPO / "hunt_core"
 ENTRY_POINTS = ("hunt_core.__main__", "hunt_core._cli")
 
-# Достижимы не от главной точки входа, и это ОСОЗНАННО. Список закрытый: всё, что в нём не
+# Недостижимы от главной точки входа, и это ОСОЗНАННО. Список закрытый: всё, что в нём не
 # перечислено и не достижимо, — гниль, и тест обязан упасть.
 EXPECTED_UNREACHABLE = {
     # Самостоятельная точка входа: `python -m hunt_core.engine` — отладочный вертикальный срез
     # движка (стримит символы, печатает свежесть). Не часть бота по замыслу.
     "hunt_core.engine.__main__",
-    # Построены под гейты движка (ADR-0003 E4a, S8), потребитель так и не подключён. Это не
-    # гниль, а работа впереди спроса: код чистый, покрыт тестами, и `docs/engine/library-
-    # adoption.md` называет guard-паттерн `funding_stats` эталоном надёжности проекта.
-    # Решение — подключить или снять — принимать осознанно, а не молчанием.
-    "hunt_core.engine.funding_stats",
-    "hunt_core.engine.oi_stats",
 }
+# `engine/funding_stats.py` и `engine/oi_stats.py` были здесь до 2026-07-26 как «построено
+# впереди спроса». Оказалось не так: потребители существовали и ГОЛОДАЛИ —
+# `features/feature_engine.py` выводил `funding_velocity` из `derivs.funding_trend`, который
+# всегда был `None`, а `classify_oi_regime` возвращал `"unknown"` из-за отсутствия одного числа.
+# Подключены в `runtime/native_assembly.py`; OI — без единого дополнительного запроса.
 
 
 def _module_name(path: pathlib.Path) -> str:

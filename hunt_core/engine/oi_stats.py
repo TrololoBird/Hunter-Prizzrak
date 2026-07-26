@@ -42,17 +42,30 @@ def oi_series(rows: list[dict[str, Any]] | None, *, key: str = "sumOpenInterest"
     return out
 
 
-def oi_change(series: list[float] | None) -> float | None:
-    """Last-vs-previous OI change as a FRACTION (``series[-1]/series[-2] - 1``), or ``None``.
+def oi_change(series: list[float] | None, *, window: int = 1) -> float | None:
+    """OI change over ``window`` steps as a FRACTION (``series[-1]/series[-1-window] - 1``).
 
-    Matches ``client.fetch_open_interest_change`` exactly: needs ≥2 finite points and a strictly
-    positive previous value (the division/zero guard). A shorter or degenerate series is "no data"
-    (``None``), never a fabricated ``0.0`` change (I-6). The value is a fraction (e.g. ``0.05`` = +5%);
-    callers that want percent multiply by 100, as the legacy tick did.
+    ``window=1`` (default) is last-vs-previous and matches ``client.fetch_open_interest_change``
+    exactly — that legacy contract is preserved. Needs ``window+1`` points and a strictly positive
+    baseline (the division/zero guard). A shorter or degenerate series is "no data" (``None``),
+    never a fabricated ``0.0`` change (I-6).
+
+    The value is a FRACTION (``0.05`` = +5%); callers wanting percent multiply by 100. Getting this
+    wrong is a live defect class here — a fraction under a ``*_pct`` name once produced a negative
+    stop price — so the unit is restated at every call site.
+
+    Choosing ``window`` (invariant I-7 — a window without a measurement is a magic number): the only
+    consumer, ``maps/oi.py::classify_oi_regime``, bands OI at **±15%** against price at ±5%. Measured
+    2026-07-26 over 8 majors on 1h-period history: hour-over-hour OI moved at most **0.33%**, 24h at
+    most **2.54%**, 48h at most **1.95%**. So ``window=1`` against a 15% band is 45× out of reach and
+    could never bind; the 24h pairing is the only one on the right order of magnitude for what the
+    regime is meant to catch (a squeeze / new-money ignition, a rare event by construction).
     """
-    if not series or len(series) < 2:
+    if window < 1:
         return None
-    prev = _finite(series[-2])
+    if not series or len(series) < window + 1:
+        return None
+    prev = _finite(series[-1 - window])
     last = _finite(series[-1])
     if prev is None or last is None or prev <= 0:
         return None
