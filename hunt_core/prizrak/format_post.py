@@ -24,6 +24,7 @@ import html
 from typing import TYPE_CHECKING, Any
 
 from hunt_core.deliver._labels import fmt_price
+from hunt_core.maps.liquidation import liq_is_synthetic
 from hunt_core.prizrak.orchestrator import _INTEREST_ZONE_MAX_WIDTH_PCT
 
 if TYPE_CHECKING:
@@ -248,9 +249,18 @@ def _plan_line(setups: dict[str, Any], price: float, market: dict[str, Any]) -> 
         # желательно как раз в этот момент будет проработка ликвидности»), и потому кладёт заявки
         # заранее — проработка бывает импульсной. Печатается в ОБОИХ случаях: тесный коридор
         # ликвидность по пути не отменяет, а делает ожидание ещё более обоснованным.
+        # СИНТЕТИКА ПОМЕЧАЕТСЯ. Когда реализованных событий нет, карта ликвидаций отдаёт не
+        # наблюдение, а расчёт: `цена × (1 ± ставка поддерживающей маржи)` по дефолтным плечам
+        # (maps/liquidation.py, «directional magnet hints, not exact liquidation prices»).
+        # Докстринг того же модуля обещает «the formatter labels them explicitly», и три
+        # потребителя так и делают (_context_lines.py:120 «оценка», _sections.py:51,
+        # liq_reconcile.py:63) — эта карточка была единственной, кто печатал расчётную полосу
+        # как наблюдённый рыночный факт. Живой прогон 2026-07-26: ноль событий за 25 минут,
+        # то есть магнит был синтетическим ровно тогда, когда его печатали.
         magnet = market.get("liq_heatmap_nearest_long")
         if isinstance(magnet, (int, float)) and best[2] < float(magnet) < price:
-            bits.append(f"⚡ ликвидность по пути <code>{fmt_price(float(magnet))}</code>")
+            est = " <i>(оценка)</i>" if liq_is_synthetic(market) else ""
+            bits.append(f"⚡ ликвидность по пути <code>{fmt_price(float(magnet))}</code>{est}")
     return f"🎯 <b>План</b>: {' · '.join(bits)}" if len(bits) >= 2 else ""
 
 
@@ -622,10 +632,11 @@ def _pribory_line(analysis: AnalystReport, market: dict[str, Any]) -> str:
 
     nl = market.get("liq_heatmap_nearest_long")
     ns = market.get("liq_heatmap_nearest_short")
+    est = " <i>(оценка)</i>" if liq_is_synthetic(market) else ""
     if isinstance(nl, (int, float)):
-        toks.append(f"ликв.↓ <code>{fmt_price(float(nl))}</code>")
+        toks.append(f"ликв.↓ <code>{fmt_price(float(nl))}</code>{est}")
     if isinstance(ns, (int, float)):
-        toks.append(f"сквиз↑ <code>{fmt_price(float(ns))}</code>")
+        toks.append(f"сквиз↑ <code>{fmt_price(float(ns))}</code>{est}")
 
     dom = _dominance_token()
     if dom:
