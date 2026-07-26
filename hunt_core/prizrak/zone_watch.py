@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from hunt_core.prizrak.setups import _LADDER_MAX
 from hunt_core.track.tracker import HuntFollowUp
 
 if TYPE_CHECKING:
@@ -50,7 +51,11 @@ _RESET_PCT = float(os.getenv("HUNT_ZONE_RESET_PCT", "3.0") or 3.0)
 # per-tick jitter of a recomputed map. Too tight ⇒ duplicate alerts; too loose ⇒ a genuinely new zone
 # inherits the old one's "already alerted" state.
 _MATCH_TOL_PCT = float(os.getenv("HUNT_ZONE_MATCH_TOL_PCT", "1.0") or 1.0)
-_MAX_ZONES = int(os.getenv("HUNT_ZONE_MAX_PER_SYMBOL", "5") or 5)
+# Потолок зон на символ. Поднят с 5 до 9, потому что горизонтов теперь три, а не два:
+# при пяти слотах часовой горизонт (перезакуп + 3 добора + 3 шорта) выбирал их все, и
+# четырёхчасовые с недельными зонами молча отбрасывались после дедупа. Усечение логируется —
+# «зона не алертила» и «зоны не было» обязаны различаться.
+_MAX_ZONES = int(os.getenv("HUNT_ZONE_MAX_PER_SYMBOL", "9") or 9)
 _ENABLED = str(os.getenv("HUNT_ZONE_WATCH", "1")).strip().lower() not in {"0", "false", "no", "off"}
 
 
@@ -80,6 +85,14 @@ def _mk_zone(z: dict[str, Any], *, kind: str, direction: str, targets: list[Any]
     anchor = float(raw_anchor) if isinstance(raw_anchor, (int, float)) else (hi if direction == "long" else lo)
     tgts = [float(t) for t in targets if isinstance(t, (int, float))][:3]
     poc = z.get("poc")
+    # Ордерные линии зоны — то, что читатель видит в карточке. Якорь (``entry``) у добора/шорта уже
+    # и есть КЛЮЧЕВАЯ линия (``setups._zone_view``), так что алерт и карта говорят об одной цене;
+    # остальные линии несутся, чтобы алерт мог показать всю лесенку, а не одну её ступень.
+    lines = [
+        round(float(ln["price"]), 8)
+        for ln in (z.get("lines") or [])
+        if isinstance(ln, dict) and isinstance(ln.get("price"), (int, float))
+    ]
     return {
         "kind": kind,
         "direction": direction,
@@ -87,6 +100,7 @@ def _mk_zone(z: dict[str, Any], *, kind: str, direction: str, targets: list[Any]
         "hi": hi,
         "anchor": anchor,
         "poc": float(poc) if isinstance(poc, (int, float)) else None,
+        "lines": lines,
         "by_fact": bool(z.get("by_fact")),
         "targets": tgts,
     }
@@ -96,7 +110,12 @@ def _mk_zone(z: dict[str, Any], *, kind: str, direction: str, targets: list[Any]
 # на 1ч, и часовая зона всегда уже четырёхчасовой, а значит и стоп по ней короче. Снайпер/спот
 # исключены намеренно — это дальний контекст (десятки процентов), а не живые лимиты; внутридневной
 # 15м тоже: его зоны живут минуты и дали бы поток алертов вместо сетапов.
-_ALERT_HORIZONS = ("hourly", "local")
+#
+# «weekly» добавлен по разбору BTC 1ч от 2026-07-25: его ЕДИНСТВЕННАЯ названная зона интереса на
+# старшем ТФ — полоса 58 539,7–60 507,2, и по ней у него стоят живые лимитки неделями («у меня там
+# даже лимиточки ещё стояли»). Карточка её печатала, а алерта по ней не могло прийти в принципе —
+# карта и поток алертов выглядели одним продуктом, будучи разными множествами.
+_ALERT_HORIZONS = ("hourly", "local", "weekly")
 
 
 def _dedupe(zones: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -141,17 +160,25 @@ def _actionable_zones(setups: dict[str, Any]) -> list[dict[str, Any]]:
             rec = _mk_zone(pk, kind="перезакуп", direction="long", targets=long_t)
             if rec is not None:
                 out.append(rec)
-        for z in (hz.get("dobor") or [])[:2]:
+        # Срез [:2] при сортировке ближними-вперёд выбрасывал САМЫЙ ГЛУБОКИЙ добор — ровно тот,
+        # ради появления которого снимался гейт `hi > vah` (setups.py), и ровно тот, на котором
+        # автор сидит лимитом дольше всего. Предел теперь общий с картой: сколько ступеней
+        # напечатано, столько и наблюдается.
+        for z in (hz.get("dobor") or [])[:_LADDER_MAX]:
             if isinstance(z, dict):
                 rec = _mk_zone(z, kind="добор", direction="long", targets=long_t)
                 if rec is not None:
                     out.append(rec)
-        for z in (hz.get("short") or [])[:2]:
+        for z in (hz.get("short") or [])[:_LADDER_MAX]:
             if isinstance(z, dict):
                 rec = _mk_zone(z, kind="шорт", direction="short", targets=short_t)
                 if rec is not None:
                     out.append(rec)
-    return _dedupe(out)[:_MAX_ZONES]
+    kept = _dedupe(out)
+    if len(kept) > _MAX_ZONES:
+        LOG.info("zone_watch_truncated", kept=_MAX_ZONES, dropped=len(kept) - _MAX_ZONES,
+                 dropped_kinds=[z["kind"] for z in kept[_MAX_ZONES:]])
+    return kept[:_MAX_ZONES]
 
 
 def _stop_for(lo: float, hi: float, *, buffer_frac: float, direction: str) -> float:
@@ -202,6 +229,15 @@ def _followup(
             "zone_hi": z["hi"],
             "zone_kind": z["kind"],
             "poc": z.get("poc"),
+            # Ордерные линии зоны и R:R по ХУДШЕМУ заливу. Без RR сообщения для зоны, которую бот
+            # ведёт, и для зоны, отвергнутой по RR, были неразличимы — читатель не мог понять,
+            # считает ли модуль сетап торгуемым. Линии печатаются, чтобы алерт показывал ту же
+            # лесенку, что и карточка, а не одну её ступень.
+            "lines": z.get("lines") or [],
+            "rr": _rr_worst_fill(
+                direction=z["direction"], entry_lo=_entry_band(z)[0], entry_hi=_entry_band(z)[1],
+                stop=stop, tp1=(list(z.get("targets") or []) or [None])[0],
+            ),
             "by_fact": z.get("by_fact"),
             "stop_loss": stop,
             "targets": z.get("targets") or [],
@@ -276,6 +312,12 @@ def _handoff(
         from hunt_core.track.tracker import has_active_signal, register_signal_open
 
         if has_active_signal(state, symbol=sym, direction=z["direction"]):
+            # Трекер ключуется SYMBOL:direction, поэтому перезакуп и добор физически не могут быть
+            # двумя лонгами одновременно — это и есть причина, по которой модуль существует. Но
+            # молчаливый выход делал невозможной сверку «сколько алертов ушло» с «сколько сделок
+            # ведётся»: алерт выглядел как готовая к работе сделка, а её никто не завёл.
+            LOG.info("zone_watch_handoff_skipped_occupied", symbol=sym, kind=z["kind"],
+                     direction=z["direction"])
             return
         tps = list(z.get("targets") or [])
         entry_lo, entry_hi = _entry_band(z)

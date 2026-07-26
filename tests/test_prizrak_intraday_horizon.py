@@ -46,8 +46,10 @@ def test_astr_case_is_flagged_tight() -> None:
     """★ Случай, ради которого это писалось: он сказал «пропущу», карточка обязана сказать «тесно»."""
     hz = {"intraday": {"tf": "15m", "perezakup": _z(0.005064, 0.005092),
                        "short": [_z(0.005142, 0.005186)]}}
-    line = _headroom_line({"headroom": _headroom(hz, price=0.005118)})
-    assert "коридор" in line and "тесно" in line
+    line = _headroom_line({"headroom": _headroom(hz, price=0.005118)}, 0.005118)
+    # «коридор» переименован в «ход»: у автора это две РАЗНЫЕ линейки — ход между встречными
+    # уровнями и толщина самой зоны входа (разбор BTC 1ч 2026-07-25, кадры f_0151 и f_0139).
+    assert "ход" in line and "тесно" in line
 
 
 def test_roomy_corridor_is_not_flagged() -> None:
@@ -55,7 +57,7 @@ def test_roomy_corridor_is_not_flagged() -> None:
     hz = {"local": {"tf": "4h", "perezakup": _z(0.0090, 0.0095), "short": [_z(0.0140, 0.0150)]}}
     hr = _headroom(hz, price=0.0100)
     assert hr is not None and hr["width_pct"] > _TIGHT_HEADROOM_PCT
-    assert "тесно" not in _headroom_line({"headroom": hr})
+    assert "тесно" not in _headroom_line({"headroom": hr}, 0.0100)
 
 
 def test_one_sided_corridor_is_silent_not_half_printed() -> None:
@@ -63,7 +65,7 @@ def test_one_sided_corridor_is_silent_not_half_printed() -> None:
     hz = {"local": {"tf": "4h", "perezakup": _z(0.0090, 0.0095)}}
     hr = _headroom(hz, price=0.0100)
     assert hr is not None and "width_pct" not in hr
-    assert _headroom_line({"headroom": hr}) == ""
+    assert _headroom_line({"headroom": hr}, 0.0100) == ""
 
 
 def test_no_zones_yields_none_not_zero() -> None:

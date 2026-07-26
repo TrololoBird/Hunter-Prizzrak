@@ -2,7 +2,7 @@
 
 The engine-native replacement for ``entry.py::ensure_prizrak_verdict``: sources its inputs from a
 :class:`MarketView` + :class:`MapBundle` instead of the row-dict, and calls the **unchanged** orchestrator
-functions (``build_prizrak_signals`` / ``compute_prizrak_structure`` / ``compute_interest_zones``) so the
+functions (``build_prizrak_signals`` / ``compute_prizrak_structure``) so the
 emitted candidates are byte-identical to today. The ~2450-line decision engine and all detectors are
 untouched — this is a data-source swap at the seam, not a strategy change.
 
@@ -24,7 +24,6 @@ from hunt_core.prizrak.liq_reconcile import compute_liquidation_factor
 from hunt_core.prizrak.models import PrizrakOutput
 from hunt_core.prizrak.orchestrator import (
     build_prizrak_signals,
-    compute_interest_zones,
     compute_prizrak_structure,
 )
 from hunt_core.view.models import MarketView
@@ -99,9 +98,9 @@ def assemble_prizrak(
     candidates = build_prizrak_signals(
         ohlcv_by_tf, price=price, cfg=cfg, marketcap_series=marketcap_series,
         dominance_changes=dominance_changes, liq_context=liq_context, abstain_sink=abstain,
+        symbol=view.symbol,
     )
     structure = compute_prizrak_structure(ohlcv_by_tf, cfg=cfg)
-    zones = compute_interest_zones(ohlcv_by_tf, price=price, cfg=cfg)
     # Multi-horizon ПОК-anchored setups (местный/недельный) for the Prizrak-post format; the spot
     # horizon is merged from native.spot_ladder in the formatter. Orchestrator/signal path untouched.
     from hunt_core.prizrak.setups import build_symbol_setups
@@ -123,7 +122,6 @@ def assemble_prizrak(
         signals=tuple(candidates),
         summary=summary,
         structure=structure,
-        interest_zones=zones,
         setups=setups,
         abstain=tuple(abstain),
         bias_liq_conflict=bias_liq_conflict,

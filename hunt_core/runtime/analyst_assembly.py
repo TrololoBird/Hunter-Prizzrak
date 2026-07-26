@@ -158,26 +158,43 @@ async def send_analyst_change_telegram(
     cycle_peers: list[NativeAnalystView] | None = None,
     lifecycle_event: str = "signal",
 ) -> bool:
-    """Send the deep-analysis Telegram card for an emitted setup (LONG/SHORT only)."""
+    """Send the deep-analysis Telegram card.
+
+    Два режима. **LONG/SHORT** — эмитированный сетап, проходит арбитра (кулдаун, качество).
+    **WAIT** — карта уровней и причина отказа; это ОСНОВНОЙ жанр автора, а не отсутствие
+    контента: разбор BTC 1ч от 2026-07-25 — 17 минут разметки и трёх причин, почему сделки нет.
+    Раньше здесь стоял ранний ``return False`` на всём, что не long/short, и карточку отказа
+    можно было увидеть только вручную через /signal. Гейт WAIT — смена ОТПЕЧАТКА карты зон
+    (``arbiter.wait_card_fingerprint``), потому что по времени она бы шла каждый тик.
+    """
     import html
 
     from hunt_core.deliver._sections import format_intraday_maps_telegram
     from hunt_core.deliver.confluence_grid import build_confluence_grid_native, format_grid_telegram
+    from hunt_core.prizrak.arbiter import (
+        evaluate_deep_delivery,
+        mark_wait_sent,
+        wait_card_fingerprint,
+        wait_card_ok,
+    )
 
     sym = _compact_symbol(native.view.symbol)
     _summ = native.prizrak.summary
     summary = _summ if isinstance(_summ, dict) else {}
     action = str(summary.get("action") or "wait").lower()
+    wait_fp = ""
     if action not in {"long", "short"}:
-        LOG.info("analyst_pinned_tg_skipped_wait", symbol=sym, action=action)
-        return False
-
-    from hunt_core.prizrak.arbiter import evaluate_deep_delivery
-
-    ok, blockers = evaluate_deep_delivery(symbol=sym, verdict=summary)
-    if not ok:
-        LOG.info("analyst_pinned_tg_skipped_arbiter", symbol=sym, blockers=blockers)
-        return False
+        _setups = getattr(native.prizrak, "setups", None)
+        wait_fp = wait_card_fingerprint(_setups if isinstance(_setups, dict) else {})
+        if not wait_card_ok(sym, wait_fp):
+            LOG.info("analyst_pinned_tg_skipped_wait", symbol=sym, action=action,
+                     reason="map_unchanged" if wait_fp else "no_zones")
+            return False
+    else:
+        ok, blockers = evaluate_deep_delivery(symbol=sym, verdict=summary)
+        if not ok:
+            LOG.info("analyst_pinned_tg_skipped_arbiter", symbol=sym, blockers=blockers)
+            return False
 
     price = float(native.view.last_price or 0)
     blocks: list[str] = []
@@ -224,7 +241,10 @@ async def send_analyst_change_telegram(
     blocks.append(format_row_freshness_footer(native, source="analyst tick"))
     result = await broadcaster.send_html("\n".join(blocks))
     if result.status == "sent":
-        LOG.info("analyst_pinned_tg_sent", symbol=sym, message_id=result.message_id, plane="deep")
+        if wait_fp:
+            mark_wait_sent(sym, wait_fp)
+        LOG.info("analyst_pinned_tg_sent", symbol=sym, message_id=result.message_id,
+                 plane="deep", kind="wait" if wait_fp else action)
         return True
     LOG.warning("analyst_pinned_tg_failed", symbol=sym, status=result.status, reason=result.reason)
     return False
@@ -287,6 +307,7 @@ async def analyst_pinned_loop(
         v2cfg = load_analyst_config()
         emitter = SignalEmitter()
         lifecycle_candidates: list[tuple[NativeAnalystView, Any, str]] = []
+        wait_candidates: list[NativeAnalystView] = []
         for sym in PINNED_SYMBOLS:
             if should_stop():
                 break
@@ -297,10 +318,17 @@ async def analyst_pinned_loop(
                     continue
                 # Lifecycle spine is the SOLE emission gate — dedup/cooldown/silence all live in
                 # process_lifecycle_tick. A7: one lifecycle candidate per Prizrak setup_kind.
-                for variant, kind in _prizrak_row_variants(native):
+                variants = _prizrak_row_variants(native)
+                for variant, kind in variants:
                     transition = emitter.preview_deep_row(variant)
                     if transition.event != "none":
                         lifecycle_candidates.append((variant, transition, kind))
+                # Символ без эмиссии — не «нечего сказать»: это карта уровней плюс причина отказа,
+                # основной жанр автора. Гейт (смена отпечатка карты) живёт в
+                # send_analyst_change_telegram, поэтому кандидат добавляется безусловно.
+                _s = native.prizrak.summary
+                if str((_s or {}).get("action") or "wait").lower() not in {"long", "short"}:
+                    wait_candidates.append(native)
             except Exception:
                 LOG.exception("analyst_pinned_loop_symbol_failed", symbol=sym)
 
@@ -333,6 +361,13 @@ async def analyst_pinned_loop(
                         transition=transition,
                     ):
                         mark_deep_sent(cooldown_key)
+        if send_telegram and broadcaster is not None and wait_candidates:
+            for native in wait_candidates:
+                try:
+                    await send_analyst_change_telegram(broadcaster, native)
+                except Exception:
+                    LOG.exception("analyst_pinned_wait_card_failed",
+                                  symbol=_compact_symbol(native.view.symbol))
         try:
             await asyncio.sleep(max(30.0, interval))
         except asyncio.CancelledError:

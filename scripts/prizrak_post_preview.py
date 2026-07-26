@@ -25,7 +25,6 @@ from hunt_core.prizrak.format_post import format_prizrak_post
 from hunt_core.prizrak.models import PrizrakOutput
 from hunt_core.prizrak.orchestrator import (
     build_prizrak_signals,
-    compute_interest_zones,
     compute_prizrak_structure,
 )
 from hunt_core.prizrak.setups import build_symbol_setups
@@ -96,7 +95,6 @@ def main() -> None:
     abstain: list[dict] = []
     signals = build_prizrak_signals(ohlcv, price=price, cfg=cfg, abstain_sink=abstain)
     summary = max(signals, key=lambda c: c.get("strength") or 0) if signals else None
-    zones = compute_interest_zones(ohlcv, price=price, cfg=cfg)
 
     spot_1w = asyncio.run(_fetch_spot_weekly(args.symbol))
     spot_ladder = (
@@ -110,7 +108,6 @@ def main() -> None:
         signals=tuple(signals),
         summary=summary,
         structure=structure,
-        interest_zones=zones,
         setups=setups,
         abstain=tuple(abstain),
     )

@@ -26,6 +26,7 @@ from typing import Any
 
 from hunt_core.prizrak.accumulation import find_accumulation_zones
 from hunt_core.prizrak.config import PrizrakConfig
+from hunt_core.prizrak.grid import zone_lines
 from hunt_core.prizrak.orchestrator import (
     _INTEREST_ZONE_MAX_WIDTH_PCT,
     _level_already_worked,
@@ -141,7 +142,15 @@ def _zone_view(
     # разбиения: измерено на LTC 40.78–45.59, где якорь гулял на 5.7%.
     stable = bool(info.get("poc_stable", True))
     poc_in = poc is not None and lo <= poc <= hi and stable
-    edge = poc if (poc_in and poc is not None) else (hi if side == "long" else lo)
+    # Ордерная сетка внутри полосы (grid.zone_lines). Ключевая линия — та, которую автор называет
+    # «ключевым уровнем» — вытесняет ПОК в роли якоря входа: замерено на его же боксе 17–18.07,
+    # где ПОК профиля лежит на 1.8% выше названной им ключевой. ПОК остаётся якорем только когда
+    # сетки нет (узкая полоса, мало баров структуры).
+    lines = zone_lines(raw_window, zone=z, band=(lo, hi), cfg=cfg)
+    key_px = next((float(ln["price"]) for ln in lines if ln.get("key")), None)
+    edge = key_px if key_px is not None else (
+        poc if (poc_in and poc is not None) else (hi if side == "long" else lo)
+    )
     flags = _course_flags(bars, level=edge, side=side)
     by_fact, reason = _fact_reason(flags, side=side, bias=bias, is_perezakup=False)
     return {
@@ -149,6 +158,7 @@ def _zone_view(
         "poc": (round(poc, 8) if (poc_in and poc is not None) else None),
         "poc_unstable": bool(poc is not None and lo <= poc <= hi and not stable),
         "touches": int(z.get("touches") or 0), "entry": round(edge, 8),
+        "lines": lines,
         "by_fact": by_fact, "fact_reason": reason, **flags,
     }
 
@@ -184,6 +194,11 @@ def _perezakup_view(
     if not lo < hi:
         return None
     stable = bool(info.get("poc_stable", True))
+    # На перезакупе ПОК ОСТАЁТСЯ якорем — это его первичный «перезакуп ПОК крупной структуры»
+    # (стр.30), и на крупной базе с одной модой ПОК и есть узел. Сетка тут показывает, как база
+    # дробится на ордера, но не переопределяет вход; переопределяет она его только у добора/шорта,
+    # где полоса «корявая» и выраженной моды нет.
+    lines = zone_lines(raw_window, zone=base, band=(lo, hi), cfg=cfg)
     anchor = poc if (poc is not None and lo <= poc <= hi and stable) else hi
     flags = _course_flags(bars, level=anchor, side="long")
     by_fact, reason = _fact_reason(flags, side="long", bias=bias, is_perezakup=True)
@@ -192,6 +207,7 @@ def _perezakup_view(
         "poc": (round(poc, 8) if (poc is not None and lo <= poc <= hi and stable) else None),
         "poc_unstable": bool(poc is not None and lo <= poc <= hi and not stable),
         "touches": int(base.get("touches") or 0), "entry": round(anchor, 8),
+        "lines": lines,
         "by_fact": by_fact, "fact_reason": reason, **flags,
     }
 
@@ -294,6 +310,89 @@ def _horizon_zones(
     return out
 
 
+# Насколько близко должны стоять якоря двух зон, чтобы это была ОДНА зона, увиденная на двух ТФ.
+# Тот же порог, по которому вотчер узнаёт свою зону между тиками (``zone_watch._MATCH_TOL_PCT``):
+# разные пороги здесь и там означали бы, что карта считает зоны одной, а состояние — двумя.
+_HORIZON_MATCH_TOL_PCT = 1.0
+
+
+def _anchor(z: dict[str, Any], *, side: str) -> float:
+    """Торгуемая цена зоны: ключевая линия → ПОК → кромка. Тот же порядок, что и в ``entry``."""
+    a = z.get("entry")
+    if isinstance(a, (int, float)) and float(a) > 0:
+        return float(a)
+    p = z.get("poc")
+    if isinstance(p, (int, float)) and float(p) > 0:
+        return float(p)
+    return float(z["hi"] if side == "long" else z["lo"])
+
+
+def _dedupe_horizons(horizons: dict[str, Any]) -> None:
+    """Одна и та же зона, найденная на нескольких ТФ, публикуется ОДИН раз — и тем сильнее.
+
+    Горизонты считаются независимыми прогонами ``find_accumulation_zones`` по независимым окнам,
+    поэтому уровень, живущий на 15м, 1ч и 4ч — то есть САМЫЙ сильный, — печатался тремя зонами с
+    чуть разными кромками и читался как три РАЗНЫЕ возможности вместо одного подтверждённого
+    уровня. Курс оценивает совпадение прямо: «сила уровня определяется ТФ и объёмом» (стр.22).
+
+    Побеждает БОЛЕЕ УЗКАЯ полоса — по ней и ставится лимит, и стоп по ней короче (то же правило,
+    что в ``zone_watch._dedupe``). ТФ вытесненных копий не теряются: они складываются в
+    ``confirm_tf``, и это единственное, что грид-дамп умел показывать, а карта зон — нет.
+
+    Мутирует ``horizons`` на месте: у карты один источник истины, и расхождение между тем, что
+    видит карточка, и тем, что видит вотчер, — ровно тот дефект, который чинил коммит f05cc1e.
+    """
+    kept: list[tuple[str, dict[str, Any]]] = []  # (kind, zone)
+    for hname, _tfs in _HORIZONS:
+        hz = horizons.get(hname)
+        if not isinstance(hz, dict):
+            continue
+        tf = str(hz.get("tf") or "")
+        for key, side in (("perezakup", "long"), ("dobor", "long"), ("short", "short")):
+            raw = hz.get(key)
+            zs = raw if isinstance(raw, list) else ([raw] if isinstance(raw, dict) else [])
+            survivors: list[dict[str, Any]] = []
+            for z in zs:
+                if not isinstance(z, dict):
+                    continue
+                a = _anchor(z, side=side)
+                width = float(z["hi"]) - float(z["lo"])
+                # Совпадение — это ТОЛЬКО пересечение полос при близких якорях, и только ВНУТРИ
+                # одного вида. Одного якоря мало: у 1д зоны 62232–62317 и у часовой 62533–63137
+                # якоря расходятся на 0.72%, но полосы не пересекаются вовсе — это два разных
+                # уровня, и узкая проглотила бы широкую. А разные виды нельзя слеплять и подавно:
+                # перезакуп это объёмная база, добор — полка внутри неё, и запись содержимого
+                # добора в ячейку перезакупа печатала бы «🟢 перезакуп» над чужими числами.
+                twin = next(
+                    (
+                        k for kind, k in kept
+                        if kind == key and _anchor(k, side=side) > 0
+                        and abs(a / _anchor(k, side=side) - 1.0) * 100.0 <= _HORIZON_MATCH_TOL_PCT
+                        and float(z["lo"]) <= float(k["hi"]) and float(z["hi"]) >= float(k["lo"])
+                    ),
+                    None,
+                )
+                if twin is None:
+                    z["confirm_tf"] = [tf] if tf else []
+                    survivors.append(z)
+                    kept.append((key, z))
+                    continue
+                # Дубль: узкая полоса вытесняет широкую, но ТФ обеих сохраняются.
+                seen = list(twin.get("confirm_tf") or [])
+                if tf and tf not in seen:
+                    seen.append(tf)
+                if width < (float(twin["hi"]) - float(twin["lo"])):
+                    z["confirm_tf"] = seen
+                    twin.clear()
+                    twin.update(z)
+                else:
+                    twin["confirm_tf"] = seen
+            if raw is not None:
+                hz[key] = survivors if isinstance(raw, list) else (survivors[0] if survivors else None)
+                if hz[key] is None or hz[key] == []:
+                    hz.pop(key, None)
+
+
 def _headroom(horizons: dict[str, Any], *, price: float) -> dict[str, Any] | None:
     """Ход до БЛИЖАЙШЕГО встречного уровня по всем горизонтам, вверх и вниз.
 
@@ -378,6 +477,7 @@ def build_symbol_setups(
             if hz is not None:
                 horizons[name] = hz
                 break  # first TF with usable zones wins for this horizon
+    _dedupe_horizons(horizons)
     out: dict[str, Any] = {"horizons": horizons, "price": float(price), "bias": bias}
     headroom = _headroom(horizons, price=float(price))
     if headroom is not None:

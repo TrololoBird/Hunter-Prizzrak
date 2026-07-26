@@ -203,67 +203,12 @@ def _touches_boundary(
     return abs(hi - boundary) <= tol or abs(lo - boundary) <= tol
 
 
-def count_range_touches_from_bars(
-    bars: list[tuple[float, float]],
-    *,
-    range_high: float,
-    range_low: float,
-    tolerance_pct: float = 0.003,
-) -> tuple[int, int, int]:
-    """Count bar touches within tolerance_pct of range_high / range_low."""
-    high_touches = 0
-    low_touches = 0
-    for hi, lo in bars:
-        if hi <= 0 or lo <= 0:
-            continue
-        if _touches_boundary(hi, lo, range_high, tolerance_pct=tolerance_pct):
-            high_touches += 1
-        if _touches_boundary(hi, lo, range_low, tolerance_pct=tolerance_pct):
-            low_touches += 1
-    return high_touches, low_touches, high_touches + low_touches
-
-
-def count_range_touches(
-    work: pl.DataFrame,
-    *,
-    range_high: float,
-    range_low: float,
-    tolerance_pct: float = 0.003,
-    lookback: int | None = None,
-) -> tuple[int, int, int]:
-    """Count OHLC bar touches within tolerance_pct of range boundaries (Phase 4C)."""
-    if work.is_empty() or not {"high", "low"}.issubset(work.columns):
-        return 0, 0, 0
-    if range_high <= 0 or range_low <= 0:
-        return 0, 0, 0
-
-    tail = work.tail(lookback) if lookback is not None else work
-    bars: list[tuple[float, float]] = []
-    for h, l in zip(
-        tail["high"].cast(pl.Float64, strict=False).to_list(),
-        tail["low"].cast(pl.Float64, strict=False).to_list(),
-        strict=False,
-    ):
-        hi = _as_optional_float(h)
-        lo = _as_optional_float(l)
-        if hi is not None and lo is not None and hi > 0 and lo > 0:
-            bars.append((hi, lo))
-    return count_range_touches_from_bars(
-        bars,
-        range_high=range_high,
-        range_low=range_low,
-        tolerance_pct=tolerance_pct,
-    )
-
-
 __all__ = [
     "VP_BUCKETS_DEFAULT",
     "VP_LOOKBACK_15M",
     "VP_LOOKBACK_1H",
     "VP_VALUE_AREA_PCT",
     "classify_poc_direction",
-    "count_range_touches",
-    "count_range_touches_from_bars",
     "volume_profile_levels",
     "volume_profile_with_direction",
 ]

@@ -94,6 +94,19 @@ def _detect_structure(
     # keeps the slice non-empty.
     hh_last = max(highs[-lookback:-1])
     ll_last = min(lows[-lookback:-1])
+    # СТРУКТУРУ ломает выход за её СВИНГ-экстремум, а не за максимум произвольного окна. Окно
+    # ``lookback_hh_ll`` фиксировано (20), а тиры нарезают 60/80/150 баров, так что на старшем тире
+    # «слом структуры» мог оказаться выходом за уровень, который экстремумом структуры не является
+    # вовсе. Свинг-пивоты в этой же функции уже посчитаны и используются для CHoCH — BOS берёт их
+    # же, когда они есть, и падает на оконный максимум, только если пивотов в окне не нашлось
+    # (тёплый старт). Тот же примитив, которым ``pp._leg_extreme`` меряет «последний хай» ноги.
+    _cut = len(bars) - lookback
+    _sh = [p for i, p in swing_highs if _cut <= i < len(bars) - 1]
+    _sl = [p for i, p in swing_lows if _cut <= i < len(bars) - 1]
+    if _sh:
+        hh_last = max(_sh)
+    if _sl:
+        ll_last = min(_sl)
     # Prior confirmed swing low/high (for CHoCH) — the most recent swing pivot
     # still within the lookback window, from the same fractal pivots above.
     cutoff = len(bars) - lookback

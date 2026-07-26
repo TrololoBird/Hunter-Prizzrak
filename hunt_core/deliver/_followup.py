@@ -198,9 +198,25 @@ def format_followup_telegram(followup: Any, row: dict[str, Any]) -> str:
                 d = "—"
             head = f"🔔 <b>ПОДХОД К ЗОНЕ · {sym}</b>"
             sub = f"{emoji} {kind} <code>{band}</code>{poc_s}{fact} — <b>{d}</b> до зоны"
+        # Ордерная сетка и R:P — те же числа, что в карточке. Без RR сообщение про зону, которую
+        # бот ВЕДЁТ, и про зону, отвергнутую по RR, выглядели одинаково.
+        lines_s = ""
+        raw_lines = payload.get("lines")
+        if isinstance(raw_lines, list) and len(raw_lines) > 1:
+            parts = []
+            for ln in raw_lines:
+                if isinstance(ln, (int, float)):
+                    parts.append(f"<code>{fmt_price(float(ln))}</code>")
+                elif isinstance(ln, dict) and isinstance(ln.get("price"), (int, float)):
+                    parts.append(f"<code>{fmt_price(float(ln['price']))}</code>")
+            if parts:
+                lines_s = "\n📥 ордера: " + " · ".join(parts)
+        rr_v = payload.get("rr")
+        rr_s = f" · R:R <code>{float(rr_v):.2f}</code>" if isinstance(rr_v, (int, float)) else ""
         return (
             f"{head}\n{sub}\n"
-            f"📍 Цена <code>{price}</code> · стоп <code>{stop_s}</code> (за структуру){tgt_line}\n"
+            f"📍 Цена <code>{price}</code> · стоп <code>{stop_s}</code> (за структуру){rr_s}"
+            f"{tgt_line}{lines_s}\n"
             f"<i>Зона карты · лимит вручную · не auto-trade</i>"
         )
 

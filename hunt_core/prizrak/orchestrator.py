@@ -36,6 +36,7 @@ from hunt_core.prizrak.config import LadderTF, PrizrakConfig, ScaleTier
 from hunt_core.prizrak.dominance import compute_dominance_factor
 from hunt_core.prizrak.liq_reconcile import compute_liquidation_factor
 from hunt_core.prizrak.figures import tag_squeeze_pattern
+from hunt_core.prizrak.grid import zone_lines
 from hunt_core.prizrak.marketcap import compute_marketcap_factor
 from hunt_core.prizrak.figures import FIGURE_WINDOW, _narrowing, _wedge
 from hunt_core.prizrak.pp import _pivots, detect_pereprior
@@ -60,6 +61,10 @@ _DOMINANCE_CHANGES: ContextVar["dict[str, float] | None"] = ContextVar(
 # Per-tick liquidation/DOM keys (WS-2M.2 bias↔liq reconciliation), set once by
 # ``build_prizrak_signals`` and read by ``_apply_confluence``. Same ambient-context pattern;
 # defaults to None (factor reads neutral, so map-less callers are unaffected).
+# Символ текущего тика — нужен фактору доминации, у которого знак члена BTC.D зависит от того,
+# BTC это или альт. Идёт контекстной переменной, как и остальные окружающие входы, чтобы не тащить
+# аргумент через десяток внутренних функций.
+_SYMBOL: ContextVar["str | None"] = ContextVar("prizrak_symbol", default=None)
 _LIQ_CONTEXT: ContextVar["dict[str, Any] | None"] = ContextVar(
     "prizrak_liq_context", default=None
 )
@@ -116,11 +121,6 @@ _FORWARD_DEEP_MAX_DIST_PCT = 12.0
 
 def _entry_band(anchor: float) -> tuple[float, float]:
     return round(anchor * (1 - _ENTRY_BAND_PCT), 8), round(anchor * (1 + _ENTRY_BAND_PCT), 8)
-
-
-# Course стр.30: small base (5м-1ч) → one order at the level; big base (1Д-1Н-1М) → split
-# the entry across "зону и уровень ПОК" (2-3 orders). 4h leans to the big-base behaviour.
-_SMALL_BASE_TFS = frozenset({"5m", "15m", "1h"})
 
 
 def _management_plan(direction: Literal["long", "short"]) -> list[str]:
@@ -181,38 +181,34 @@ def _rr_conservative(
     return round(reward / risk, 2)
 
 
-def _entry_orders(entry: float, *, poc: float | None, zone: dict[str, Any], tf: str) -> list[float]:
-    """The manual entry plan: order price levels per course стр.30/32.
+def _entry_orders(
+    entry: float,
+    *,
+    zone: dict[str, Any],
+    window: list[list[float]],
+    cfg: PrizrakConfig,
+) -> list[float]:
+    """The manual entry plan: order price levels per course стр.30/32 — «закуп делить на зону и на
+    уровень».
 
-    Small base → a single order at the level. Big base → the level plus the ПОК and/or
-    the nearest zone boundary, so the average ТВХ is spread across the зона ("закуп
-    делить на зону и на уровень"). Purely an annotation for manual placement; the
-    primary ``entry`` and its band are unchanged.
+    Лесенка = ордерная сетка самой структуры (:func:`grid.zone_lines`) плюс основной вход. Прежняя
+    версия строила её иначе — «уровень + ПОК + ближняя кромка», с разделением по ТФ на «большую» и
+    «маленькую» базу, — и её собственный докстринг признавал, что 4ч в курсовые корзины не попадает
+    и отнесён к большим НАШИМ выводом, притом на самом нагруженном ТФ. Он же признавал, что
+    настоящий критерий автора — РАЗМЕР базы, а ТФ лишь прокси, и что переводить это в числовой порог
+    без выборки значило бы выдумать правило.
 
-    ⚠️ **4ч курсом НЕ покрыт, и это НАШ вывод, а не стр.30.** Курс называет две корзины —
-    «большая база (1Д–1Н–1М) → закуп делить» и «маленькая (5м–1ч) → 1 ордер от POC», — а 4ч не
-    попадает ни в одну. Код относит его к большим (не-малый → сплит), и это не мелочь: замер по
-    12 символам показал, что 4ч эмитирует БОЛЬШЕ ВСЕХ ТФ (4 сигнала из 12), и 3 из 4 получают
-    лесенку из двух ордеров. То есть недокументированный вывод стоит на самом нагруженном пути.
-
-    Почему вывод оставлен именно таким: 4ч-накопление занимает дни-недели, то есть по СМЫСЛУ
-    («большая база») ближе к дневной корзине, чем к внутридневной 5м–1ч; и обоснование стр.32 —
-    «сквиз может забрать всю лесенку одним движением, средняя ТВХ безопаснее» — к нему применимо
-    в полной мере. Решение консервативное: разнести вход безопаснее, чем поставить один ордер.
-    Настоящий критерий у автора — РАЗМЕР базы, а ТФ лишь его прокси; переводить это в числовой
-    порог по ширине зоны без выборки значило бы выдумать правило, которого курс не даёт.
+    Теперь выборка есть — четыре размеченных им бокса из разбора BTC 1ч 2026-07-25 (см. grid.py), —
+    и порог не выдуман, а вытекает из данных: структура делится ровно тогда, когда в ней есть 2+
+    разделимых узла касаний (разнос ≥ ``grid._MIN_SEP_PCT``). Узкая внутридневная база их не даёт и
+    получает один ордер сама собой — то есть курсовое правило «маленькая база → 1 ордер от POC»
+    соблюдается без деления по ТФ. Двух ордерных сеток в модуле больше нет: карта зон и эмиссия
+    считают линии одним и тем же кодом.
     """
-    if str(tf).lower() in _SMALL_BASE_TFS:
-        return [round(entry, 8)]
-    levels = [entry]
-    if poc is not None and abs(float(poc) - entry) / max(entry, 1e-9) > _ENTRY_BAND_PCT:
-        levels.append(float(poc))
-    lo, hi = zone.get("lo"), zone.get("hi")
-    if len(levels) < 2 and lo is not None and hi is not None:
-        near_edge = float(lo) if abs(entry - float(lo)) <= abs(entry - float(hi)) else float(hi)
-        if abs(near_edge - entry) / max(entry, 1e-9) > _ENTRY_BAND_PCT:
-            levels.append(near_edge)
-    return sorted({round(x, 8) for x in levels})
+    lines = zone_lines(window, zone=zone if isinstance(zone, dict) else None, cfg=cfg)
+    levels = {round(float(ln["price"]), 8) for ln in lines if isinstance(ln, dict)}
+    levels.add(round(entry, 8))
+    return sorted(levels)
 
 
 def _tf_lookback_map(cfg: PrizrakConfig) -> dict[str, int]:
@@ -832,6 +828,18 @@ def _geometry_from_zone(
     if risk <= 0:
         _note_abstain("degenerate_stop", tf=min_tf, direction=direction, entry=entry, stop=stop)
         return None
+    # Широкий стоп за структуру — САМА ПО СЕБЕ причина отказа, а не просто большое число, которое
+    # потом чем-нибудь скомпенсируется дальней целью. Автор формулирует это прямо: «стоп-лосс должен
+    # стоять за всей этой структурой, а вся эта структура достаточно большая… большого смысла в этом
+    # нет» (BTC 1ч, 2026-07-25). Раньше такой сетап доходил до гейта R:R и мог его пройти — если
+    # впереди находилась достаточно далёкая цель, — то есть широкий риск «оправдывался» дальностью.
+    stop_dist_pct = risk / entry * 100.0
+    if stop_dist_pct > cfg.max_stop_distance_pct:
+        _note_abstain(
+            "stop_too_wide", tf=min_tf, direction=direction, entry=entry, stop=stop,
+            stop_dist_pct=round(stop_dist_pct, 2), max_pct=cfg.max_stop_distance_pct,
+        )
+        return None
     buffer_pct = round(cfg.stop_buffer_pct * 100, 2)
     # Rungs closer than a quarter of the risk (floored at 0.15% of entry for very
     # tight stops) describe one zone twice rather than two distinct targets.
@@ -901,13 +909,29 @@ def _base_summary(
         geo = _geometry_from_zone(direction=direction, entry=entry, ohlcv_by_tf=ohlcv_by_tf, cfg=cfg, swing_levels=swing_levels, min_tf=tf, zone=zone)
         if geo is None:
             return None  # no real structural target ahead on any timeframe — abstain, never fabricate one
+    rr_cons = _rr_conservative(
+        direction=direction, entry_lo=entry_lo, entry_hi=entry_hi,
+        stop=(geo or {}).get("stop"), tp1=(geo or {}).get("tp1"),
+    )
+    # ПОЛ R:R применяется и к ХУДШЕМУ заливу, а не только к якорной цене входа. Это ровно та
+    # дисциплина, которую вотчер зон уже соблюдает (``zone_watch._handoff``, замерено на живом SOL
+    # 2026-07-25: от низа полосы 1:4.38, от верха 1:0.17 при поле 2.0), а путь эмиссии — нет:
+    # широкая полоса входа проходила гейт по якорю и оказывалась убыточной на реалистичном заливе.
+    # Одна и та же сделка не может считаться торгуемой на одном пути и неторгуемой на другом.
+    if direction in ("long", "short") and rr_cons is not None and rr_cons < cfg.min_rr:
+        _note_abstain(
+            "rr_worst_fill_below_floor", tf=tf, direction=direction, rr=rr_cons,
+            min_rr=cfg.min_rr, entry=entry, stop=(geo or {}).get("stop"),
+            tp1=(geo or {}).get("tp1"),
+        )
+        return None
     return {
         "action": direction,
         "entry_lo": entry_lo,
         "entry_hi": entry_hi,
         "entry_orders": _entry_orders(
-            entry, poc=poc_info.get("poc") if isinstance(poc_info, dict) else None,
-            zone=zone if isinstance(zone, dict) else {}, tf=tf,
+            entry, zone=zone if isinstance(zone, dict) else {},
+            window=ohlcv_by_tf.get(tf) or [], cfg=cfg,
         ),
         "management_plan": _management_plan(direction) if direction in ("long", "short") else [],
         "stop": (geo or {}).get("stop"),
@@ -923,13 +947,7 @@ def _base_summary(
         # produced the field, so rr_cons was always 0 and the anti-fantasy cap was dead:
         # setups with an inflated rr_primary took the full rr_norm weight and crowded the
         # honest ones out of TOP-3. Now it is a real number.
-        "rr_conservative": _rr_conservative(
-            direction=direction,
-            entry_lo=entry_lo,
-            entry_hi=entry_hi,
-            stop=(geo or {}).get("stop"),
-            tp1=(geo or {}).get("tp1"),
-        ),
+        "rr_conservative": rr_cons,
         "strength": 0.5,
         "path": f"{setup_kind}_{direction}",
         "fragility": 0.5,
@@ -1161,24 +1179,37 @@ def _direction_has_slom(
     struct_by_tier: dict[str, dict[str, Any]],
     *,
     max_bar_offset: int = 5,
+    struct_by_tf: dict[str, dict[str, Any]] | None = None,
 ) -> bool:
     """Confirmed BOS/CHoCH slom in the candidate direction on macro or meso TF —
     the course condition that unlocks a counter-HTF-trend entry. The slom must have
     occurred on a level established within ``max_bar_offset`` bars (3–5 = recent,
     aligns with "для шортов нужен свежий слом структуры на МТФ").
+
+    Смотрит и ПО ТИРАМ, и ПО ТФ. Тиры сюда доносят не то, что кажется: ``_tier_structure``
+    возвращает ПЕРВЫЙ ТФ тира, где есть данные, поэтому ``meso`` это всегда 1ч (4ч не достигается
+    никогда), а ``macro`` — всегда 1д (1н тоже никогда). То есть «слом структуры на МТФ» — условие
+    самого курса для входа против старшего тренда — решался часовым сломом на 60-барном окне, а
+    4ч и 1н не разлочивали ничего. Голосование bias при этом считает 1н/1д/4ч/1ч отдельно
+    (``htf_bias['struct_by_tf']``), и этот словарь сюда просто не передавали.
+
+    Автор различает слом «ранний» и «основной» прямо («нет у нас никакого слома структуры, ни
+    раннего, ни основного» — BTC 1ч, 2026-07-25), и оба типа считаются: BOS/CHoCH здесь и
+    ``pp_true_*``/``pp_early_*`` в ``pp.detect_pereprior``.
     """
+    keys = ("bos_up", "choch_bull") if direction == "long" else ("bos_down", "choch_bear")
+
+    def _fresh(s: dict[str, Any]) -> bool:
+        return any(
+            s.get(k) and (s.get(f"{k}_bar_offset") or 99) <= max_bar_offset for k in keys
+        )
+
     for tier in ("macro", "meso"):
-        s = struct_by_tier.get(tier) or {}
-        if direction == "long":
-            if s.get("bos_up") and (s.get("bos_up_bar_offset") or 99) <= max_bar_offset:
-                return True
-            if s.get("choch_bull") and (s.get("choch_bull_bar_offset") or 99) <= max_bar_offset:
-                return True
-        if direction == "short":
-            if s.get("bos_down") and (s.get("bos_down_bar_offset") or 99) <= max_bar_offset:
-                return True
-            if s.get("choch_bear") and (s.get("choch_bear_bar_offset") or 99) <= max_bar_offset:
-                return True
+        if _fresh(struct_by_tier.get(tier) or {}):
+            return True
+    for s in (struct_by_tf or {}).values():
+        if isinstance(s, dict) and _fresh(s):
+            return True
     return False
 
 
@@ -1201,7 +1232,11 @@ def _htf_gate(
     aligned = (direction == "long" and bias == "long") or (direction == "short" and bias == "short")
     if aligned:
         return "bonus", 1.0 + cfg.htf_align_bonus, [f"htf_bias={bias}_aligned(+{cfg.htf_align_bonus:.2f})"]
-    if _direction_has_slom(direction, struct_by_tier, max_bar_offset=cfg.bos_max_bar_offset):
+    _sbt = htf_bias.get("struct_by_tf")
+    if _direction_has_slom(
+        direction, struct_by_tier, max_bar_offset=cfg.bos_max_bar_offset,
+        struct_by_tf=_sbt if isinstance(_sbt, dict) else None,
+    ):
         return "penalty", 1.0 - cfg.htf_oppose_penalty, [f"htf_bias={bias}_opposed_but_slom(-{cfg.htf_oppose_penalty:.2f})"]
     return "veto", 0.0, [f"htf_bias={bias}_opposed_no_slom(veto)"]
 
@@ -1245,7 +1280,9 @@ def _apply_confluence(
     # Bounded [0.85,1.15], non-gating; reads the per-tick 24h changes from ambient context;
     # neutral (1.0) when disabled or unavailable, so strength is unchanged unless enabled AND
     # data exists.
-    dom = compute_dominance_factor(_DOMINANCE_CHANGES.get(), direction=direction, cfg=cfg)
+    dom = compute_dominance_factor(
+        _DOMINANCE_CHANGES.get(), direction=direction, cfg=cfg, symbol=_SYMBOL.get()
+    )
     dom_mult = dom["multiplier"]
 
     # bias ↔ liquidation/DOM reconciliation (WS-2M.2): reconcile this candidate's structural
@@ -1438,6 +1475,16 @@ def _zone_edge_candidate(
     # двух сторон = накопление НА уровне, вход только на тесте нового накопления
     # после выхода из пилы. Abstain (пила_на_уровне).
     if detect_level_saw(bars, level=catalyst):
+        _note_abstain("level_saw", tf=tf, direction=direction, entry=catalyst)
+        return None
+
+    # Ф3 (курс стр.31): отработанный уровень блокирует ЛИМИТНЫЙ вход — вход только по факту слома
+    # МТФ. У ``_zone_candidate`` эта проверка стояла всегда, а здесь её не было, хотя обе ветки
+    # эмитируют один и тот же лимит от уровня; пила и пробой при этом проверялись в обеих, что и
+    # выдаёт пропуск за случайный. Кромочная ветка — самая частая на живых данных (цена внутри
+    # бокса у края), то есть отсутствие блока стоило дороже всего именно здесь.
+    if _level_already_worked(bars, level=catalyst, direction=direction) >= 1:
+        _note_abstain("level_already_worked", tf=tf, direction=direction, entry=catalyst)
         return None
 
     poc_info = zone_poc(ohlcv, zone=zone, cfg=cfg)
@@ -1519,7 +1566,12 @@ def _zone_candidate(
         return None
     lo, hi = zone["lo"], zone["hi"]
     if lo <= price <= hi:
-        return None  # course: don't trade the middle of the range — abstain, not weak-emit
+        # course: don't trade the middle of the range — abstain, not weak-emit.
+        # Причина ЗАПИСЫВАЕТСЯ: без этого символ, заглушённый серединой диапазона, давал пустой
+        # список abstain, и карточка молчала без объяснения — ровно тот отказ, ради которого
+        # _ABSTAIN_SINK и заводился.
+        _note_abstain("mid_range", tf=tf, direction="", price=price, zone_lo=lo, zone_hi=hi)
+        return None
 
     poc_info = zone_poc(ohlcv, zone=zone, cfg=cfg)
     setup_kind = _TIER_SETUP_KIND[tier_name]
@@ -1537,6 +1589,7 @@ def _zone_candidate(
     trap = classify_level_touch(bars, level=catalyst, side=direction, cfg=cfg)
     trap_evidence: list[str] = []
     if trap.get("kind") == "proboy":
+        _note_abstain("level_proboy", tf=tf, direction=direction, entry=catalyst)
         return None
     if trap.get("kind") == "prokol":
         trap_evidence.append("прокол_level_held")
@@ -1545,6 +1598,7 @@ def _zone_candidate(
     # накопление НА уровне — от такого уровня не входим, ждём выхода из пилы и вход
     # на тесте нового накопления. Abstain (пила_на_уровне).
     if detect_level_saw(bars, level=catalyst):
+        _note_abstain("level_saw", tf=tf, direction=direction, entry=catalyst)
         return None
 
     # Ф3 (курс стр.31/стр.26): «отработка на 1 касание → уровень УДАЛЯЕМ, лимитными
@@ -1555,6 +1609,7 @@ def _zone_candidate(
     # the earlier soft downgrade (−0.15/касание), which still let the limit emit —
     # something the course explicitly forbids.
     if _level_already_worked(bars, level=catalyst, direction=direction) >= 1:
+        _note_abstain("level_already_worked", tf=tf, direction=direction, entry=catalyst)
         return None
 
     swing_levels = _extract_swing_levels(struct_by_tier, direction=direction, entry=catalyst, tf=tf)
@@ -2253,6 +2308,7 @@ def build_prizrak_signals(
     dominance_changes: dict[str, float] | None = None,
     liq_context: dict[str, Any] | None = None,
     abstain_sink: list[dict[str, Any]] | None = None,
+    symbol: str | None = None,
 ) -> list[dict[str, Any]]:
     """0..N independent ScenarioVerdict-summary-compatible signals for one tick.
 
@@ -2280,6 +2336,7 @@ def build_prizrak_signals(
     dom_token = _DOMINANCE_CHANGES.set(dominance_changes)
     liq_token = _LIQ_CONTEXT.set(liq_context)
     abstain_token = _ABSTAIN_SINK.set(abstain_sink)
+    sym_token = _SYMBOL.set(symbol)
     try:
         return _build_prizrak_signals_inner(ohlcv_by_tf, price=price, cfg=cfg)
     finally:
@@ -2287,6 +2344,7 @@ def build_prizrak_signals(
         _DOMINANCE_CHANGES.reset(dom_token)
         _LIQ_CONTEXT.reset(liq_token)
         _ABSTAIN_SINK.reset(abstain_token)
+        _SYMBOL.reset(sym_token)
 
 
 def _build_prizrak_signals_inner(
@@ -2547,6 +2605,22 @@ def compute_prizrak_structure(
             if s:
                 intraday_by_tf[tf] = s
     all_by_tf = {**struct_by_tf, **intraday_by_tf}
+    # РАННИЙ и ОСНОВНОЙ слом — словарь самого автора: «нет у нас никакого слома структуры, ни
+    # раннего, ни основного» (BTC 1ч, 2026-07-25). BOS/CHoCH этого различия не знают, оно живёт
+    # только в ``detect_pereprior`` (``pp_early_*`` / ``pp_true_*``) и до сих пор кормило один лишь
+    # путь ПП-кандидата — то есть карточка не могла назвать слом так, как называет его он.
+    # Считается на тех же 4ч/1ч, которые печатает строка слома, и только на них.
+    for tf in ("4h", "1h"):
+        raw_tf = ohlcv_by_tf.get(tf)
+        if not raw_tf or tf not in all_by_tf:
+            continue
+        bars_tf = bars_from_ohlcv(raw_tf[-_tf_lookback_map(cfg).get(tf, 120):])
+        if not bars_tf:
+            continue
+        try:
+            all_by_tf[tf] = {**all_by_tf[tf], **detect_pereprior(bars_tf)}
+        except Exception:  # noqa: BLE001 — структура не должна падать из-за доп-детектора
+            continue
     return {
         "struct_by_tier": struct_by_tier,
         "htf_bias": {k: v for k, v in htf_bias.items() if k != "struct_by_tf"},

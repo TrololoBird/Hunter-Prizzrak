@@ -160,6 +160,17 @@ def _zone_edges(setups: dict[str, Any], ladder: dict[str, Any] | None = None
                 poc = z.get("poc")
                 out.append((lo, hi, float(poc) if isinstance(poc, (int, float)) else None,
                             f"{hname}/{key} {hz.get('tf')}"))
+                # Ордерные линии внутри зоны — точечные уровни, ровно та форма, в которой автор и
+                # публикует разметку. Считаются как отдельные кандидаты, иначе попадание в линию
+                # неотличимо от «накрыт полосой», а разница между ними и есть локализация.
+                for ln in (z.get("lines") or []):
+                    if not isinstance(ln, dict):
+                        continue
+                    px = ln.get("price")
+                    if not isinstance(px, (int, float)) or float(px) <= 0:
+                        continue
+                    tag = "линия★" if ln.get("key") else "линия"
+                    out.append((float(px), float(px), None, f"{hname}/{key} {hz.get('tf')} {tag}"))
     return out
 
 
@@ -188,7 +199,8 @@ def _match(level: float, zones: list[tuple[float, float, float | None, str]], to
             d = abs(level / c - 1.0) * 100.0
             if d < best[2]:
                 # знак: >0 значит НАША кромка ВЫШЕ его уровня, <0 — ниже
-                best = (d <= tol_pct, tag, d, (c / level - 1.0) * 100.0, "кромка/ПОК")
+                kind = "линия★" if "линия★" in tag else ("линия" if "линия" in tag else "кромка/ПОК")
+                best = (d <= tol_pct, tag, d, (c / level - 1.0) * 100.0, kind)
     if best[0] and best[2] <= tol_pct:
         return best
     if hold is not None:
@@ -232,11 +244,15 @@ async def main() -> None:
             setups = build_symbol_setups(raw, price=price, cfg=CFG, structure=None)
             ladder = await spot_weekly_ladder_native(sym, price=price, spot=spot_eng)
             zones = _zone_edges(setups, ladder)
-            tot_zones += len(zones)
+            # Считаем ПОЛОСЫ, а не всех кандидатов: линии сетки — это разметка ВНУТРИ уже
+            # посчитанной зоны, и складывать их с зонами значило бы объявить ростом избытка ровно
+            # ту детализацию, ради которой сетка и делалась.
+            bands = [z for z in zones if "линия" not in z[3]]
+            tot_zones += len(bands)
             # Ширина зоны — вторая метрика, без которой recall врёт. Сужение зоны при СОХРАНЁННОМ
             # покрытии его уровня recall не видит вообще, а это и есть выигрыш: точнее вход, честнее
             # RR. Измерено на правке value area — 35% боксов сузились на медианные 31%, recall 54→54.
-            widths.extend((hi / lo - 1.0) * 100.0 for lo, hi, _p, _t in zones if hi > lo > 0)
+            widths.extend((hi / lo - 1.0) * 100.0 for lo, hi, _p, _t in bands if hi > lo > 0)
 
             hits = 0
             misses: list[str] = []
@@ -252,7 +268,7 @@ async def main() -> None:
             tot_lvl += len(case["levels"])
             pct = hits / len(case["levels"]) * 100.0
             print(f"\n{sym:18s} [{case['src']}]  цена {price:g}")
-            print(f"  recall {hits}/{len(case['levels'])} = {pct:.0f}%   зон в карте: {len(zones)}")
+            print(f"  recall {hits}/{len(case['levels'])} = {pct:.0f}%   зон: {len(bands)}  ·  линий сетки: {len(zones) - len(bands)}")
             for m in misses:
                 print(f"    ✗ {m}")
     finally:

@@ -17,7 +17,6 @@ from __future__ import annotations
 from typing import Any
 
 from hunt_core.deliver._context_lines import format_liq_magnet_line
-from hunt_core.deliver.zone_confluence import score_zone_confluence
 from hunt_core.maps.liquidation import (
     liq_is_synthetic,
     realized_liq_clusters,
@@ -96,24 +95,6 @@ def test_realized_magnet_still_is_a_downward_target() -> None:
     targets, factors = collect_downward_targets({"market": _market(synthetic=False)}, _PRICE)
     assert "long_liq_magnet" in factors
     assert 61_900.0 in targets
-
-
-# --- consumer: deliver/zone_confluence.py (confluence votes) --------------------
-
-def _confluence_factors(*, synthetic: bool) -> list[str]:
-    conf = score_zone_confluence(
-        lo=61_850.0, hi=61_950.0, side="long",
-        market=_market(synthetic=synthetic), maps={}, price=_PRICE,
-    )
-    return list(conf["factors"])
-
-
-def test_synthetic_magnet_casts_no_confluence_vote() -> None:
-    assert not any("ликв" in f for f in _confluence_factors(synthetic=True))
-
-
-def test_realized_magnet_still_casts_a_confluence_vote() -> None:
-    assert any("ликв" in f for f in _confluence_factors(synthetic=False))
 
 
 # --- consumer: toolkit/manipulation_fusion.py (ignition factor, display-only) ---

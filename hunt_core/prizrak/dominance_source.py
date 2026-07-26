@@ -181,6 +181,15 @@ def read_cached_changes_24h() -> dict[str, float] | None:
     except Exception:
         return None
     out = {"btc_d_change_24h": round(btc_d_change, 4), "total3_change_24h": round(total3_change, 4)}
+    # ETH.D — снимок его несёт с самого начала (``_parse_global``), а дельту не считал никто, так
+    # что ``format_post`` читал ключ ``eth_d_change_24h`` без единого продюсера: ветка была мертва
+    # всегда, и ETH.D печатался голым уровнем рядом с BTC.D и стейблами, у которых дельта есть.
+    # Именно ETH.D автор и проговаривает («догоняющее движение на разгрузке Доминации ETH»).
+    try:
+        if now.get("eth_d") is not None and prior.get("eth_d") is not None:
+            out["eth_d_change_24h"] = round(float(now["eth_d"]) - float(prior["eth_d"]), 4)
+    except (TypeError, ValueError):
+        pass
     try:
         if now.get("stable_cd") is not None and prior.get("stable_cd") is not None:
             out["stable_cd_change_24h"] = round(float(now["stable_cd"]) - float(prior["stable_cd"]), 4)

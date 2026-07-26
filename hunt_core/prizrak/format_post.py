@@ -24,6 +24,7 @@ import html
 from typing import TYPE_CHECKING, Any
 
 from hunt_core.deliver._labels import fmt_price
+from hunt_core.prizrak.orchestrator import _INTEREST_ZONE_MAX_WIDTH_PCT
 
 if TYPE_CHECKING:
     from hunt_core.prizrak.build import AnalystReport
@@ -69,6 +70,46 @@ def _band(z: dict[str, Any]) -> str:
     return f"<code>{fmt_price(lo)}–{fmt_price(hi)}</code>"
 
 
+def _confirm_tag(z: dict[str, Any]) -> str:
+    """``(1ч+4ч)`` — на скольких ТФ найдена та же зона. Курс: «сила уровня определяется ТФ и
+    объёмом» (стр.22). До дедупа такой уровень печатался несколькими зонами и читался как
+    несколько разных возможностей, а не как один подтверждённый."""
+    tfs = [str(t) for t in (z.get("confirm_tf") or []) if t]
+    return f" <i>({'+'.join(tfs)})</i>" if len(tfs) > 1 else ""
+
+
+def _touch_tag(z: dict[str, Any]) -> str:
+    """``×N`` касаний зоны. Курс меряет силу уровня объёмом и ТФ (стр.22), и код сам ранжирует зоны
+    по касаниям (``_plan_line``) — но печатал их одинаково, так что зона с 4 касаниями и зона с 204
+    были для читателя неразличимы."""
+    t = int(z.get("touches") or 0)
+    return f" ×{t}" if t > 1 else ""
+
+
+def _grid_str(z: dict[str, Any]) -> str:
+    """Ордерная сетка зоны: 2–4 линии структуры, ключевая — жирная со звездой.
+
+    Так автор и публикует зону: из одного бокса 17–18.07 он вывел четыре линии и одну назвал
+    «ключевым уровнем всей этой корявой ликвидности» (BTC 1ч, 2026-07-25, 09:38). Полоса остаётся
+    рядом — она граница структуры, а торгуются линии."""
+    raw = z.get("lines")
+    if not isinstance(raw, list) or len(raw) < 2:
+        return ""
+    parts: list[str] = []
+    for ln in raw:
+        if not isinstance(ln, dict):
+            continue
+        px = _num(ln.get("price"))
+        if px is None:
+            continue
+        t = int(ln.get("touches") or 0)
+        s = f"<code>{fmt_price(px)}</code>"
+        if ln.get("key"):
+            s = f"★<b>{s}</b>"
+        parts.append(s + (f"×{t}" if t > 1 else ""))
+    return " · ".join(parts)
+
+
 def _perezakup_line(pk: dict[str, Any]) -> str:
     poc = _num(pk.get("poc"))
     poc_s = f" (ПОК <code>{fmt_price(poc)}</code>)" if poc is not None else ""
@@ -76,18 +117,28 @@ def _perezakup_line(pk: dict[str, Any]) -> str:
     # предвидит: «до POC может не дойти» (стр.30), поэтому там и 2–3 ордера вместо одного.
     if pk.get("poc_unstable"):
         poc_s = " (ПОК <i>неустойчив — профиль двугорбый</i>)"
-    return f"🟢 перезакуп {_band(pk)}{poc_s}{_fact_tag(pk)}"
+    grid = _grid_str(pk)
+    tail = f"\n   ордера: {grid}" if grid else ""
+    return f"🟢 перезакуп {_band(pk)}{poc_s}{_touch_tag(pk)}{_confirm_tag(pk)}{_fact_tag(pk)}{tail}"
 
 
-def _rung_line(emoji: str, label: str, rungs: list[dict[str, Any]]) -> str:
-    bands = " · ".join(_band(z) for z in rungs)
-    fact = " · <i>по факту</i>" if any(z.get("by_fact") for z in rungs) else ""
-    return f"{emoji} {label} {bands}{fact}"
+def _rung_line(emoji: str, label: str, rungs: list[dict[str, Any]]) -> list[str]:
+    """Одна СТРОКА НА СТУПЕНЬ, а не все ступени в одну строку.
+
+    Раньше три добора печатались как «🟡 добор A–B · C–D · E–F», и приписать ступени её сетку было
+    физически некуда. Автор публикует по строке на уровень; сетка внутри ступени — продолжение той
+    же строки."""
+    out: list[str] = []
+    for z in rungs:
+        grid = _grid_str(z)
+        tail = f"\n   ордера: {grid}" if grid else ""
+        out.append(f"{emoji} {label} {_band(z)}{_touch_tag(z)}{_confirm_tag(z)}{_fact_tag(z)}{tail}")
+    return out
 
 
-def _targets_line(vals: list[Any]) -> str:
+def _targets_line(vals: list[Any], *, label: str = "💰 цели") -> str:
     inner = " · ".join(f"<code>{fmt_price(_num(v))}</code>" for v in vals if _num(v) is not None)
-    return f"💰 цели: {inner}" if inner else ""
+    return f"{label}: {inner}" if inner else ""
 
 
 def _first_opposing(setups: dict[str, Any], *, entry: float, direction: str) -> float | None:
@@ -113,6 +164,34 @@ def _first_opposing(setups: dict[str, Any], *, entry: float, direction: str) -> 
     return best
 
 
+def _plan_zone(setups: dict[str, Any], price: float) -> dict[str, Any] | None:
+    """Зона закупа плана — сильнейшая по касаниям лонговая полоса ПОД ценой.
+
+    Вынесена из ``_plan_line``, потому что её же ширину печатает строка линеек: у автора это две
+    РАЗНЫЕ величины, и обе он меряет линейкой на графике (разбор BTC 1ч 2026-07-25) — ход внутри
+    коридора и толщина самой зоны входа."""
+    best: tuple[float, dict[str, Any]] | None = None
+    for hz in (setups.get("horizons") or {}).values():
+        if not isinstance(hz, dict):
+            continue
+        for kind in ("perezakup", "dobor"):
+            raw = hz.get(kind)
+            zs = raw if isinstance(raw, list) else ([raw] if isinstance(raw, dict) else [])
+            for z in zs:
+                if not isinstance(z, dict):
+                    continue
+                try:
+                    lo, hi = float(z["lo"]), float(z["hi"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if hi >= price or lo <= 0:
+                    continue  # не «закуп ниже», а зона вокруг цены
+                touches = float(z.get("touches") or 0)
+                if best is None or touches > best[0]:
+                    best = (touches, z)
+    return best[1] if best is not None else None
+
+
 def _plan_line(setups: dict[str, Any], price: float, market: dict[str, Any]) -> str:
     """Строка плана в форме его разборов: ближайшая поддержка · сопротивление · зона закупа.
 
@@ -132,27 +211,24 @@ def _plan_line(setups: dict[str, Any], price: float, market: dict[str, Any]) -> 
             bits.append(f"поддержка <code>{fmt_price(float(dn))}</code>")
         if up is not None:
             bits.append(f"сопротивление <code>{fmt_price(float(up))}</code>")
-    # Зона закупа — сильнейшая лонговая полоса под ценой: он берёт ту, где стоит объём.
-    best: tuple[float, float, float] | None = None
-    for hz in (setups.get("horizons") or {}).values():
-        if not isinstance(hz, dict):
-            continue
-        for kind in ("perezakup", "dobor"):
-            raw = hz.get(kind)
-            zs = raw if isinstance(raw, list) else ([raw] if isinstance(raw, dict) else [])
-            for z in zs:
-                if not isinstance(z, dict):
-                    continue
-                try:
-                    lo, hi = float(z["lo"]), float(z["hi"])
-                except (KeyError, TypeError, ValueError):
-                    continue
-                if hi >= price:
-                    continue  # не «закуп ниже», а зона вокруг цены
-                touches = float(z.get("touches") or 0)
-                if best is None or touches > best[0]:
-                    best = (touches, lo, hi)
-    if best is not None and tight:
+    zone = _plan_zone(setups, price)
+    best = (0.0, float(zone["lo"]), float(zone["hi"])) if zone is not None else None
+    key_px: float | None = None
+    if zone is not None:
+        key_ln = next(
+            (ln for ln in (zone.get("lines") or []) if isinstance(ln, dict) and ln.get("key")), None
+        )
+        key_px = _num(key_ln.get("price")) if key_ln is not None else None
+    if key_px is not None and best is not None:
+        # Ключевая линия и есть та самая «точка с акцентом», отсутствие которой он называет причиной
+        # отказа: «нет никакого уровня, которому можно дать какой-то определённый акцент, чтобы на
+        # него ориентироваться». Пока модуль её не считал, тесный коридор оставлял только совет
+        # «брать весь диапазон». Теперь она есть — и печатается ТВХ, а диапазон остаётся рядом.
+        bits.append(
+            f"ТВХ ★<code>{fmt_price(key_px)}</code> в диапазоне "
+            f"<code>{fmt_price(best[1])}</code>–<code>{fmt_price(best[2])}</code>"
+        )
+    elif best is not None and tight:
         # Тесный коридор и «закуп здесь» — взаимоисключающие утверждения, а карточка печатала их
         # рядом. Разбор BTC 2026-07-25 показывает, что автор в ровно этой ситуации говорит
         # противоположное: «нет никакого уровня, которому можно дать акцент», «нету понятной
@@ -187,15 +263,19 @@ def _horizon_block(title: str, hz: dict[str, Any]) -> list[str]:
         lines.append(_perezakup_line(pk))
     dobor = hz.get("dobor")
     if isinstance(dobor, list) and dobor:
-        lines.append(_rung_line("🟡", "добор", dobor))
+        lines.extend(_rung_line("🟡", "добор", dobor))
     short = hz.get("short")
     if isinstance(short, list) and short:
-        lines.append(_rung_line("🔴", "шорт", short))
-    targets = hz.get("long_targets") or hz.get("short_targets")
-    if isinstance(targets, list) and targets:
-        tl = _targets_line(targets)
-        if tl:
-            lines.append(tl)
+        lines.extend(_rung_line("🔴", "шорт", short))
+    # Обе стороны, а не первая непустая. `long_targets or short_targets` выбрасывало цели шорта на
+    # любом горизонте, где есть и лонговые ступени, и шортовые — а `setups._horizon_zones`
+    # заполняет оба ключа. Читатель видел 🔴 шорт-ступени, под которыми стоят «💰 цели» ВЫШЕ цены.
+    for key, label in (("long_targets", "💰 цели лонга"), ("short_targets", "💰 цели шорта")):
+        vals = hz.get(key)
+        if isinstance(vals, list) and vals:
+            tl = _targets_line(vals, label=label)
+            if tl:
+                lines.append(tl)
     return lines if len(lines) > 1 else []
 
 
@@ -236,7 +316,11 @@ def _deep_horizons(ladder: dict[str, Any], price: float) -> list[str]:
         lv for lv in (ladder.get("below") or [])
         if isinstance(lv, dict) and _num(lv.get("price")) is not None
     ]
-    if price <= 0 or not below:
+    above_any = [
+        lv for lv in (ladder.get("above") or [])
+        if isinstance(lv, dict) and _num(lv.get("price")) is not None
+    ]
+    if price <= 0 or (not below and not above_any):
         return []
     near = [lv for lv in below if _SNIPER_BAND_HI * price <= float(lv["price"]) < _NEAR_BAND_HI * price]
     sniper = [lv for lv in below if _SPOT_BAND_HI * price <= float(lv["price"]) < _SNIPER_BAND_HI * price]
@@ -244,13 +328,17 @@ def _deep_horizons(ladder: dict[str, Any], price: float) -> list[str]:
     atl = _num(ladder.get("atl"))
     out: list[str] = []
 
-    def _horizon(title: str, emoji: str, lvls: list[dict[str, Any]], *, tail: str = "") -> None:
+    def _horizon(title: str, emoji: str, lvls: list[dict[str, Any]], *, tail: str = "",
+                 ascending: bool = False) -> None:
         if not lvls and not tail:
             return
         lines = [f"<b>{title}</b>"]
         if lvls:
             top_t = max(int(lv.get("touches") or 0) for lv in lvls)
-            ordered = sorted(lvls, key=lambda lv: -float(lv["price"]))[:6]
+            # Срез в 6 штук обязан начинаться с БЛИЖАЙШЕЙ к цене ступени, иначе он выбрасывает
+            # именно те уровни, до которых цена дойдёт первыми. Снизу ближайшая — самая высокая,
+            # сверху — самая низкая, поэтому направление сортировки зависит от стороны.
+            ordered = sorted(lvls, key=lambda lv: float(lv["price"]) * (1 if ascending else -1))[:6]
             parts = " · ".join(
                 _lvl_str(lv, strong=(top_t > 1 and int(lv.get("touches") or 0) == top_t))
                 for lv in ordered
@@ -275,6 +363,28 @@ def _deep_horizons(ladder: dict[str, Any], price: float) -> list[str]:
     _horizon(f"Снайпер · {scope}", "🎯", sniper)
     atl_tail = f"  ·  ATL <code>{fmt_price(atl)}</code>" if atl is not None else ""
     _horizon("Спот · накопление", "🟢", spot, tail=atl_tail)
+
+    # ── ВЕРХ лестницы ────────────────────────────────────────────────────────────────────────
+    # ``structure.spot_weekly_ladder`` возвращает ``above`` и ``ath`` с самого начала, платит за них
+    # фетч SpotEngine каждый deep-тик — и карточка читала только ``below``/``atl``. То есть
+    # макро-сопротивления у неё не было ВООБЩЕ, и блок «Зоны интереса» был смещён в лонг целиком.
+    # Автор держит верх наравне с низом: на кадре f_0241 разбора BTC 1ч от 2026-07-25 при полном
+    # отдалении видны 15 его линий выше цены (95 303,7 · 88 195,0 · … · 68 590,2), невидимых на
+    # рабочем зуме. Полосы зеркальны нижним: те же доли цены, взятые обратными множителями.
+    above = [
+        lv for lv in (ladder.get("above") or [])
+        if isinstance(lv, dict) and _num(lv.get("price")) is not None
+    ]
+    near_up = [lv for lv in above if price < float(lv["price"]) < price / _SNIPER_BAND_HI]
+    far_up = [
+        lv for lv in above if price / _SNIPER_BAND_HI <= float(lv["price"]) < price / _SPOT_BAND_HI
+    ]
+    top_up = [lv for lv in above if float(lv["price"]) >= price / _SPOT_BAND_HI]
+    ath = _num(ladder.get("ath"))
+    ath_tail = f"  ·  ATH <code>{fmt_price(ath)}</code>" if ath is not None else ""
+    _horizon(f"Сверху · {scope}", "🔴", near_up, ascending=True)
+    _horizon(f"Дальше сверху · {scope}", "🔴", far_up, ascending=True)
+    _horizon("Историч. максимумы", "🔴", top_up, tail=ath_tail, ascending=True)
     return out
 
 
@@ -287,19 +397,39 @@ def _deep_horizons(ladder: dict[str, Any], price: float) -> list[str]:
 _TIGHT_HEADROOM_PCT = 4.0
 
 
-def _headroom_line(setups: dict[str, Any]) -> str:
-    """Строка коридора между ближайшими встречными уровнями, или пусто, если мерить не по чему."""
+def _headroom_line(setups: dict[str, Any], price: float) -> str:
+    """Две линейки автора, а не одна.
+
+    На разборе BTC 1ч (2026-07-25) он дважды достаёт инструмент измерения и получает ДВЕ разные
+    величины, которые карточка раньше сводила в одну строку «коридор … тесно»:
+
+    * ``820,5 (1,31%) · Бары: 82`` — размах «корявой» зоны, которую пришлось бы торговать целиком.
+      Это причина отказа: «нету понятной нормальной точки входа, с которой можно работать»;
+    * ``108,5 (0,17%) · Бары: -7`` между 62 038,4 и 62 146,8 — толщина его зоны BUY. Тут узко —
+      значит хорошо: лимит ставится точно. (В транскрипте это прозвучало как «17% движения» —
+      оговорка, кадр f_0139 показывает 0,17%.)
+
+    Коридор между встречными уровнями — третья величина, из разбора ASTR («процент движения между
+    уровнями слишком небольшой»), и она остаётся. Возвращает пусто, когда мерить не по чему."""
     hr = setups.get("headroom") if isinstance(setups, dict) else None
-    if not isinstance(hr, dict):
-        return ""
-    lo, hi, width = hr.get("down_price"), hr.get("up_price"), hr.get("width_pct")
-    if lo is None or hi is None or not isinstance(width, int | float):
-        return ""  # односторонний коридор — не коридор; молчим, а не печатаем половину
-    tight = " · <b>тесно</b>" if float(width) < _TIGHT_HEADROOM_PCT else ""
-    return (
-        f"📏 коридор <code>{fmt_price(float(lo))}</code>–<code>{fmt_price(float(hi))}</code>"
-        f" = {float(width):.2f}%{tight}"
-    )
+    bits: list[str] = []
+    if isinstance(hr, dict):
+        lo, hi, width = hr.get("down_price"), hr.get("up_price"), hr.get("width_pct")
+        # односторонний коридор — не коридор; молчим, а не печатаем половину
+        if lo is not None and hi is not None and isinstance(width, int | float):
+            tight = " · <b>тесно</b>" if float(width) < _TIGHT_HEADROOM_PCT else ""
+            bits.append(
+                f"ход <code>{fmt_price(float(lo))}</code>–<code>{fmt_price(float(hi))}</code>"
+                f" = {float(width):.2f}%{tight}"
+            )
+    zone = _plan_zone(setups, price)
+    if zone is not None:
+        z_lo, z_hi = float(zone["lo"]), float(zone["hi"])
+        if z_hi > z_lo > 0:
+            band = (z_hi / z_lo - 1.0) * 100.0
+            wide = " · <b>широкая</b>" if band > _INTEREST_ZONE_MAX_WIDTH_PCT else ""
+            bits.append(f"вход {band:.2f}%{wide}")
+    return "📏 " + " · ".join(bits) if bits else ""
 
 
 # ── narrative ──────────────────────────────────────────────────────────────────
@@ -372,6 +502,13 @@ def _active_signal_block(summary: dict[str, Any], setups: dict[str, Any]) -> lis
             if risk > 0 and gain > 0:
                 bits.append(f"до 1-го уровня <code>{fmt_price(first)}</code> = {gain / risk:.1f}R")
     lines = [" · ".join(bits)]
+    # Лесенка ордеров эмитированного сетапа. Считалась всегда (`orchestrator._entry_orders`) и не
+    # печаталась НИКЕМ — то есть курсовое «закуп делить на зону и на уровень» (стр.30/32) уходило
+    # в мусор. Автор и на отказе повторяет это правило: «брать целый диапазон в работу… реакция,
+    # профит, частичная фиксация».
+    orders = [o for o in (_num(x) for x in (summary.get("entry_orders") or [])) if o is not None]
+    if len(orders) > 1:
+        lines.append("📥 ордера: " + " · ".join(f"<code>{fmt_price(o)}</code>" for o in orders))
     tps = _tp_values(summary)
     if tps:
         lines.append("🎯 цели: " + " · ".join(f"<code>{fmt_price(t)}</code>" for t in tps))
@@ -416,6 +553,13 @@ def _slom_token(structure: dict[str, Any]) -> str:
             bits.append(f"{tf} CHoCH↑")
         elif s.get("choch_bear"):
             bits.append(f"{tf} CHoCH↓")
+        # РАННИЙ / ОСНОВНОЙ — его собственные слова («ни раннего, ни основного»). Печатаются
+        # рядом с BOS, потому что это разные объекты: BOS ломает свинг-экстремум, ПП — уровень,
+        # из которого этот экстремум был сделан (стр.50-51), и они расходятся по глубине.
+        for kind, lbl in (("early", "ранний"), ("true", "основной")):
+            for d, arrow in (("long", "↑"), ("short", "↓")):
+                if s.get(f"pp_{kind}_{d}"):
+                    bits.append(f"{tf} ПП {lbl}{arrow}")
     if bits:
         return "слом: " + ", ".join(bits)
     # Отсутствие — тоже показание прибора, и автор проговаривает его наравне с наличием: «нет
@@ -440,12 +584,21 @@ def _dominance_token() -> str:
     глобальной трендовой», «догоняющее движение на разгрузке Доминации ЕТН». Поэтому показания
     печатаются как есть. Чтение кэш-онли и полностью защищённое — путь отображения не падает.
     """
+    from hunt_core.prizrak.config import PrizrakConfig
+
     try:
         from hunt_core.prizrak.dominance_source import (
             _read_snapshots,
             read_cached_changes_24h,
         )
 
+        # Рефрешер кэша работает ТОЛЬКО при включённом флаге (``macro_refresh``), а печать шла
+        # безусловно — с выключенным доп-фактором карточка выдавала лежалый снимок с прошлого
+        # запуска за текущее показание прибора, без единой отметки возраста. Все остальные
+        # несвежие пути на этой карточке провенанс несут (футер свежести, полнота площадок,
+        # источник лестницы); этот — не нёс.
+        if not getattr(PrizrakConfig.load(), "dominance_enabled", False):
+            return ""
         snaps = _read_snapshots()
         if not snaps:
             return ""
@@ -464,11 +617,23 @@ def _dominance_token() -> str:
         tail = f" ({float(d):+.2f}{unit}/24ч)" if isinstance(d, (int, float)) else ""
         return f"{label} {float(v):.2f}%{tail}"
 
+    # TOTAL3 несёт вес ±0.07 — больше, чем у стейблов (±0.05), — и не печатался вовсе: читатель не
+    # мог сверить показания приборов с уверенностью, которую они произвели. Печатается в
+    # триллионах, потому что абсолютная капитализация в долларах нечитаема.
+    def _fmt_total3() -> str | None:
+        v = now.get("total3")
+        if not isinstance(v, (int, float)) or float(v) <= 0:
+            return None
+        d = ch.get("total3_change_24h")
+        tail = f" ({float(d):+.2f}%/24ч)" if isinstance(d, (int, float)) else ""
+        return f"TOTAL3 {float(v) / 1e12:.2f}T{tail}"
+
     toks = [
         t for t in (
             _fmt_one("BTC.D", "btc_d", "btc_d_change_24h", "pp"),
             _fmt_one("ETH.D", "eth_d", "eth_d_change_24h", "pp"),
             _fmt_one("стейблы", "stable_cd", "stable_cd_change_24h", "pp"),
+            _fmt_total3(),
         ) if t
     ]
     return " · ".join(toks)
@@ -485,13 +650,31 @@ def _pribory_line(analysis: AnalystReport, market: dict[str, Any]) -> str:
     t4 = tfmap.get("4h")
     t1 = tfmap.get("1h")
 
+    td = tfmap.get("1d")
+
     rsis: list[str] = []
+    if td is not None and isinstance(td.rsi14, (int, float)):
+        rsis.append(f"1д {td.rsi14:.0f}")
     if t4 is not None and isinstance(t4.rsi14, (int, float)):
         rsis.append(f"4ч {t4.rsi14:.0f}")
     if t1 is not None and isinstance(t1.rsi14, (int, float)):
         rsis.append(f"1ч {t1.rsi14:.0f}")
     if rsis:
         toks.append("RSI " + " · ".join(rsis))
+
+    # Трендовая ПО RSI — единственная в репозитории конструкция линии по пивотам
+    # (``features.pivots.rsi_trendline_break``). Считалась на каждом pinned-символе и не читалась
+    # НИКЕМ: чистое поле-сирота. При этом ровно её автор и рисует — на ДНЕВНОЙ панели RSI, от
+    # минимума 06 июня, третье касание впереди (кадры f_0234–f_0237 разбора BTC 1ч 2026-07-25):
+    # «буду дополнительно следить за вот этой вот трендовой». Пробой печатается там, где он
+    # посчитан; отсутствие флага (тёплый старт) токен не рождает (I-6).
+    for tf_lbl, t in (("1д", td), ("4ч", t4), ("1ч", t1)):
+        if t is None:
+            continue
+        if getattr(t, "rsi_trendline_bearish_break", None):
+            toks.append(f"пробой трендовой RSI {tf_lbl} вниз")
+        elif getattr(t, "rsi_trendline_bullish_break", None):
+            toks.append(f"пробой трендовой RSI {tf_lbl} вверх")
 
     named: list[str] = []
     any_known = False
@@ -598,21 +781,17 @@ def _sovokupnost_line(analysis: AnalystReport) -> str:
     return head + (f" — {plan}" if plan else "")
 
 
-_ABSTAIN_PRIORITY = ("rr_below_floor", "no_structural_target", "htf_counter_trend_no_slom",
-                     "degenerate_stop")
+# Порядок = насколько причина ДЕЙСТВЕННА для читателя: конкретный промах по RR полезнее голого
+# вето. «stop_too_wide» стоит вторым, потому что именно им автор объясняет отказ чаще всего
+# («стоп-лосс должен стоять за всей этой структурой… большого смысла в этом нет»).
+_ABSTAIN_PRIORITY = ("rr_below_floor", "rr_worst_fill_below_floor", "stop_too_wide",
+                     "no_structural_target",
+                     "htf_counter_trend_no_slom", "level_already_worked", "level_saw",
+                     "mid_range", "degenerate_stop")
 
 
-def _abstain_reason_line(reasons: tuple[dict[str, Any], ...] | list[dict[str, Any]]) -> str | None:
-    """«Почему нет сделки» from the structured reject-reasons (``PrizrakOutput.abstain``) — so a WAIT
-    symbol explains itself with numbers («RR 2.3 < 3.0») instead of falling silent, the way the author
-    says why he is not taking a level. Picks the most informative reason (an RR that just missed the
-    floor is more actionable than a bare veto)."""
-    if not reasons:
-        return None
-    by_reason = {r.get("reason"): r for r in reversed(reasons) if isinstance(r, dict)}
-    pick = next((by_reason[k] for k in _ABSTAIN_PRIORITY if k in by_reason), None)
-    if pick is None:
-        return None
+def _abstain_one(pick: dict[str, Any]) -> str | None:
+    """Одна причина отказа человеческим языком, с её числами."""
     kind = pick.get("reason")
     if kind == "rr_below_floor":
         parts = [f"RR {pick.get('rr')} < {pick.get('min_rr')}"]
@@ -628,14 +807,65 @@ def _abstain_reason_line(reasons: tuple[dict[str, Any], ...] | list[dict[str, An
             parts.append(f"стоп {fmt_price(float(pick['stop']))}" + (f" (буфер {buf}%)" if buf else ""))
         if pick.get("tp1") is not None:
             parts.append(f"TP1 {fmt_price(float(pick['tp1']))}")
-        return "почему нет сделки: " + " · ".join(parts)
+        return " · ".join(parts)
+    if kind == "rr_worst_fill_below_floor":
+        return f"R:R по худшему заливу {pick.get('rr')} < {pick.get('min_rr')}"
+    if kind == "stop_too_wide":
+        return (
+            f"стоп за структуру широкий — {pick.get('stop_dist_pct')}% "
+            f"(потолок {pick.get('max_pct')}%)"
+        )
     if kind == "no_structural_target":
-        return "почему нет сделки: нет структурной цели впереди в полосе ТФ (стр.24)"
+        return "нет структурной цели впереди в полосе ТФ (стр.24)"
     if kind == "htf_counter_trend_no_slom":
-        return f"почему нет сделки: против старшего тренда ({pick.get('htf_bias')}) без слома МТФ (стр.31)"
+        return f"против старшего тренда ({pick.get('htf_bias')}) без слома МТФ (стр.31)"
     if kind == "degenerate_stop":
-        return "почему нет сделки: вырожденная геометрия стопа"
+        return "вырожденная геометрия стопа"
+    if kind == "level_already_worked":
+        return "уровень уже отработан — лимит только по слому (стр.31)"
+    if kind == "level_saw":
+        return "уровень пилит — ждём выхода (стр.28)"
+    if kind == "mid_range":
+        return "цена в середине структуры, а не на кромке"
     return None
+
+
+def _abstain_reason_line(
+    reasons: tuple[dict[str, Any], ...] | list[dict[str, Any]], *, price: float = 0.0
+) -> str | None:
+    """«Почему нет сделки» — ВСЕ значимые причины, с числами БЛИЖАЙШЕГО к цене кандидата.
+
+    Автор называет их пачкой, а не по одной: на BTC 1ч (2026-07-25) он отказывается сразу по трём —
+    «стоп-лосс должен стоять за всей этой структурой, а структура большая», «нет никакого уровня,
+    которому можно дать акцент», «процент движения цены 1,3%». Печатать одну значило бы выдавать
+    часть довода за весь.
+
+    Кандидат внутри одной причины выбирается по БЛИЗОСТИ ВХОДА К ЦЕНЕ. Прежний
+    ``{r["reason"]: r for r in reversed(reasons)}`` оставлял в ячейке САМЫЙ РАННИЙ отказ каждого
+    вида — то есть при нескольких отброшенных кандидатах (ТФ × setup_kind пишут в один сток)
+    печатались вход/стоп/TP1 того, кого посчитали первым, а читатель воспринимает их как «сделка,
+    которая почти состоялась»."""
+    if not reasons:
+        return None
+    rows = [r for r in reasons if isinstance(r, dict)]
+
+    def _closeness(r: dict[str, Any]) -> float:
+        e = r.get("entry")
+        if price <= 0 or not isinstance(e, (int, float)) or float(e) <= 0:
+            return float("inf")
+        return abs(float(e) / price - 1.0)
+
+    parts: list[str] = []
+    for key in _ABSTAIN_PRIORITY:
+        same = [r for r in rows if r.get("reason") == key]
+        if not same:
+            continue
+        text = _abstain_one(min(same, key=_closeness))
+        if text:
+            parts.append(text)
+        if len(parts) >= 3:
+            break
+    return "почему нет сделки: " + " · ".join(parts) if parts else None
 
 
 def _norm_sym(symbol: str) -> str:
@@ -783,7 +1013,7 @@ def format_prizrak_post(analysis: AnalystReport) -> str:
             zlines.extend(_horizon_block(title, hz))
     _ladder = analysis.spot_ladder
     zlines.extend(_deep_horizons(_ladder if isinstance(_ladder, dict) else {}, price))
-    hr = _headroom_line(setups)
+    hr = _headroom_line(setups, price)
     if hr:
         zlines.append(hr)
     plan = _plan_line(setups, price, market)
@@ -804,9 +1034,11 @@ def format_prizrak_post(analysis: AnalystReport) -> str:
     # «Почему нет сделки» — only on a WAIT tick (no active long/short), with the RR/target reason so a
     # no-signal card explains itself with numbers rather than falling silent.
     if str(summary.get("action") or "").lower() not in {"long", "short"}:
-        why = _abstain_reason_line(analysis.prizrak.abstain)
+        why = _abstain_reason_line(analysis.prizrak.abstain, price=price)
         if why:
-            parts.append(f"<i>{html.escape(why)}</i>")
+            # Пустая строка перед — как у всех прочих секций. Через голый ``append`` строка
+            # приклеивалась к «🤔 По совокупности» и читалась как её продолжение, а не как вердикт.
+            parts.extend(["", f"<i>{html.escape(why)}</i>"])
 
     # Сначала то, чем управляют СЕЙЧАС, потом отчёт о закрытом — порядок его постов.
     opened = _open_line(analysis.symbol)
