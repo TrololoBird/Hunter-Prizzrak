@@ -526,6 +526,13 @@ def _build_tp_ladder(
     else:
         candidates.sort(reverse=True)
 
+    # Вход — тоже уровень (ПОК или кромка зоны), поэтому отсчёт ``min_gap`` начинается ОТ НЕГО.
+    # Иначе правило «два уровня в нескольких тиках — это одна зона, описанная дважды» держалось
+    # между ступенями, но не между входом и TP1: на живом BTC 2026-07-25 карточка объясняла отказ
+    # как «RR 0.0 < 2.0 · TP1 64392.6» при входе 64392.5 — цель в одной десятой пункта впереди.
+    # Это не «плохой R:R», это отсутствие цели, и теперь такой кандидат либо получает следующий
+    # НАСТОЯЩИЙ уровень первой ступенью, либо честно отказывает через ``no_structural_target``.
+    prev = entry
     for p in candidates:
         if len(ladder) >= max_steps:
             break
@@ -536,9 +543,10 @@ def _build_tp_ladder(
             continue
         # Collapse near-duplicates into the nearest rung (candidates are sorted
         # by distance from entry, so the first of a cluster is kept).
-        if ladder and abs(p - ladder[-1]) < min_gap:
+        if abs(p - prev) < min_gap:
             continue
         ladder.append(round(p, 8))
+        prev = ladder[-1]
 
     return ladder[:max_steps]
 
