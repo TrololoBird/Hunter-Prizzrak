@@ -7,10 +7,12 @@ import structlog
 
 from hunt_core.maps.liquidation import realized_liq_magnet
 
+from hunt_core.toolkit._mapping import dict_field
+
 LOG = structlog.get_logger(__name__)
 def collect_upward_targets(row: dict[str, Any], price: float) -> tuple[list[float], list[str]]:
-    market = row.get("market") if isinstance(row.get("market"), dict) else {}
-    maps = row.get("maps") if isinstance(row.get("maps"), dict) else {}
+    market = dict_field(row, "market")
+    maps = dict_field(row, "maps")
     targets: list[float] = []
     factors: list[str] = []
 
@@ -22,7 +24,7 @@ def collect_upward_targets(row: dict[str, Any], price: float) -> tuple[list[floa
         targets.append(short_liq)
         factors.append("short_liq_magnet")
 
-    liq = maps.get("liquidation") if isinstance(maps.get("liquidation"), dict) else {}
+    liq = dict_field(maps, "liquidation")
     for z in liq.get("liq_forward_zones") or []:
         if not isinstance(z, dict):
             continue
@@ -39,7 +41,7 @@ def collect_upward_targets(row: dict[str, Any], price: float) -> tuple[list[floa
             LOG.debug("forward_zones.price_center float conversion failed", exc_info=True)
             continue
 
-    vp = maps.get("volume_profile") if isinstance(maps.get("volume_profile"), dict) else {}
+    vp = dict_field(maps, "volume_profile")
     for prof in vp.get("profiles") or []:
         if not isinstance(prof, dict):
             continue
@@ -71,9 +73,13 @@ def collect_upward_targets(row: dict[str, Any], price: float) -> tuple[list[floa
     void_above = market.get("map_void_above")
     if void_above is not None:
         try:
-            vp = float(void_above)
-            if vp > price:
-                targets.append(vp)
+            # Имя было `vp` — то же, которым выше связан словарь volume_profile (:44).
+            # Поведение сегодня верное (словарь читается на :45, до перезаписи), но это
+            # ловушка: любое будущее чтение vp как словаря ниже сломалось бы молча.
+            # Вскрыто mypy после снятия blanket-override с toolkit/ (2026-07-26).
+            void_price = float(void_above)
+            if void_price > price:
+                targets.append(void_price)
                 if "void_path" not in factors:
                     factors.append("void_path")
         except (TypeError, ValueError):
@@ -91,9 +97,9 @@ def collect_upward_targets(row: dict[str, Any], price: float) -> tuple[list[floa
 
 
 def collect_downward_targets(row: dict[str, Any], price: float) -> tuple[list[float], list[str]]:
-    market = row.get("market") if isinstance(row.get("market"), dict) else {}
-    maps = row.get("maps") if isinstance(row.get("maps"), dict) else {}
-    session = row.get("session") if isinstance(row.get("session"), dict) else {}
+    market = dict_field(row, "market")
+    maps = dict_field(row, "maps")
+    session = dict_field(row, "session")
     targets: list[float] = []
     factors: list[str] = []
 
@@ -103,7 +109,7 @@ def collect_downward_targets(row: dict[str, Any], price: float) -> tuple[list[fl
         targets.append(long_liq)
         factors.append("long_liq_magnet")
 
-    liq = maps.get("liquidation") if isinstance(maps.get("liquidation"), dict) else {}
+    liq = dict_field(maps, "liquidation")
     for z in liq.get("liq_forward_zones") or []:
         if not isinstance(z, dict):
             continue
@@ -120,7 +126,7 @@ def collect_downward_targets(row: dict[str, Any], price: float) -> tuple[list[fl
             LOG.debug("forward_zones.price_center float conversion failed (down)", exc_info=True)
             continue
 
-    vp = maps.get("volume_profile") if isinstance(maps.get("volume_profile"), dict) else {}
+    vp = dict_field(maps, "volume_profile")
     for prof in vp.get("profiles") or []:
         if not isinstance(prof, dict):
             continue

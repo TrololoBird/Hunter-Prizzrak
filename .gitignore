@@ -39,3 +39,7 @@ compass_artifact_*.md
 
 # pytest-testmon local state
 .testmondata
+
+# coverage artefacts (гейт --cov-fail-under в CI)
+.coverage
+htmlcov/

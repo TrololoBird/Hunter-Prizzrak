@@ -8,6 +8,7 @@ numpy version is preserved exactly — ``std(ddof=0)`` matches ``np.std`` (popul
 from __future__ import annotations
 
 import math
+from typing import cast
 
 import polars as pl
 
@@ -16,20 +17,26 @@ _MAD_TO_SIGMA = 1.4826
 _DEFAULT_MAD_EPSILON = 1e-6
 _DEFAULT_ROBUST_Z_CLIP = 12.0
 
+# Polars types the aggregate return as a wide union covering temporal series
+# (``Decimal | date | time | timedelta | ...``). Every caller here passes a NUMERIC series —
+# that is this module's contract, stated in the docstring above — so the cast is a runtime
+# no-op that records the invariant instead of suppressing the check with ``type: ignore``.
+# Needed once ``hunt_core.toolkit.*`` stopped being excluded from mypy (2026-07-26).
+
 
 def _median(s: pl.Series) -> float:
     v = s.median()
-    return float(v) if v is not None else 0.0
+    return float(cast(float, v)) if v is not None else 0.0
 
 
 def _std_pop(s: pl.Series) -> float:
     v = s.std(ddof=0)  # population std, matching np.std's default
-    return float(v) if v is not None else 0.0
+    return float(cast(float, v)) if v is not None else 0.0
 
 
 def _mad(s: pl.Series, median: float) -> float:
     v = (s - median).abs().median()
-    return float(v) if v is not None else 0.0
+    return float(cast(float, v)) if v is not None else 0.0
 
 
 def _robust_scale(arr: pl.Series, *, mad_epsilon: float) -> float:

@@ -13,6 +13,7 @@ def _factor_confidence(factors: list[str], max_factors: int) -> float:
     return round(min(1.0, len(factors) / max_factors), 3)
 
 
+from hunt_core.toolkit._mapping import dict_field
 from hunt_core.toolkit.targets import (
     collect_downward_targets as _collect_downward_base,
     collect_upward_targets as _collect_upward_targets,
@@ -33,7 +34,7 @@ def build_maps_forecast(row: dict[str, Any]) -> dict[str, Any] | None:
     price = float(row.get("price") or 0)
     if price <= 0:
         return None
-    market = row.get("market") if isinstance(row.get("market"), dict) else {}
+    market = dict_field(row, "market")
 
     targets, factors = _collect_upward_targets(row, price)
     if market.get("map_accum_bid_absorption"):
@@ -108,8 +109,8 @@ def build_ignition_forecast(row: dict[str, Any]) -> dict[str, Any] | None:
     price = float(row.get("price") or 0)
     if price <= 0:
         return None
-    market = row.get("market") if isinstance(row.get("market"), dict) else {}
-    tf = row.get("timeframes") if isinstance(row.get("timeframes"), dict) else {}
+    market = dict_field(row, "market")
+    tf = dict_field(row, "timeframes")
     r1h = tf.get("1h") or {}
 
     targets, factors = _collect_upward_targets(row, price)
@@ -164,7 +165,7 @@ def stamp_forecasts_on_row(row: dict[str, Any]) -> dict[str, dict[str, Any] | No
     """Evaluate forecasts and stamp primary + all on row."""
     all_fc = build_all_forecasts(row)
     row["forecasts"] = {k: v for k, v in all_fc.items() if v is not None}
-    fusion = row.get("manipulation_fusion") if isinstance(row.get("manipulation_fusion"), dict) else {}
+    fusion = dict_field(row, "manipulation_fusion")
     from hunt_core.toolkit.archetypes import canonical_archetype
 
     archetype = canonical_archetype(str(fusion.get("archetype") or ""))

@@ -35,5 +35,13 @@ jobs:
       - name: mypy (blocking — backlog cleared, 0 issues)
         run: uv run mypy hunt_core
 
-      - name: pytest
-        run: uv run pytest -q
+      # Уязвимости в зависимостях. Поймал PYSEC-2026-3447 (setuptools 82.0.1) за 4 секунды
+      # на первом же прогоне 2026-07-26 — до этого гейта в пайплайне не было.
+      # Сам пакет не опубликован на PyPI, поэтому --skip-editable.
+      - name: pip-audit (known CVEs in dependencies)
+        run: uv run --with pip-audit pip-audit --progress-spinner off --skip-editable
+
+      # Порог = ИЗМЕРЕННОЕ покрытие на 2026-07-26 (45%), а не желаемое. Смысл гейта —
+      # ловить деградацию, а не требовать рывка. Поднимать вместе с реальным ростом.
+      - name: pytest (+ coverage floor)
+        run: uv run --with pytest-cov pytest -q --cov=hunt_core --cov-report=term --cov-fail-under=45

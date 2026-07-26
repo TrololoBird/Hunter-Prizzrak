@@ -1,5 +1,7 @@
 [build-system]
-requires = ["setuptools>=69", "wheel"]
+# Пол 83: setuptools 82.0.1 несёт PYSEC-2026-3447, исправлено в 83.0.0 (замер pip-audit
+# 2026-07-26). Не опускать — проверяется гейтом `pip-audit` в CI.
+requires = ["setuptools>=83", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -79,20 +81,20 @@ extend-select = ["TID251"]
 "requests".msg = "No requests — the stack is fully async; use aiohttp. See docs/ai/rules/prohibited-apis.md."
 
 [tool.ruff.lint.per-file-ignores]
-"hunt_core/runtime/_impl.py" = ["E402"]
+# Только для СУЩЕСТВУЮЩИХ файлов. Удалено 2026-07-26 как мёртвое: runtime/_impl.py
+# (нет такого пути — есть runtime/cycle/_impl.py), market/streams.py и runtime/cycle.py
+# (снесены 5ba0fea вместе с легаси-транспортом). Исключение для несуществующего файла
+# не безобидно: когда путь возникнет заново, он молча получит поблажку.
 "hunt_core/domain/schemas.py" = ["E402"]
-"hunt_core/market/streams.py" = ["E741"]
-"hunt_core/runtime/cycle.py" = ["F841"]
 "hunt_core/data_readiness.py" = ["F841"]
 
 [tool.mypy]
 ignore_missing_imports = true
 warn_unused_ignores = false
 exclude = ["_archive", "build", "dist"]
-
-[[tool.mypy.overrides]]
-module = ["hunt_core.toolkit.*"]
-ignore_errors = true
+# `[[overrides]] module=["hunt_core.toolkit.*"] ignore_errors=true` снят 2026-07-26:
+# замер показал 0 ошибок на всех 12 файлах toolkit/ — исключение выводило 1863 строки
+# из-под проверки, ничего при этом не подавляя, и делало «mypy clean» слабее, чем звучит.
 
 [dependency-groups]
 dev = [

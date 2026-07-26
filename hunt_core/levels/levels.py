@@ -312,19 +312,31 @@ def _effective_short_leg_low(
     return local_support if local_support > 0 else 0.0
 
 
+def _anchor_key(symbol: str) -> str:
+    """Normalise any symbol spelling to the ``BTCUSDT`` form used by ``_ANCHOR_SYMBOLS``.
+
+    The settlement suffix must be dropped BEFORE the separators: the project's unified
+    form is ``BTC/USDT:USDT``, and stripping only ``-`` and ``/`` left ``BTCUSDT:USDT``,
+    which matches no anchor — so a caller passing the unified symbol silently received
+    the generic floor instead of the anchor one. Not a live defect when found
+    (2026-07-26): the sole production caller, ``confluence/mtf.py::
+    build_mtf_confluence_native``, already normalises to ``BTCUSDT`` itself. Fixed here
+    so correctness stops depending on every future caller repeating that step.
+    """
+    return str(symbol or "").split(":", 1)[0].upper().replace("-", "").replace("/", "")
+
+
 def short_min_sl_dist_pct(symbol: str) -> float:
     """Minimum nominal stop distance (%) for a short. Public: also used by
     ``confluence/mtf.py`` so both level builders share one floor."""
-    sym = str(symbol or "").upper().replace("-", "").replace("/", "")
-    if sym in _ANCHOR_SYMBOLS:
+    if _anchor_key(symbol) in _ANCHOR_SYMBOLS:
         return _ANCHOR_SHORT_MIN_SL_DIST_PCT
     return SHORT_MIN_SL_DIST_PCT
 
 
 def long_min_sl_dist_pct(symbol: str) -> float:
     """Minimum nominal stop distance (%) for a long. Public: see above."""
-    sym = str(symbol or "").upper().replace("-", "").replace("/", "")
-    if sym in _ANCHOR_SYMBOLS:
+    if _anchor_key(symbol) in _ANCHOR_SYMBOLS:
         return _ANCHOR_LONG_MIN_SL_DIST_PCT
     return LONG_MIN_SL_DIST_PCT
 

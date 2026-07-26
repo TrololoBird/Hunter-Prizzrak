@@ -17,6 +17,8 @@ import structlog
 from hunt_core.maps.liquidation import realized_liq_magnet
 from hunt_core.maps.oi import OiRegime, oi_regime_from_row
 
+from hunt_core.toolkit._mapping import dict_field
+
 LOG = structlog.get_logger(__name__)
 Archetype = Literal["predump_short", "prepump_long", "ignition_long", "none"]
 
@@ -72,7 +74,7 @@ def _f(row: dict[str, Any], *keys: str, default: float = 0.0) -> float:
             parts = key.split(".")
             block = row
             for p in parts[:-1]:
-                block = block.get(p) if isinstance(block, dict) else {}
+                block = dict_field(block, p)
             key = parts[-1]
         if isinstance(block, dict) and block.get(key) is not None:
             try:
@@ -84,17 +86,17 @@ def _f(row: dict[str, Any], *keys: str, default: float = 0.0) -> float:
 
 
 def _bool_market(row: dict[str, Any], key: str) -> bool:
-    market = row.get("market") if isinstance(row.get("market"), dict) else {}
+    market = dict_field(row, "market")
     return bool(market.get(key))
 
 
 def _phase(row: dict[str, Any]) -> str:
-    lc = row.get("lifecycle") if isinstance(row.get("lifecycle"), dict) else {}
+    lc = dict_field(row, "lifecycle")
     return str(lc.get("phase_fusion") or lc.get("phase") or "")
 
 
 def _pos_in_range(row: dict[str, Any]) -> float:
-    session = row.get("session") if isinstance(row.get("session"), dict) else {}
+    session = dict_field(row, "session")
     return float(session.get("pos_in_range") or 0.5)
 
 
@@ -105,7 +107,7 @@ def squeeze_blocks_predump_short(row: dict[str, Any]) -> bool:
 
 def _squeeze_blocks_predump(row: dict[str, Any]) -> bool:
     """Buildix-style squeeze checklist — blocks predump when crowded shorts + neg funding."""
-    market = row.get("market") if isinstance(row.get("market"), dict) else {}
+    market = dict_field(row, "market")
     funding = _f(row, "market.funding_rate", "market.live_funding_rate")
     oi_regime = oi_regime_from_row(row)
     taker = _f(row, "market.taker_5m", "market.taker_15m", default=1.0)
@@ -141,7 +143,7 @@ def _coil_prebreak_checks(row: dict[str, Any], market: dict[str, Any], price: fl
     Returns (price_near_vah_unbroken, volume_dry_up_near_vah, bid_absorption_at_vah).
     Each check must fire BEFORE the impulse — post-breakout is not prepump.
     """
-    tf = row.get("timeframes") if isinstance(row.get("timeframes"), dict) else {}
+    tf = dict_field(row, "timeframes")
     r5 = tf.get("5m_closed") or tf.get("5m") or {}
     vah = r5.get("vah") or market.get("map_vp_vah") or market.get("vah")
     price_near = False
@@ -177,12 +179,12 @@ def evaluate_manipulation_fusion(row: dict[str, Any]) -> ManipulationAssessment:
     """
     phase = _phase(row)
     pos = _pos_in_range(row)
-    market = row.get("market") if isinstance(row.get("market"), dict) else {}
+    market = dict_field(row, "market")
     oi_regime = oi_regime_from_row(row)
     price = float(row.get("price") or 0)
     leg_gain = _f(row, "lifecycle.leg_gain_pct", default=0.0)
     if leg_gain <= 0:
-        session = row.get("session") if isinstance(row.get("session"), dict) else {}
+        session = dict_field(row, "session")
         leg_gain = float(session.get("leg_gain_pct") or 0)
 
     factors: list[FactorHit] = []
@@ -224,7 +226,7 @@ def evaluate_manipulation_fusion(row: dict[str, Any]) -> ManipulationAssessment:
     if _apply_check(checks, check_sources, "bear_cvd_div", cvd == "bearish_div", "markettrace"):
         predump += 1.0
         factors.append(FactorHit("D6", "bear_cvd_div", True, 1.0, "markettrace"))
-    struct = row.get("structure") if isinstance(row.get("structure"), dict) else {}
+    struct = dict_field(row, "structure")
     if _apply_check(
         checks,
         check_sources,
