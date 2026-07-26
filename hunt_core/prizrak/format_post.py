@@ -474,14 +474,19 @@ def _pribory_line(analysis: AnalystReport, market: dict[str, Any]) -> str:
 
 
 def _plan_hint(setups: dict[str, Any]) -> str:
-    _hz = (setups.get("horizons") or {}).get("local") if isinstance(setups, dict) else None
-    hz = _hz if isinstance(_hz, dict) else {}
+    """Что вообще есть на торгуемых горизонтах — часовом и локальном.
+
+    Читать один «local» здесь было бы тем же дефектом, что и не считать 1ч горизонтом: символ, у
+    которого перезакуп нашёлся только на часовом, молча описывался бы как «нет плана».
+    """
+    horizons = (setups.get("horizons") or {}) if isinstance(setups, dict) else {}
+    hzs = [h for h in (horizons.get("hourly"), horizons.get("local")) if isinstance(h, dict)]
     bits: list[str] = []
-    if isinstance(hz.get("perezakup"), dict):
+    if any(isinstance(h.get("perezakup"), dict) for h in hzs):
         bits.append("перезакуп на ПОК")
-    if hz.get("dobor"):
+    if any(h.get("dobor") for h in hzs):
         bits.append("добор по сетке")
-    if hz.get("short"):
+    if any(h.get("short") for h in hzs):
         bits.append("шорт по факту («уровень есть уровень»)")
     return ", ".join(bits)
 
@@ -628,7 +633,8 @@ def format_prizrak_post(analysis: AnalystReport) -> str:
     # Внутридневной горизонт первый: в разборе ASTR (2026-07-25) именно 15м нёс его «ближайший
     # уровень сопротивления», а 4ч его не содержал вовсе — ближайшее встречное препятствие
     # практически всегда живёт на младшем ТФ, и читать карту снизу вверх ближе к его порядку.
-    for name, title in (("intraday", "Внутри дня"), ("local", "Локально"), ("weekly", "Старший ТФ")):
+    for name, title in (("intraday", "Внутри дня"), ("hourly", "Часовой"),
+                        ("local", "Локально"), ("weekly", "Старший ТФ")):
         hz = horizons.get(name)
         if isinstance(hz, dict):
             zlines.extend(_horizon_block(title, hz))

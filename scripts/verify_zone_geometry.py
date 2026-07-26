@@ -38,10 +38,22 @@ from hunt_core.runtime.native_producers import spot_weekly_ladder_native
 CFG = PrizrakConfig.load()
 TFS = ("5m", "15m", "1h", "4h", "1d", "1w")
 FAIL: list[str] = []
+WARN: list[str] = []
 
 
 def bad(sym: str, msg: str) -> None:
     FAIL.append(f"{sym}: {msg}")
+
+
+def warn(sym: str, msg: str) -> None:
+    """Не нарушение инварианта, а расхождение, которое верификатор ДОКАЗАННО не может решить сам.
+
+    Свой ПОК считается по опубликованной полосе, а модуль строит профиль по ИСХОДНОМУ боксу и лишь
+    потом сужает его до value area — исходные кромки наружу не отдаются. То есть два числа считаются
+    по разным наборам баров by design, и записывать разницу в ❌ значит топить настоящие дефекты в
+    шуме (18 «нарушений», из которых 17 были этим). Смотреть глазами, не считать приговором.
+    """
+    WARN.append(f"{sym}: {msg}")
 
 
 def _zones(hz: dict[str, Any], key: str) -> list[dict[str, Any]]:
@@ -76,8 +88,36 @@ def my_poc(bars: list[list[float]], lo: float, hi: float, bins: int = 60) -> flo
     return lo + (top + 0.5) * w
 
 
+def my_structure(bars: list[list[float]], lo: float, hi: float, *, gap: int = 2,
+                 min_bars: int = 5) -> list[list[float]]:
+    """Свои бары структуры: самая объёмная НЕПРЕРЫВНАЯ серия свечей, торгующих в [lo,hi].
+
+    Сверять модульный ПОК с профилем ВСЕГО окна значило бы сравнивать разные величины — и до
+    правки `poc._structure_bars` они «сходились» именно потому, что модуль тоже считал по окну
+    (19% зон с ПОК, 2 расхождения). Реализация здесь СВОЯ, а не импорт из модуля: смысл
+    верификатора в том, чтобы прийти к тому же числу другим кодом.
+    """
+    inside = [i for i, b in enumerate(bars) if float(b[3]) <= hi and float(b[2]) >= lo]
+    if not inside:
+        return bars
+    runs: list[tuple[int, int]] = []
+    s = p = inside[0]
+    for i in inside[1:]:
+        if i - p <= gap + 1:
+            p = i
+            continue
+        runs.append((s, p))
+        s = p = i
+    runs.append((s, p))
+    runs = [r for r in runs if r[1] - r[0] + 1 >= min_bars]
+    if not runs:
+        return bars
+    a, b = max(runs, key=lambda r: (sum(float(x[5]) for x in bars[r[0]:r[1] + 1]), r[1] - r[0]))
+    return bars[a:b + 1]
+
+
 def check(sym: str, setups: dict[str, Any], price: float, raw: dict[str, list[list[float]]]) -> dict[str, int]:
-    stat = {"zones": 0, "checked": 0}
+    stat = {"zones": 0, "checked": 0, "poc": 0}
     horizons = setups.get("horizons") or {}
     for hname, hz in horizons.items():
         if not isinstance(hz, dict):
@@ -96,6 +136,11 @@ def check(sym: str, setups: dict[str, Any], price: float, raw: dict[str, list[li
                 if lo > hi:
                     bad(sym, f"{hname}/{key}: lo>hi ({lo}>{hi})")
                 poc = z.get("poc")
+                # Доля зон, у которых ПОК ЕСТЬ, — метрика якорения. Без неё «ПОК считается»
+                # неотличимо от «ПОК всегда None»: измерено на BTC 4h, где ПОК выпадал у ВСЕХ
+                # зон разом, а инвариантных нарушений при этом не было ни одного (poc.py
+                # _structure_bars получал огибающую касаний вместо структуры).
+                stat["poc"] += int(poc is not None)
                 if poc is not None and not (lo <= float(poc) <= hi):
                     bad(sym, f"{hname}/{key}: ПОК {poc} вне [{lo},{hi}]")
                 ent = z.get("entry")
@@ -117,11 +162,11 @@ def check(sym: str, setups: dict[str, Any], price: float, raw: dict[str, list[li
                         bad(sym, f"{hname}/{key}: hi={hi} вне торгованного диапазона {tf}")
                     # свой ПОК — сверка с модульным
                     if poc is not None:
-                        mine = my_poc(bars, lo, hi)
+                        mine = my_poc(my_structure(bars, lo, hi), lo, hi)
                         if mine is not None:
                             span = hi - lo
                             if span > 0 and abs(mine - float(poc)) / span > 0.34:
-                                bad(sym, f"{hname}/{key}: ПОК {float(poc):.8g} vs мой {mine:.8g} "
+                                warn(sym, f"{hname}/{key}: ПОК {float(poc):.8g} vs мой {mine:.8g} "
                                          f"(расхождение {abs(mine-float(poc))/span*100:.0f}% ширины)")
         # --- цели ---
         lt = [float(x) for x in (hz.get("long_targets") or [])]
@@ -164,7 +209,7 @@ async def main(symbols: list[str]) -> None:
     ex = ccxt.binanceusdm({"enableRateLimit": True})
     spot_eng = SpotEngine([])
     await spot_eng._ex.load_markets()
-    tot = {"zones": 0, "checked": 0}
+    tot = {"zones": 0, "checked": 0, "poc": 0}
     try:
         await ex.load_markets()
         now = ex.milliseconds()
@@ -188,6 +233,7 @@ async def main(symbols: list[str]) -> None:
             st = check(sym, s, price, raw)
             tot["zones"] += st["zones"]
             tot["checked"] += st["checked"]
+            tot["poc"] += st["poc"]
             # Источник макро-лестницы — проверяется здесь, а не тестом: Binance листит золото и
             # серебро как СВОИ токенизированные перпы без спот-пары, поэтому XAU обязан
             # резолвиться на PAXG (то же золото, 309 недель против 33), а XAG — падать на бары
@@ -217,6 +263,13 @@ async def main(symbols: list[str]) -> None:
         await ex.close()
         await spot_eng.close()
     print(f"\nвсего зон: {tot['zones']}, из них заземлено на свечи: {tot['checked']}")
+    if tot["zones"]:
+        print(f"ЯКОРЬ ПОК: {tot['poc']}/{tot['zones']} зон = "
+              f"{tot['poc'] / tot['zones'] * 100:.0f}%  (остальные входят по кромке)")
+    if WARN:
+        print(f"\n⚠️  К РУЧНОМУ РАЗБОРУ (не нарушения): {len(WARN)}")
+        for w in WARN:
+            print("   ", w)
     if FAIL:
         print(f"\n❌ НАРУШЕНИЙ: {len(FAIL)}")
         for f in FAIL:

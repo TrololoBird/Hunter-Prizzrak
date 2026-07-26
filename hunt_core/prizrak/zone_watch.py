@@ -4,8 +4,9 @@ The deep card's zone map (``prizrak/setups.py``) is a DISPLAY product, and the t
 by ``SYMBOL:direction`` (``tracker._key``) — so it structurally cannot hold перезакуп AND добор as two
 separate longs. This module is the layer in between:
 
-* remembers the **actionable local zones** per symbol (перезакуп + добор + ближний шорт — the ones the
-  author actually places limits on; снайпер/спот are context, not live limits);
+* remembers the **actionable zones** per symbol — перезакуп + добор + ближний шорт of the часовой and
+  локальный horizons, the ones the author actually places limits on (снайпер/спот are context, not
+  live limits; 15м lives minutes);
 * computes each zone's own plan — стоп **за структуру с запасом** (стр.33, ``cfg.stop_buffer_pct``) and
   the horizon's цели — which the display map does not carry;
 * alerts **once** when price APPROACHES and **once** when it ENTERS;
@@ -91,38 +92,66 @@ def _mk_zone(z: dict[str, Any], *, kind: str, direction: str, targets: list[Any]
     }
 
 
-def _actionable_zones(setups: dict[str, Any]) -> list[dict[str, Any]]:
-    """The LOCAL horizon's live-limit zones: 🟢 перезакуп · 🟡 добор · 🔴 ближний шорт.
+# Горизонты, по которым автор реально сидит лимитами. Часовой идёт ПЕРВЫМ: его разметка публикуется
+# на 1ч, и часовая зона всегда уже четырёхчасовой, а значит и стоп по ней короче. Снайпер/спот
+# исключены намеренно — это дальний контекст (десятки процентов), а не живые лимиты; внутридневной
+# 15м тоже: его зоны живут минуты и дали бы поток алертов вместо сетапов.
+_ALERT_HORIZONS = ("hourly", "local")
 
-    Снайпер/спот horizons are deliberately excluded — they are deep context levels (often tens of
-    percent away), not limits the author sits on; watching them would only generate noise.
+
+def _dedupe(zones: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Одна и та же зона, увиденная на двух ТФ, — это одна зона.
+
+    Совпадением считается тот же порог, по которому карта узнаёт себя между тиками
+    (``_MATCH_TOL_PCT``): иначе часовой и четырёхчасовой добор с почти равными якорями стали бы
+    неразличимы для ``_find_stored`` и растащили бы состояние друг друга — «уже алертили» уходило
+    бы не к той зоне. Побеждает БОЛЕЕ УЗКАЯ полоса: она точнее как лимит и даёт меньший стоп.
     """
-    _hz = (setups.get("horizons") or {}).get("local") if isinstance(setups, dict) else None
-    hz = _hz if isinstance(_hz, dict) else {}
-    if not hz:
-        return []
-    _lt = hz.get("long_targets")
-    long_t = _lt if isinstance(_lt, list) else []
-    _st = hz.get("short_targets")
-    short_t = _st if isinstance(_st, list) else []
+    kept: list[dict[str, Any]] = []
+    for z in zones:
+        dup = None
+        for k in kept:
+            if k["direction"] == z["direction"] and k["kind"] == z["kind"] and k["anchor"] > 0 \
+                    and abs(z["anchor"] / k["anchor"] - 1.0) * 100.0 <= _MATCH_TOL_PCT:
+                dup = k
+                break
+        if dup is None:
+            kept.append(z)
+        elif (z["hi"] - z["lo"]) < (dup["hi"] - dup["lo"]):
+            kept[kept.index(dup)] = z
+    return kept
 
+
+def _actionable_zones(setups: dict[str, Any]) -> list[dict[str, Any]]:
+    """Live-limit zones of the ACTIONABLE horizons: 🟢 перезакуп · 🟡 добор · 🔴 ближний шорт."""
+    horizons = (setups.get("horizons") or {}) if isinstance(setups, dict) else {}
     out: list[dict[str, Any]] = []
-    pk = hz.get("perezakup")
-    if isinstance(pk, dict):
-        rec = _mk_zone(pk, kind="перезакуп", direction="long", targets=long_t)
-        if rec is not None:
-            out.append(rec)
-    for z in (hz.get("dobor") or [])[:2]:
-        if isinstance(z, dict):
-            rec = _mk_zone(z, kind="добор", direction="long", targets=long_t)
+    for hname in _ALERT_HORIZONS:
+        _hz = horizons.get(hname)
+        hz = _hz if isinstance(_hz, dict) else {}
+        if not hz:
+            continue
+        _lt = hz.get("long_targets")
+        long_t = _lt if isinstance(_lt, list) else []
+        _st = hz.get("short_targets")
+        short_t = _st if isinstance(_st, list) else []
+
+        pk = hz.get("perezakup")
+        if isinstance(pk, dict):
+            rec = _mk_zone(pk, kind="перезакуп", direction="long", targets=long_t)
             if rec is not None:
                 out.append(rec)
-    for z in (hz.get("short") or [])[:2]:
-        if isinstance(z, dict):
-            rec = _mk_zone(z, kind="шорт", direction="short", targets=short_t)
-            if rec is not None:
-                out.append(rec)
-    return out[:_MAX_ZONES]
+        for z in (hz.get("dobor") or [])[:2]:
+            if isinstance(z, dict):
+                rec = _mk_zone(z, kind="добор", direction="long", targets=long_t)
+                if rec is not None:
+                    out.append(rec)
+        for z in (hz.get("short") or [])[:2]:
+            if isinstance(z, dict):
+                rec = _mk_zone(z, kind="шорт", direction="short", targets=short_t)
+                if rec is not None:
+                    out.append(rec)
+    return _dedupe(out)[:_MAX_ZONES]
 
 
 def _stop_for(lo: float, hi: float, *, buffer_frac: float, direction: str) -> float:

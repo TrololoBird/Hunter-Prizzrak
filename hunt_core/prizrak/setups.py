@@ -45,9 +45,19 @@ from hunt_core.prizrak.traps import detect_level_saw
 # график и размечает 0.005177/0.005165 именно там. Без внутридневного горизонта этот уровень
 # физически не выражался: на 4ч его нет, на 1ч он размазан в зону 0.005093–0.005282 шириной
 # 3.71%, а на 15м это 0.005150–0.005186 — 0.70% и 56 касаний, почти точно его кромки.
+#
+# 1ч — СВОЙ горизонт, а не запасной для 4ч. Раньше он стоял фолбэком в паре ("4h","1h"), то есть на
+# любом ликвидном символе не смотрелся никогда. Между тем автор публикует разметку именно на нём
+# (график BTCUSDT.P 1ч от 2026-07-25) и в тексте разделяет слои прямо: «нет ЧАСОВЫХ/4ч диверов»,
+# «нет ЧАСОВЫХ разворотных структур». Измерено на том же BTC: его линия 65 609,1 — это ПОК часовой
+# зоны 65462.9–65658.0, равный 65 610,5 (расхождение 0.002%), а 64 754,0 — ПОК зоны 64500.3–64961.0
+# (64 678,8). На 4ч этих зон нет вовсе, и уровни подбирались кромками соседних боксов и строками
+# спот-лестницы. Тот же класс дефекта, что вскрыл разбор ASTR: отсутствующий горизонт неотличим от
+# пустого, пока не с чем сверить.
 _HORIZONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("intraday", ("15m", "5m")),
-    ("local", ("4h", "1h")),
+    ("hourly", ("1h",)),
+    ("local", ("4h",)),
     ("weekly", ("1d", "1w")),
 )
 _LADDER_MAX = 3
@@ -243,14 +253,28 @@ def _horizon_zones(
         ]
     if "perezakup" not in out and "dobor" not in out and "short" not in out:
         return None
-    # Цели: opposing structural levels (long → resistance above the value area; short → below).
-    if vah is not None:
-        ups = sorted(float(z["lo"]) for z in zones if float(z.get("lo") or 0) > vah)
+    # Цели: opposing structural levels (long → resistance above the long zones; short → below).
+    #
+    # Отсчёт ведётся от ВСЕХ опубликованных зон своей стороны, а не от одного `vah`. Добор по
+    # построению живёт ВЫШЕ value area (`float(z["hi"]) > vah` в фильтре выше), поэтому «цель выше
+    # перезакупа» могла оказаться НИЖЕ входа в добор: измерено на живом LTC 4h — цели 45.80 и 46.27
+    # при верхе лонг-зоны 46.34, то есть карточка предлагала фиксировать прибыль под собственным
+    # входом. И берутся именно ОПУБЛИКОВАННЫЕ кромки: `_zone_view` сужает бокс до value area, так
+    # что сырой `z["hi"]` — уже не та цена, которую увидит читатель.
+    long_edges = [float(z["hi"]) for z in (out.get("dobor") or [])]
+    pk_out = out.get("perezakup")
+    if isinstance(pk_out, dict):
+        long_edges.append(float(pk_out["hi"]))
+    if long_edges:
+        floor_up = max(long_edges)
+        ups = sorted(float(z["lo"]) for z in zones if float(z.get("lo") or 0) > floor_up)
         if ups:
             out["long_targets"] = ups[:3]
-    if short_src:
-        anchor_hi = float(short_src[0]["lo"])
-        downs = sorted((float(z["hi"]) for z in zones if 0 < float(z.get("hi") or 0) < anchor_hi), reverse=True)
+    short_edges = [float(z["lo"]) for z in (out.get("short") or [])]
+    if short_edges:
+        floor_dn = min(short_edges)
+        downs = sorted((float(z["hi"]) for z in zones if 0 < float(z.get("hi") or 0) < floor_dn),
+                       reverse=True)
         if downs:
             out["short_targets"] = downs[:3]
     return out

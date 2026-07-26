@@ -352,12 +352,13 @@ def test_stop_volume_poc_is_its_own_not_the_parent_window() -> None:
     # Со span'ом ПОК лежит внутри собственных границ стопового…
     assert sv["lo"] <= sv_poc <= sv["hi"]
 
-    # …и ОТЛИЧАЕТСЯ от того, что вернул бы тот же вызов без span'а (регрессия: пока
-    # find_stop_volume не отдавал span, здесь профилировалось всё окно ТФ-1).
-    no_span = {k: v for k, v in sv.items() if not k.startswith("structure_")}
-    parent_poc = zone_poc(rows, zone=no_span, cfg=CFG)["poc"]
-    assert sv_poc != pytest.approx(parent_poc, abs=0.05), (
-        f"ПОК со span'ом ({sv_poc}) совпал с ПОКом всего окна ({parent_poc}) — "
+    # …и ОТЛИЧАЕТСЯ от ПОКа ВСЕГО окна ТФ-1 (регрессия: пока find_stop_volume не отдавал span,
+    # здесь профилировалось именно оно). Сравнение идёт с окном напрямую, а не с «тем же вызовом
+    # без span'а»: снятие ключей больше не воспроизводит ту регрессию — ``_structure_bars`` теперь
+    # находит структуру и по самой полосе, так что оба исхода сходятся ПРАВИЛЬНО, а не ошибочно.
+    window_poc = zone_poc(rows, zone=None, cfg=CFG)["poc"]
+    assert sv_poc != pytest.approx(window_poc, abs=0.05), (
+        f"ПОК стопового ({sv_poc}) совпал с ПОКом всего окна ({window_poc}) — "
         "профиль натянут не на структуру стопового"
     )
 

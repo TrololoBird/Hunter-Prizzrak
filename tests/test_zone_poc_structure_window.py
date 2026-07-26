@@ -24,11 +24,24 @@ def test_poc_is_taken_from_the_structure_bars() -> None:
 
 
 def test_full_lookback_profile_would_miss_the_zone() -> None:
-    """Guard the premise: without the indices the POC lands on the loud trend instead."""
-    zone_without_span = {"lo": 99.0, "hi": 101.0}
-    out = zone_poc(OHLCV, zone=zone_without_span)
+    """Guard the premise the module actually relies on: the FULL window profiles the loud trend.
+
+    Это и есть цена ошибки — ПОК всего окна вместо ПОКа структуры. Раньше здесь стоял более
+    слабый guard: «зона БЕЗ индексов span'а промахивается». Он держался лишь потому, что
+    ``_structure_bars`` без индексов сдавался на всё окно, — а именно эта сдача и оказалась
+    дефектом: на живом BTC 4h огибающая касаний занимала 79–96% окна, так что «индексы есть»
+    от «индексов нет» не отличалось ничем. Теперь структура ищется по самой полосе, поэтому
+    случай без индексов проверяется как ПОЛОЖИТЕЛЬНЫЙ (тест ниже), а промах окна — здесь.
+    """
+    out = zone_poc(OHLCV, zone=None)
     assert out["poc"] > 101.0
-    assert "poc_position_in_zone" not in out
+
+
+def test_zone_without_span_indices_still_profiles_its_structure() -> None:
+    """Полоса сама задаёт структуру: непрерывная серия свечей, торгующих внутри неё."""
+    out = zone_poc(OHLCV, zone={"lo": 99.0, "hi": 101.0})
+    assert out["poc"] is not None
+    assert 99.0 <= out["poc"] <= 101.0, f"POC {out['poc']} взят не со свечей структуры"
 
 
 def test_position_in_zone_reported_when_poc_sits_inside() -> None:

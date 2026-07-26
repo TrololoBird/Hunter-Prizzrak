@@ -37,11 +37,13 @@ import ccxt.async_support as ccxt
 
 from hunt_core.prizrak.config import PrizrakConfig
 from hunt_core.engine.spot import SpotEngine
+from hunt_core.prizrak.orchestrator import _INTEREST_ZONE_MAX_WIDTH_PCT
 from hunt_core.prizrak.setups import build_symbol_setups
 from hunt_core.runtime.native_producers import spot_weekly_ladder_native
 
 CFG = PrizrakConfig.load()
 SIGNS: list[tuple[str, float]] = []
+QUALITY: dict[str, int] = {}
 TFS = ("5m", "15m", "1h", "4h", "1d", "1w")
 
 # Эталон: уровни, снятые С ГРАФИКОВ автора и сверенные по свечам в соответствующем .razbor.md.
@@ -148,13 +150,23 @@ def _zone_edges(setups: dict[str, Any], ladder: dict[str, Any] | None = None
 
 
 def _match(level: float, zones: list[tuple[float, float, float | None, str]], tol_pct: float
-           ) -> tuple[bool, str, float, float]:
-    """Уровень засчитан, если он ВНУТРИ зоны либо в ``tol_pct`` от кромки/ПОК. Возвращает
-    ``(попал, метка ближайшей зоны, отклонение %)``."""
-    best: tuple[bool, str, float, float] = (False, "—", float("inf"), 0.0)
+           ) -> tuple[bool, str, float, float, str]:
+    """Уровень засчитан, если он ВНУТРИ зоны либо в ``tol_pct`` от кромки/ПОК.
+
+    Возвращает ещё и КАЧЕСТВО попадания, без которого одна цифра recall врёт: уровень,
+    накрытый 8%-полосой, формально «попал», но лимитку по нему не поставить — это «где-то
+    здесь», а не локализация. Измерено на BCH: его ПОК базы 196 засчитывался как попадание
+    полосой 190–205, и сужение зон до реальной структуры «сломало» его — хотя сломалась
+    ровно фиктивная точность. Порог узости взят не с потолка: ``_INTEREST_ZONE_MAX_WIDTH_PCT``,
+    то есть тот же, по которому сам модуль решает, можно ли ставить лимит.
+    """
+    best: tuple[bool, str, float, float, str] = (False, "—", float("inf"), 0.0, "—")
+    hold: tuple[float, str] | None = None  # (ширина%, метка) самой УЗКОЙ накрывающей зоны
     for lo, hi, poc, tag in zones:
         if lo <= level <= hi:
-            return True, tag, 0.0, 0.0
+            w = (hi / lo - 1.0) * 100.0 if hi > lo > 0 else 0.0
+            if hold is None or w < hold[0]:
+                hold = (w, tag)
         cands = [lo, hi] + ([poc] if poc is not None else [])
         for c in cands:
             if c <= 0:
@@ -162,7 +174,12 @@ def _match(level: float, zones: list[tuple[float, float, float | None, str]], to
             d = abs(level / c - 1.0) * 100.0
             if d < best[2]:
                 # знак: >0 значит НАША кромка ВЫШЕ его уровня, <0 — ниже
-                best = (d <= tol_pct, tag, d, (c / level - 1.0) * 100.0)
+                best = (d <= tol_pct, tag, d, (c / level - 1.0) * 100.0, "кромка/ПОК")
+    if best[0] and best[2] <= tol_pct:
+        return best
+    if hold is not None:
+        kind = "узкая" if hold[0] <= _INTEREST_ZONE_MAX_WIDTH_PCT else "ШИРОКАЯ"
+        return True, hold[1], 0.0, 0.0, kind
     return best
 
 
@@ -210,9 +227,10 @@ async def main() -> None:
             hits = 0
             misses: list[str] = []
             for lvl, name in case["levels"]:
-                ok, tag, dev, signed = _match(float(lvl), zones, args.tol)
+                ok, tag, dev, signed, kind = _match(float(lvl), zones, args.tol)
                 if ok:
                     hits += 1
+                    QUALITY[kind] = QUALITY.get(kind, 0) + 1
                 else:
                     misses.append(f"{name} {lvl:g} (ближайшая {tag}, наша кромка {signed:+.1f}%)")
                     SIGNS.append((name, signed))
@@ -236,6 +254,12 @@ async def main() -> None:
             widths.sort()
             print(f"\nШИРИНА ЗОН: медиана {widths[len(widths) // 2]:.2f}%"
                   f"  ·  p90 {widths[int(len(widths) * 0.9)]:.2f}%  ·  измерено {len(widths)}")
+        if QUALITY:
+            q = "  ·  ".join(f"{k} {v}" for k, v in sorted(QUALITY.items(), key=lambda kv: -kv[1]))
+            wide = QUALITY.get("ШИРОКАЯ", 0)
+            print(f"\nКАЧЕСТВО ПОПАДАНИЙ: {q}"
+                  f"   (ШИРОКАЯ = накрыт полосой >{_INTEREST_ZONE_MAX_WIDTH_PCT:g}%, лимитку не поставить)")
+            print(f"  локализовано точно: {tot_hit - wide}/{tot_lvl} = {(tot_hit - wide) / tot_lvl * 100:.0f}%")
         print(f"\n{'=' * 60}\nИТОГО recall {tot_hit}/{tot_lvl} = {tot_hit / tot_lvl * 100:.0f}%"
               f"   ·   зон напечатано: {tot_zones} (он публикует 2–4 на символ)")
 

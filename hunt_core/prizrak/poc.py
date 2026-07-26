@@ -27,29 +27,73 @@ def _frame_from_ohlcv(ohlcv: list[list[float]]) -> pl.DataFrame:
 
 
 _MIN_STRUCTURE_BARS = 5
+# Сколько баров подряд структура может провести ВНЕ своей полосы, не перестав быть одной
+# структурой. Ноль рвал бы накопление на клочки от каждого выноса фитиля.
+_STRUCTURE_GAP = 2
+
+
+def _structure_runs(
+    ohlcv: list[list[float]], *, lo: float, hi: float
+) -> list[tuple[int, int]]:
+    """Непрерывные серии баров, реально торгующих в полосе ``[lo, hi]``.
+
+    Именно так автор рисует бокс — вокруг компактного скопления свечей, а линию тянет вправо.
+    Ретест через сто баров принадлежит УРОВНЮ, а не структуре, которая его породила.
+    """
+    inside = [i for i, b in enumerate(ohlcv) if float(b[3]) <= hi and float(b[2]) >= lo]
+    if not inside:
+        return []
+    out: list[tuple[int, int]] = []
+    start = prev = inside[0]
+    for i in inside[1:]:
+        if i - prev <= _STRUCTURE_GAP + 1:
+            prev = i
+            continue
+        out.append((start, prev))
+        start = prev = i
+    out.append((start, prev))
+    return out
 
 
 def _structure_bars(
     ohlcv: list[list[float]], zone: dict[str, Any] | None
 ) -> list[list[float]]:
-    """Bars spanned by the structure, or the full window if it can't be located.
+    """Bars the structure actually occupies, or the full window if it can't be located.
 
-    Two producers, two key names, one meaning — "the bars this structure occupies":
-    an accumulation zone marks its span with ``first_touch_idx``/``last_touch_idx``
-    (boundary-touch pivots, accumulation._zone_from_clusters), a стоповый объём with
-    ``structure_lo_idx``/``structure_hi_idx`` (a dense sub-window; it has no touches
-    to count — stop_volume.find_stop_volume).
+    Два продюсера — и только ОДИН из них отдаёт настоящий span. Стоповый объём размечает его
+    честно (``structure_lo_idx``/``structure_hi_idx`` — плотное подокно, stop_volume.find_stop_volume).
+    А ``first_touch_idx``/``last_touch_idx`` зоны накопления — НЕ span: ``accumulation._cluster``
+    группирует пивоты по ЦЕНЕ, «regardless of when they occurred», так что интервал склеивает
+    происхождение структуры со всеми последующими ретестами.
+
+    Измерено на живых BTC 4h (2026-07-25): огибающая касаний давала 236–289 баров из 300 — 79–96%
+    окна, — и «ПОК зоны» вырождался в ПОК ВСЕГО ОКНА. Для бокса 65484–65750 он выпадал на 62902
+    (на 2600 пунктов ниже самой зоны) и корректно глушился guard'ом I-6 — то есть вход терял якорь
+    и падал на кромку. По непрерывной серии тот же бокс даёт 65755, бокс 64473–64919 → 64716 против
+    уровня автора 64754 (0.06%), а зона, у которой огибающая и так совпадала со структурой, — 60157
+    против его 60173 (0.01%). Механизм был верен, вход в него — нет.
+
+    Серия выбирается по ОБЪЁМУ, а не по длине: «сила уровня определяется ТФ и объемом» (стр.22),
+    и профиль строится ради объёма. Длина — только тай-брейк.
     """
     if not zone:
         return ohlcv
-    first = zone.get("structure_lo_idx", zone.get("first_touch_idx"))
-    last = zone.get("structure_hi_idx", zone.get("last_touch_idx"))
-    if first is None or last is None:
+    first = zone.get("structure_lo_idx")
+    last = zone.get("structure_hi_idx")
+    if first is not None and last is not None:
+        lo_i, hi_i = int(first), int(last) + 1
+        if 0 <= lo_i and hi_i <= len(ohlcv) and hi_i - lo_i >= _MIN_STRUCTURE_BARS:
+            return ohlcv[lo_i:hi_i]
         return ohlcv
-    lo_i, hi_i = int(first), int(last) + 1
-    if lo_i < 0 or hi_i > len(ohlcv) or hi_i - lo_i < _MIN_STRUCTURE_BARS:
-        return ohlcv
-    return ohlcv[lo_i:hi_i]
+    lo, hi = zone.get("lo"), zone.get("hi")
+    if isinstance(lo, (int, float)) and isinstance(hi, (int, float)) and 0 < lo <= hi:
+        runs = [r for r in _structure_runs(ohlcv, lo=float(lo), hi=float(hi))
+                if r[1] - r[0] + 1 >= _MIN_STRUCTURE_BARS]
+        if runs:
+            a, b = max(runs, key=lambda r: (sum(float(x[5]) for x in ohlcv[r[0]:r[1] + 1]),
+                                            r[1] - r[0]))
+            return ohlcv[a:b + 1]
+    return ohlcv
 
 
 def zone_poc(
