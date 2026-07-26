@@ -1,57 +1,54 @@
 # Hunt — crypto-futures signal-analytics
 
+> Переписан **2026-07-26** по дереву. Прежняя редакция (2026-07-12) содержала: таблицу скиллов,
+> указывающую на несуществующий `.opencode/skills/`; список «What's already been fixed», где
+> 4 из 5 названных символов удалены вместе с транспортом; и **неверный торговый параметр** —
+> буфер стопа манипуляций как `[1.5%, 5%]`, тогда как код и `CLAUDE.md` дают `[3%, 5%]`.
+> Последнее опасно ровно тем, что агент «чинит» код под цифру из инструкции.
+>
+> **Первичен `CLAUDE.md`.** Здесь — только то, чего там нет (зависимости и их доки).
+
 ## Project
 
-Standalone Python `>=3.14,<3.15` package — reads public **Binance USDⓈ-M** data via
-**CCXT** (async REST + WebSocket), engineers features with **Polars** (lazy API,
-Expression API), delivers **manual** signals to **Telegram**.
+Standalone Python `>=3.14,<3.15` package — reads public **Binance USDⓈ-M** via **CCXT/ccxt.pro**
+(async REST + WebSocket), engineers features with **Polars** (Expression API / LazyFrame),
+delivers **manual** signals to **Telegram**.
 
-**This is NOT a trading bot.**
-- No order placement, no account management, no private API keys for Binance
-- Signal-analytics only: generates alerts for a human trader
-- Full canonical allowed/prohibited CCXT method lists (single source of truth, CI-enforced):
-  [`docs/ai/rules/prohibited-apis.md`](docs/ai/rules/prohibited-apis.md)
+**This is NOT a trading bot.** No order placement, no account management, no private Binance keys.
+Full canonical allowed/prohibited CCXT lists (single source of truth, enforced by
+`scripts/check_prohibited_apis.py` in pre-commit):
+[`docs/ai/rules/prohibited-apis.md`](docs/ai/rules/prohibited-apis.md).
 
 ```bash
-uv sync --all-extras              # install deps (incl. dev: ruff, mypy, pytest, hypothesis)
-uv run python -m hunt_core watch --interval 30   # production loop
-uv run python -m hunt_core watch --once --no-telegram  # smoke test
-uv run pytest                     # tests
-uv run ruff check .               # lint
-uv run mypy hunt_core             # type-check
+uv sync --all-extras                                   # install (incl. dev)
+uv run python -m hunt_core watch --interval 30         # production loop
+uv run python -m hunt_core watch --once --no-telegram  # smoke — ⚠ призрак ДА, сканер НЕТ
+uv run pytest && uv run ruff check . && uv run mypy hunt_core
 ```
 
-**Run first:** copy `.env.example` → `.env`, fill `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`.
+**Run first:** copy `.env.example` → `.env`, fill `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`.
 
-## Skills (auto-loaded by OpenCode)
+## Где что лежит
 
-Each skill is a focused ~30-60 line file in `.opencode/skills/<name>/SKILL.md`.
-OpenCode auto-discovers them and loads the relevant one when you ask about the topic.
+Архитектура, границы двух модулей, инварианты I-1..I-8, правила верификации на живых данных —
+**[`CLAUDE.md`](CLAUDE.md)**. Карта документации со статусами — **[`docs/README.md`](docs/README.md)**.
+Дублировать их здесь запрещено: расхождение двух инструкций хуже отсутствия одной.
 
-| Skill | Topic |
-|-------|-------|
-| **ccxt** | Public API rules, imports, banned methods, WS/REST |
-| **polars** | Expression API, LazyFrame, no pandas |
-| **architecture** | Module dependency graph, ownership, isolation |
-| **scanner** | Pattern detection (A, B, A3, C), state machine, delivery |
-| **deep-analysis** | PrizrakTrade engine, accumulation, ПП break, traps |
-| **performance** | Vectorized data, caching, WS over REST, timeouts |
-| **testing** | pytest, pytest-asyncio, hypothesis |
-| **telegram** | aiogram usage, formatting, sending |
-| **logging** | Structlog conventions, levels, structured keys |
-| **config** | config.toml, config.defaults.toml, .env merge |
-| **documentation** | Google-style docstrings, type hints, naming |
+Скиллы Claude Code — `.claude/skills/<topic>/SKILL.md` (17 шт.). ⚠ Все написаны 2026-07-12/07-15
+и **не пережили переезд движка**: пути и символы в них проверять перед применением.
+Каталога `.opencode/` в репозитории нет.
 
 ## CCXT AI Skill (official)
 
-The official CCXT Python AI skill is at:
-- `~/.opencode/skills/ccxt-python/SKILL.md` (OpenCode)
 - `~/.claude/skills/ccxt-python/SKILL.md` (Claude Code)
+- `~/.opencode/skills/ccxt-python/SKILL.md` (OpenCode)
 
-Auto-loaded when working with CCXT code. Refresh via `bash scripts/refresh-ccxt-skill.sh`.
+Обновление: `bash scripts/refresh-ccxt-skill.sh`.
+Референс: <https://raw.githubusercontent.com/ccxt/ccxt/master/llms.txt> ·
+WS-мануал: <https://github.com/ccxt/ccxt/wiki/ccxt.pro.manual>
 
-Full references: https://raw.githubusercontent.com/ccxt/ccxt/master/llms.txt
-WebSocket manual: https://github.com/ccxt/ccxt/wiki/ccxt.pro.manual
+⚠ Пол версии: **ccxt >= 4.5.44**. Более старые молча теряют kline/markPrice/forceOrder по WS
+после разделения fstream у Binance 2026-04-23.
 
 ## Dependencies
 
@@ -79,31 +76,26 @@ WebSocket manual: https://github.com/ccxt/ccxt/wiki/ccxt.pro.manual
 | `[dev]` | ruff, mypy, pytest, pytest-asyncio, hypothesis | `uv sync --extra dev` |
 | `[diagnostics]` | rich | `uv sync --extra diagnostics` |
 | `[monitoring]` | prometheus-client, prometheus-async | `uv sync --extra monitoring` |
+| `[otel]` | opentelemetry-sdk, opentelemetry-exporter-otlp-proto-http | `uv sync --extra otel` |
 
 ### Removed (safe to re-add if needed)
-- **polars-trading** — removed in Jul 2026. Only provided Sharpe ratio + drawdown. Native Polars fallbacks are in `research_plugins.py`. Note: `polars-trading` had poor maintenance (61 stars, 2 releases). Re-add only if you need actively maintained trading-specific Polars extensions.
+- **polars-trading** — removed Jul 2026. Only provided Sharpe ratio + drawdown; native Polars
+  fallbacks live in `hunt_core/features/research_plugins.py`. Poorly maintained (61 stars,
+  2 releases) — re-add only if you need an actively maintained trading-specific Polars extension.
 
 ### Deliberately not used
-- `pandas` — Polars only
-- `requests` — aiohttp only
+- `pandas` — Polars only (механически запрещён: ruff `TID251`)
+- `requests` — aiohttp only (там же)
 - `scipy` / `sklearn` — no ML dependency
 - `ta-lib` / `pandas-ta` — Polars-TA covers indicators
 - `celery` / `redis` — no distributed architecture
 - `sqlalchemy` — no ORM
 - `websockets` — CCXT Pro wraps WS
 
-## What's already been fixed
+## Почему здесь больше нет раздела «What's already been fixed»
 
-1. **Bullish volume** — checks `z.max()` across whole window
-2. **A3 score penalty** — removed `* 0.6` multiplier
-3. **Pattern C** — rewritten to single-tick evaluation (no more stale prior_high)
-4. **micro_confirmed** — added `ltf_confirmed` param to `_build_setup`
-5. **Cooldown testability** — tracker imports at module level
-6. **Adaptive stop buffer** — `0.3 × ATR%`, clamped `[1.5%, 5%]`
-7. **C1: rate-limit acquire timeout** — added 300s deadline to `SlidingWindowRateLimiter.acquire()` and `WeightBudgetManager.acquire()` so the bot doesn't hang forever on exhausted rate-limit windows
-8. **C2: safe_fetch double pause** — removed redundant `await_rate_limit_pause()` in `collect.py:98-99` (invoke already pauses)
-9. **C3: batch fetch timeout** — wrapped ticker & batch-cache fetches in `asyncio.wait_for(timeout=120)` to prevent watchdog kills
-10. **H3: finally guard** — `run_tick` only persists state/tracker/lake on clean exit (not on abort)
-11. **M2: kama10 dtype** — explicit `dtype=pl.Float64` on `pl.Series("kama10", …)`
-12. **M1: OHLCV 1m cache** — `collect.py` uses `fetch_klines_cached` (25s TTL) instead of raw `fetch_klines`
-13. **polars-trading removed** — unmaintained (61 stars, 2 releases). Native Polars fallbacks in `research_plugins.py` cover Sharpe ratio + drawdown. Re-add via `uv add polars-trading` if needed.
+Он был списком из 13 закрытых фиксов от 2026-07-12 и превратился в ловушку: 4 из 5 названных
+в нём символов (`SlidingWindowRateLimiter`, `WeightBudgetManager`, `fetch_klines_cached`,
+`await_rate_limit_pause`) удалены вместе с легаси-транспортом, а `collect.py:98-99` — ссылка
+на несуществующий файл. **Журнал изменений — это `git log`.** Инструкция для агента должна
+описывать, как устроено сейчас, и ничего больше.

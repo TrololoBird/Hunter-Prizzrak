@@ -1,76 +1,94 @@
 # Hunt (crypto-hunter)
 
-Standalone crypto-futures signal-analytics package in the monorepo — **two independent modules**:
+> Сверено с деревом **2026-07-26**. Прежняя редакция пролежала с 2026-07-09 и врала в
+> шести местах (`pip install -e .`, «no CoinGecko», `prizrak/pipeline/macro_data.py`,
+> `market/` как транспорт, `signals/` как общий позвоночник, ссылка на удалённый SPEC_v5.1).
 
-- **Deep** (`hunt_core/prizrak/`) — PrizrakTrade-methodology evidence-node engine (accumulation/POC levels, ПП trend-break, traps, stop-volume, multi-timeframe structure) for pinned majors and `/signal SYM`; entry point `build_prizrak_signals()`
-- **Scanner** (`hunt_core/scanner/`) — universe-wide pre-pump/pre-dump detection (`run_scan()`, `PrescanEngine`)
+Standalone crypto-futures **signal-analytics** package — **two independent modules**:
 
-Both share only via `hunt_core/signals/`, `data/`, `market/`, `track/` — they never import each other.
+- **PRIZRAK / Deep** (`hunt_core/prizrak/`) — движок метода PrizrakTrade: накопление, уровни
+  ПОК, ПП, ловушки, стоповый объём, МТФ-структура. Работает по пиннутым мажорам и `/signal SYM`;
+  точка входа `orchestrator.py::build_prizrak_signals`.
+- **МАНИПУЛЯЦИИ / Scanner** (`hunt_core/scanner/`) — детект инженерных памп/дампов по всей
+  вселенной: `prescan.py::PrescanEngine`, `prescan.py::run_scan`,
+  `detect/patterns.py::advance_manipulation_scales`.
 
-- Public **Binance USDⓈ-M** via **CCXT** — 100% CCXT market plane, no raw Binance HTTP, no CoinMarketCap/CoinGecko (`hunt_core/prizrak/pipeline/macro_data.py` computes BTC.D/TOTAL3 as a CCXT `fetchTickers()` quoteVolume proxy)
-- **Telegram** manual signals only — signal-analytics, no auto-trading, no private Binance auth
-- Canonical package: **`hunt_core/`** only — `python -m hunt_core`
+Они **никогда не импортируют друг друга** (закреплено `tests/test_module_boundary.py`).
+Общее — только плоскость данных (`engine/` → `view/` → `features/`) и пост-эмиссионная
+полоса `track/`. Общего позвоночника сигналов нет: `hunt_core/signals/` — скаффолдинг.
+
+- Public **Binance USDⓈ-M** через **CCXT/ccxt.pro** — весь рыночный план на CCXT, без сырого
+  Binance HTTP, без приватных вызовов. ⚠ **CoinGecko используется** — доп-факторы призрака
+  dominance (BTC.D/TOTAL3) и marketcap ходят в CoinGecko и **выключены по умолчанию**
+  (`prizrak/dominance_source.py`, `prizrak/marketcap_source.py`).
+- **Telegram** — только ручные сигналы. Ордеров нет, балансов нет, приватной авторизации нет.
+- Канонический пакет: **`hunt_core/`**, запуск `python -m hunt_core`.
 
 ## Quick start
 
 ```bash
-# repo root, venv active
-pip install -e .
-
-# single tick (no Telegram)
-python -m hunt_core watch --once --no-telegram
-
-# production loop
-python -m hunt_core watch --interval 60
+uv sync --all-extras
 ```
 
-Secrets: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` in `.env` (repo root).
+```bash
+uv run python -m hunt_core watch --once --no-telegram
+```
 
-Data: `data/` — runtime state, watchlist, calibration cache.
+```bash
+uv run python -m hunt_core watch --interval 60
+```
 
-## Package layout
+⚠ `--once --no-telegram` — это smoke **только для призрака**: флаг прячет
+`deliver_manipulation_setups`, а эта функция делает и детект, поэтому сканер не проверяется.
+
+Секреты в `.env` (корень репо): `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`
+(опционально `TELEGRAM_LAB_CHAT_ID`, `TELEGRAM_OPERATOR_USER_IDS`).
+
+Данные: `data/` — состояние рантайма, watchlist, кэш калибровки, pid-lock `watch.pid`.
+
+## Package layout (сверено 2026-07-26)
 
 ```
 .                        # repo root (pyproject.toml, config.*.toml)
 ├── hunt_core/
-│   ├── prizrak/         # Deep module: PrizrakTrade evidence-node engine + config
-│   │   └── pipeline/    # macro_data/structure/types (reads config.defaults.toml [deep.prizrak])
-│   ├── scanner/         # Scanner module: universe pre-pump/pre-dump (prescan, gate, detect)
-│   ├── toolkit/         # Shared analytical primitives (manipulation fusion, order flow, robust stats)
-│   ├── market/          # CCXT client, rate limiting, WS/REST transport (shared kernel)
-│   ├── signals/         # Shared spine: Signal, setup_id dedup, lifecycle states
-│   ├── data/, track/, deliver/, domain/, features/, runtime/, ...
-├── docs/                # SPEC_v5.1.md (Deep pipeline target spec)
-├── config.toml / config.defaults.toml   # includes [deep.prizrak] section for engine thresholds
-└── data/                # Runtime state + baseline/
+│   ├── engine/          # ccxt.pro плоскость данных — ЕДИНСТВЕННЫЙ транспорт (REST+WS)
+│   ├── view/            # типизированный контракт: MarketView, MarketRuntime, fail-loud price
+│   ├── prizrak/         # PRIZRAK: движок метода (+ engines/, pipeline/)
+│   ├── scanner/         # МАНИПУЛЯЦИИ: prescan + detect/
+│   ├── features/        # Polars-индикаторы (prepare_symbol, build_factor_panel)
+│   ├── maps/            # стакан / ликвидации / объёмный профиль / OI / кросс-венью
+│   ├── market/          # НЕ транспорт: символы, гейт торгуемости, шаг цены, egress
+│   ├── data/            # только хранение: lake, jsonl, baseline, universe
+│   ├── runtime/         # цикл, нативная сборка, analyst assembly, telegram-команды
+│   ├── deliver/ track/ toolkit/ domain/ params/ regime/ levels/ confluence/ diagnostics/
+├── docs/                # см. docs/README.md — у каждого файла шапка со статусом и датой
+├── research/            # корпуса метода + бэктесты манипуляций
+├── scripts/             # verify_* — проверка геометрии на ЖИВЫХ данных
+├── config.toml / config.defaults.toml
+└── data/                # состояние рантайма
 ```
-
-## vs main bot
-
-| | Main bot (`bot/`) | Hunt |
-|---|-------------------|------|
-| Trigger | WS kline close | CCXT REST poll (Deep: every `HUNT_DEEP_PINNED_INTERVAL`s, default 300s) + Scanner tick |
-| Delivery | contract → confluence 3/5 | Deep PrizrakTrade signals / Scanner prescan → TG |
-| Universe | shortlist | Deep: pinned majors + `/signal SYM`; Scanner: full USDⓈ-M universe |
 
 ## Configuration
 
-`PrizrakConfig.load()` (`hunt_core/prizrak/config.py`) reads the `[deep.prizrak]` section from `config.defaults.toml`, merging any `config.toml` overrides onto the model defaults.
+`config.defaults.toml` — истина, `config.toml` накладывается поверх.
+`prizrak/config.py::PrizrakConfig.load` читает секцию `[deep.prizrak]`.
+⚠ Ловушка: часть задокументированных ключей проигрывает хардкод-фоллбэку в загрузчике —
+правка TOML тогда молча ничего не делает. После правки проверять, что ключ реально читается.
 
 ## Verification
 
-After `pip install -e .` (repo root, venv active):
+**Только на живых данных** — синтетическая фикстура проверкой не считается (директива
+пользователя 2026-07-25).
 
 ```bash
-python -m compileall -q hunt_core
+uv run ruff check . && uv run mypy hunt_core && uv run pytest
 ```
 
-There is no `_dev` diagnostics package or `verify` subcommand in the current tree — verify via `compileall` plus a live smoke run:
-
-```bash
-python -m hunt_core watch --once --no-telegram
-```
+Геометрия — независимыми инструментами поверх живого CCXT:
+`scripts/verify_zone_geometry.py`, `verify_signal_geometry.py`, `verify_liq_map.py`,
+`verify_zone_handoff.py`, `verify_scanner_vs_channel.py`, `scripts/score_vs_razbor.py`.
 
 ## Docs
 
-- [SPEC_v5.1.md](docs/SPEC_v5.1.md) — Deep 5-module pipeline target specification
+Индекс со статусами: [docs/README.md](docs/README.md).
+Правила для агентов: [CLAUDE.md](CLAUDE.md) · [AGENTS.md](AGENTS.md).

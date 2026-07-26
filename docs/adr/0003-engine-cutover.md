@@ -1,5 +1,12 @@
 # ADR 0003 — Cutover: move the whole project onto the ccxt-native engine, delete the old data layer
 
+> **Статус: ВЫПОЛНЕНО** (в тексте ниже стоит «in progress» — это неверно, сверено 2026-07-26).
+> Cutover завершён: S10 главный тик и deep-полоса переведены на нативную сборку
+> (`7dd42b9`, `b6bfd47`), S11 снёс легаси-транспорт (`5ba0fea`, 2026-07-19).
+> `market/{client,streams,factory,cross,live_price,weight_registry}.py`,
+> `data/{collect,frame_cache}.py`, `runtime/tick_assembly.py` — **удалены**.
+> Таблица «gaps E1-E7» ниже — исторический план, а не список открытых задач.
+
 Status: **in progress** (staged). Supersedes the transport half of `market/` + `data/{collect,frame_cache}`.
 Decision (user, 2026-07-18): *«полностью перевести проект на новый движок, полностью удалить старый,
 затем заняться модулем Призрак».* This ADR is the map; it MUST survive context compaction.

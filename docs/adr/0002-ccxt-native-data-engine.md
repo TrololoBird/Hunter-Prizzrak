@@ -1,5 +1,9 @@
 # ADR 0002 — Full migration to a ccxt.pro-native data engine
 
+> **Статус: ВЫПОЛНЕНО** (в тексте ниже всё ещё стоит «Proposed» — это неверно).
+> Движок построен и с 2026-07-19 (`5ba0fea`, S11) является единственной плоскостью данных.
+> Сверено 2026-07-26. Читать как обоснование дизайна, не как предложение.
+
 **Status:** Proposed (2026-07-18) — **greenfield engine design**. The current live bot is a
 disposable test run, not a system to migrate incrementally; this ADR designs a **new core from
 scratch** and hard-swaps it in. **Supersedes** ADR-0001's *custom* rate/weight machinery. Grounded

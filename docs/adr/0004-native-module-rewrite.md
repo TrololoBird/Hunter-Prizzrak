@@ -1,5 +1,11 @@
 # ADR 0004 — Native module rewrite: typed MarketView replaces the row-dict
 
+> **Статус: ВЫПОЛНЕНО** (Phase 9 включительно) — сверено 2026-07-26.
+> Типизированный `MarketView` заменил row-dict: в `_cycle_tick.py` и `native_assembly.py`
+> обращений `row[...]` больше нет. 6 из 38 путей в тексте указывают на файлы, снесённые
+> тем же переходом (`domain/settings.py`, `features/frame.py`, `market/live_price.py`,
+> `scanner/{fetch,universe}.py`) — это карта ДО переезда, читать как историю.
+
 Architecture LAW (memory engine-native-modules-from-scratch): engine stays NATIVE on documented libs;
 modules rebuilt FROM SCRATCH on the engine's native contract (NOT the deprecated engine_adapters/).
 Headline: the untyped row-dict (host of the phantom-key/falsy-zero/name-lie defect family) is replaced

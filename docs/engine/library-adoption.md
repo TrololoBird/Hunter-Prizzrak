@@ -1,5 +1,8 @@
 # HUNTER Engine — Final Library Adoption Recommendation
 
+> **Статус: ОБОСНОВАНИЕ ВЫБОРА БИБЛИОТЕК** (2026-07-18), сверено 2026-07-26.
+> Историческое решение; актуальные версии и полы версий — в `pyproject.toml`.
+
 Synthesis of all six category reports, ranked by reliability leverage against the two invariants (I‑6 fail‑loud, I‑5 no‑lookahead) and the push‑state model. Guiding filter: replace a hand‑rolled surface with a documented/vetted one, or close a gap that has actually caused production failures — otherwise don't add weight.
 
 Every ADOPT/TRIAL pick below is confirmed working on Python 3.14 (pure‑Python or ships cp314 wheels); the only real 3.14 gate left is polars‑talib, flagged in TRIAL.

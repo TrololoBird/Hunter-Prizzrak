@@ -1,5 +1,10 @@
 # HUNTER — Order Flow / Heatmap / Liquidation Map: Review & Modernization
 
+> **АРХИВ** (2026-07-12). Ревью карт + WS-пути `market/streams.py` (файл удалён 2026-07-19). Выводы по стакану/ликвидациям/VP частично реализованы; сверять с `hunt_core/maps/` и с замерами окон в `docs/audit/windows-2026-07-26.md`.
+>
+> Перенесён из корня репозитория 2026-07-26: в корне он читался как действующая
+> инструкция. История правок — в git.
+
 Audience: Claude Code. Scope: `hunt_core/maps/orderbook.py`, `hunt_core/maps/liquidation.py`,
 `hunt_core/maps/volume_profile.py`, `hunt_core/maps/config.py`, plus the WS data path in
 `hunt_core/market/streams.py`. Method: full read of the current code + external survey (GitHub,

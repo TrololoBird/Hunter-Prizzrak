@@ -1,5 +1,10 @@
 # HUNTER — Full Project Map
 
+> **АРХИВ** (2026-07-12). Структурная карта `hunt_core` ДО переезда на движок. `market/` здесь описан как CCXT-транспорт из 14 модулей — сегодня их 4 и транспорт живёт в `hunt_core/engine/` (`5ba0fea`, 2026-07-19). Актуальная карта — в `CLAUDE.md` и `docs/ARCHITECTURE.md` §3.
+>
+> Перенесён из корня репозитория 2026-07-26: в корне он читался как действующая
+> инструкция. История правок — в git.
+
 Purpose of this document: a complete structural map of `hunt_core` (~59k LOC, 18 sub-packages) to
 ground the per-module review that follows. Built from a full file inventory + module docstrings + an
 inter-package import graph. Confidence: **[confirmed]** = read from code/graph; **[inferred]** =

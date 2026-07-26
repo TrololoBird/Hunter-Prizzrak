@@ -1,23 +1,28 @@
-# ARCHITECTURE — target design & rationale
+# ARCHITECTURE — design & rationale
 
-Status: **active north-star** (supersedes `docs/SPEC_v5.1.md`, which is deprecated —
-it describes an abandoned quant pipeline: KER/EMA-slope/funding-percentile/OI-rank/
-CoinMarketCap macro, and even contradicts `CLAUDE.md`'s "no CoinMarketCap"). Do not
-align new code to SPEC_v5.1.
+> **Статус: §2 АКТУАЛЬНО · §1/3/4/5/6 переписаны 2026-07-26 по дереву.**
+> Прежняя редакция (2026-07-16) описывала снесённый транспорт: `market/` как CCXT-клиент,
+> `signals/` как общий позвоночник, `data/frame_cache.py` как контракт устойчивости — всё
+> это умерло 2026-07-19 в `5ba0fea`. **§2 (две стратегии) не трогалось: оно выведено из
+> файлов пользователя, а не из кода, и остаётся верным.**
+> Для вопросов «как устроен рантайм СЕГОДНЯ» первичен код и `CLAUDE.md`, не этот файл.
 
-This document is the single place that states **what the system is**, **the two
-strategies it runs and how they differ**, **the module boundaries**, **the operational
-resilience contract**, and **how a change is proven good**. Read it before restructuring
-anything.
+This document states **what the system is**, **the two strategies it runs and how they
+differ**, **the module boundaries**, **the operational resilience contract**, and **how a
+change is proven good**. Read it before restructuring anything.
 
 ---
 
 ## 1. What this is
 
 A standalone crypto-futures **signal-analytics** product. Reads public Binance USDⓈ-M
-market data via CCXT, engineers features with Polars, and delivers **manual** signals to
-Telegram. No auto-trading, no private auth. Two independent strategies share only the
-spine (`signals/`, `data/`, `market/`, `track/`) and never cross-import.
+market data via CCXT (ccxt.pro), engineers features with Polars, and delivers **manual**
+signals to Telegram. No auto-trading, no private auth.
+
+Two independent strategies share only the **data plane** (`engine/` → `view/` → `features/`)
+and the **post-emission lane** (`track/`), and never cross-import. They do **not** share a
+signal spine: `signals/` is scaffolding (`module=2` is unreachable — see its own
+`__init__.py`), and there is no shared row-dict since the ADR-0004 rewrite.
 
 ## 2. The two strategies — DO NOT CONFUSE THEM
 
@@ -97,27 +102,35 @@ an engineered pump/dump of **20+%, reaching 60–180%** (`scanner/`, the `.txt` 
 сквиз at a level** — ordinary level-trading vocabulary, NOT this strategy. A small squeeze at
 a level is not the 60–180% play. Keep them separate in code, tests, and docs.
 
-## 3. Module map (authoritative)
+## 3. Module map (сверено 2026-07-26)
 
 ```
 hunt_core/
+  engine/     ccxt.pro data plane — THE transport (REST+WS, weight/limits, freshness,
+              liquidations, orderflow, OI/funding stats, spot). Sole since 5ba0fea.
+  view/       typed contract: models.py::MarketView, build.py, fail-loud price.py,
+              runtime.py (MarketRuntime = MultiEngine + cross-venue)
   prizrak/    Deep engine (PRIZRAK strategy). Decision authority for pinned + /signal.
-              build_prizrak_signals() → 0..N candidates → row["prizrak_signals"].
-  scanner/    Manipulation detector (МАНИПУЛЯЦИИ). advance_manipulation_scales()
-              (patterns A/A3/C long, B short) with per-symbol persisted state.
-  toolkit/    shared primitives (manipulation fusion, order flow, robust stats)
-  market/     CCXT client, rate limiting, WS/REST transport, proxy + PREFLIGHT
-  signals/    shared spine: Signal, setup_id dedup, lifecycle states
-  deliver/    Telegram formatting + delivery (per-strategy renderers)
+              build_prizrak_signals() → 0..N candidates (+ engines/, pipeline/).
+  scanner/    Manipulation detector (МАНИПУЛЯЦИИ). detect/patterns.py::
+              advance_manipulation_scales (A/A3/C long, B short), per-symbol state;
+              reads frames via feed.py::EngineScannerFeed on the engine.
+  features/   Polars indicators — prepare.py::prepare_symbol, factors.py::build_factor_panel
+  maps/       orderbook / liquidations / volume-profile / OI / cross-venue walls
+  market/     ⚠ NOT transport anymore — symbols.py (id↔unified), symbol_gate.py,
+              tick_registry.py (tick size), network.py (egress + proxy preflight)
+  data/       persistence only — lake.py, tick_jsonl.py, baseline_store.py, universe.py
+  signals/    ⚠ scaffolding, NOT a spine — module=2 unreachable (see signals/__init__.py)
+  deliver/    Telegram formatting + delivery (per-strategy renderers) + broadcaster
   diagnostics/ data-plane audits + universe_health (operator signal)
-  runtime/    cycle loop, analyst assembly, tick assembly, telegram commands
-  data/ track/ domain/ features/ regime/ levels/ maps/ ...
-docs/ARCHITECTURE.md   ← this file (SPEC_v5.1 deprecated)
+  runtime/    cycle loop, analyst assembly, NATIVE assembly/producers, telegram commands
+  track/ domain/ params/ regime/ levels/ toolkit/ confluence/
 research/backtest_scanner.py   faithful ladder-aware manipulation backtest
 ```
 
-Invariant: **Deep and Scanner never import each other.** Shared logic goes through the
-spine, not a cross-import.
+Invariant: **Deep and Scanner never import each other** (I-1; pinned by
+`tests/test_module_boundary.py`). There is no shared spine to route logic through —
+if two lanes need the same primitive it goes to `toolkit/` or `levels/`, not `signals/`.
 
 ## 4. Data-plane resilience contract (added after the 2026-07-11 incident)
 
@@ -139,22 +152,35 @@ no one. The contract below prevents a silent repeat:
 4. **Hang watchdog** — `faulthandler.dump_traceback_later(HUNT_WATCHDOG_S, exit=True)`
    stays: it dumps every thread's stack to `data/hunt_watchdog.log` then exits, so a hung
    loop becomes a restartable crash (not a frozen zombie). Default 300s.
-5. **HTF frame persistence** (`data/frame_cache.py::persist_htf_frames/load_htf_frames`)
-   — 1h/4h/1d/1w closed-bar frames are written to `data/htf_frames/htf_<tf>.parquet`
-   every ~5 min + on shutdown (atomic tmp-rename), and reloaded at startup before the
-   first tick. A reloaded frame that still holds the latest closed bar serves the tick
-   path directly (`collect.py::htf_cache_frame_serves`), so a restart no longer opens a
-   ~4h universe-wide HTF-staleness window while lazy per-symbol REST re-warms; REST tops
-   up a TF only when its bar rolls over. Corrupt/stale files are skipped (REST fallback);
-   frames past the TF fallback max-age age out of the file at persist time.
+5. **HTF frames live in the engine, not in a parquet cache.** ⚠ Прежний пункт описывал
+   `data/frame_cache.py::persist_htf_frames/load_htf_frames` + `collect.py::
+   htf_cache_frame_serves` — **всё три символа удалены 2026-07-19** вместе с файлами.
+   Сегодня 1h/4h/1d/1w-кадры сидят в kline-планах `MultiEngine` (сеются + стримятся по WS),
+   и рестарт пересеивается **с движка**, а не из JSON/parquet-блоба; комментарий об этом
+   стоит прямо в `_cycle_loop.py::run_loop`. Класс дефекта, ради которого писался тот
+   пункт (застрявший HTF-кадр → универсальный блэкаут), **никуда не делся** — он теперь
+   ловится TTL-контрактом кэша движка, см. память `stale-htf-cache-trap`.
+6. **On-demand warm-set.** Главный тик обслуживает ТОЛЬКО прогретые движком символы
+   (`rt.multi.primary.tracked_symbols()`); непиннутые греются по требованию
+   (`Engine.add_symbol`, 1e9f30c). Массовый прогрев открытых сигналов ЗАПРЕЩЁН — Binance
+   отвечает штормом 1006; они сверяются через REST-reconcile.
 
-Future work (specified, not yet built): proxy **failover** (rotate through
-`effective_proxy_urls()` when the active one fails preflight mid-run, not only at start).
+Future work (specified, not yet built): proxy **failover** — ротация запасных прокси при
+падении активного в середине прогона, а не только на старте. ⚠ Прежняя редакция называла
+здесь `effective_proxy_urls()`; такой функции в дереве нет — это была спецификация, а не
+ссылка на код.
 
 ## 5. Validation gate — how a change is proven good
 
-- **Prizrak**: verify via `assemble_analyst_tick` on live symbols + rendered message
-  sanity vs the PDF methodology (structure/МТФ/maps, stop за структуру с запасом).
+- **⚠ Только на живых данных** (директива пользователя 2026-07-25, повторена трижды):
+  синтетическая фикстура проверкой НЕ считается. Все дефекты 2026-07-25 нашли живые
+  данные, ни одного не нашли тесты; два из них тест не мог поймать в принципе. Тест
+  допустим лишь как фиксация дефекта, УЖЕ измеренного на живых данных.
+- **Prizrak**: `assemble_analyst_tick` на живых символах + сверка отрисованной карточки с
+  методом PDF (структура/МТФ/карты, стоп за структуру с запасом). Инструменты, гоняющие
+  настоящий код на живом CCXT: `scripts/verify_zone_geometry.py`,
+  `verify_signal_geometry.py`, `verify_liq_map.py`, `verify_zone_handoff.py`,
+  `score_vs_razbor.py`.
 - **Manipulations**: `research/backtest_scanner.py` — a no-lookahead forward replay that
   drives the real detector and evaluates it with the **faithful FAST-play** risk model:
   wide stop, добор/усреднение in the dip, bank 50% at a **fixed +20% move**, stop to
@@ -170,7 +196,9 @@ Future work (specified, not yet built): proxy **failover** (rotate through
   majors that do not fit the profile (low-cap, scammed, making new lows); a representative
   dataset is needed before trusting absolute R.
 - **Always**: `ruff check .` + `mypy hunt_core` + `pytest` + a `watch --once --no-telegram`
-  smoke run before considering a change done.
+  smoke run before considering a change done. ⚠ **Этот smoke НЕ проверяет сканер**:
+  `--no-telegram` прячет `deliver_manipulation_setups` за флагом отправки, а эта функция
+  делает и детект. Призрак деградирует корректно; манипуляции глохнут целиком.
 
 ## 6. Known debt / next architectural moves
 
@@ -186,12 +214,18 @@ Future work (specified, not yet built): proxy **failover** (rotate through
    the wrong lever. Both were removed.) Next: audit A/A3/B/C against the transcript
    formations (entry timing, the §2.3 sequence) AND test on a REPRESENTATIVE universe —
    dataset_v9 is full of tokenized stocks/majors that don't fit the manipulation profile.
-2. **`orchestrator.py` is ~1650 lines** — the candidate generators (`_zone_candidate`,
-   `_forward_*`, `_pp_candidate`, `_trap_flip_candidate`, stop-volume) should split into
-   `prizrak/candidates/` modules; keep `build_prizrak_signals` as the thin assembler.
-3. **Data footprint** — `data/candidate_observations.jsonl` reached 2.2 GB; the rotation
-   that exists for `analyst_ticks`/`data_plane_audit` should cover every high-volume
-   JSONL, with a size budget.
+2. **`orchestrator.py` — 2633 строки** (замер 2026-07-26; прежняя редакция писала «~1650»,
+   файл вырос на 60% и долг стал БОЛЬШЕ, а не меньше). Генераторы кандидатов
+   (`_zone_candidate`, `_forward_*`, `_pp_candidate`, `_trap_flip_candidate`, stop-volume)
+   просятся в `prizrak/candidates/`; `build_prizrak_signals` остаётся тонким сборщиком.
+3. **Окна без обоснования** — аудит 2026-07-26: **167 из 205** окон/лукбэков не имеют ни
+   цитаты курса, ни замера, и часть доказанно ИНЕРТНА. Список с приоритетами:
+   [`audit/windows-2026-07-26.md`](audit/windows-2026-07-26.md). Инвариант I-7 в CLAUDE.md.
 4. **Config drift** — `config.defaults.toml` is the single threshold source; keep dead
-   overrides out of `config.toml` (silently ignored). Remove SPEC_v5.1 once nothing links
-   it.
+   overrides out of `config.toml` (silently ignored). Ловушка: часть задокументированных
+   ключей проигрывает хардкод-фоллбэку в загрузчике, и правка TOML молча не действует —
+   после правки проверять, что ключ реально читается (агент `config-drift-auditor`).
+5. **Документация гниёт быстрее кода** — этот файл пролежал 10 дней и описывал снесённый
+   транспорт как «authoritative». Правило: ссылка вида `file.py::symbol`, не `file.py:123`
+   (инвариант I-8); статус и дата сверки — в шапке каждого документа; индекс —
+   [`docs/README.md`](README.md).

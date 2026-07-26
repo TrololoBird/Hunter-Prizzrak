@@ -1,5 +1,9 @@
 # Observability — OpenTelemetry tracing
 
+> **Статус: АКТУАЛЬНО** — сверено 2026-07-26 (единственный документ, переживший переезд
+> движка без единой правки: `HUNT_OTEL`, `runtime/telemetry.py`, спан `cycle.tick` —
+> всё на месте).
+
 HUNTER ships an **opt-in** OpenTelemetry tracing layer. It is fully gated behind
 the `HUNT_OTEL` environment variable: when unset (the default) every helper is a
 zero-overhead no-op, so the un-instrumented deployment behaves exactly as before.

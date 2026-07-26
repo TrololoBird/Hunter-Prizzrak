@@ -1,5 +1,9 @@
 # ccxt practitioner notes — internals a data engine must get right
 
+> **Статус: ЗАМЕТКИ ПО БИБЛИОТЕКЕ** (2026-07-18), сверено 2026-07-26. Про ccxt/ccxt.pro,
+> не про наш код, — поэтому почти не гниёт. Живые грабли, найденные ПОСЛЕ этих заметок,
+> лежат в памяти `engine-ccxt-crossvenue-gotchas` и `ccxt-version-floor-fstream`.
+
 Companion to [data-catalog.md](data-catalog.md). The *internals/idioms* (not the data structures),
 grounded in installed source `ccxt==4.5.59`. Cited line numbers are that version.
 

@@ -1,5 +1,10 @@
 # Engine data catalog — what ccxt gives us per exchange
 
+> **Статус: КАТАЛОГ ДАННЫХ** (2026-07-18), сверено 2026-07-26 — путей в код не содержит,
+> поэтому механически не протух. Но состав полей после ADR-0004 задаёт
+> `view/models.py::MarketView` и `native_assembly.py::NativeAnalystView`: при расхождении
+> прав КОД, не эта таблица.
+
 Reference for the ccxt.pro-native engine (ADR-0002). What **data** and **values** are obtainable per
 venue for public futures market data, at the field level. Ground truth: ccxt **4.5.59** — `has` maps,
 `exchange.timeframes`, `ccxt/base/types.py` TypedDicts, and live `BTC/USDT:USDT` fetches on

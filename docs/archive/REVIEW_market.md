@@ -1,5 +1,10 @@
 # REVIEW_market — `hunt_core/market/`: the CCXT data plane
 
+> **АРХИВ** (2026-07-12). Ревью «всех 14 модулей `hunt_core/market/` (7 302 LOC)». Пакет расформирован 2026-07-19: транспорт → `hunt_core/engine/`, в `market/` остались только символы, гейт торгуемости, шаг цены и egress. Документ целиком про снесённый код.
+>
+> Перенесён из корня репозитория 2026-07-26: в корне он читался как действующая
+> инструкция. История правок — в git.
+
 Audience: project maintainer. Scope: all 14 modules of `hunt_core/market/` (7,302 LOC). Method: full read of the current code + external survey (≥10 references per subsystem). First doc in the `REVIEW_<pkg>.md` series (`PROJECT_MAP.md` §7); template = `MAPS_REVIEW.md`.
 
 Confidence tags used throughout: **[confirmed]** = read directly in code · **[inferred]** = deduced from code + platform constraints · **[external]** = from docs/projects outside this repo.

@@ -1,5 +1,10 @@
 # Sessions & historical windows for levels / zones / liquidations — decision record
 
+> **Статус: АКТУАЛЬНО** (2026-07-18), сверено 2026-07-26. Вывод исследования — уровни
+> PrizrakTrade структурные и НЕ истекают по времени (умирают отработкой, не возрастом);
+> PDF молчит о сессиях/CME/выходных. Поэтому движку не нужна сессионная машинерия.
+> Смежное: инвариант I-7 и [`../audit/windows-2026-07-26.md`](../audit/windows-2026-07-26.md).
+
 Question (user, 2026-07-18): for **liquidations and levels**, study *sessions* and *historical
 windows* for determining zones/levels. Answered from the **source-of-truth** (PDF course = PRIMARY;
 video-razbor corpus = SECONDARY/SUSPECT) **cross-checked against verified ccxt/exchange data

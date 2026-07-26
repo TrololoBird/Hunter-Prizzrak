@@ -1,5 +1,10 @@
 # ADR 0001 — WeightGovernor: admission control over reactive backoff
 
+> **Статус: ЗАМЕНЁН (superseded)** ADR-0002/0003 — сверено 2026-07-26. Собственная
+> weight-машинерия удалена вместе с легаси-транспортом 2026-07-19 (`5ba0fea`);
+> `hunt_core/market/weight_registry.py`, на который ссылается текст, **не существует**.
+> Лимиты держит троттлер ccxt.pro + `engine/params.py`. Читать как историю решения.
+
 **Status:** Implemented 2026-07-12 (core; live 2h validation gate pending next bot restart).
 Implementation notes: (a) RESERVE re-scoped per REVIEW_market.md — fstream market streams are
 weight-FREE; reserve covers only ccxt.pro REST depth-snapshot seeds + WS-API handshakes
