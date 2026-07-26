@@ -131,7 +131,16 @@ uv run pytest                 # tests
 uv run pytest tests/test_module_boundary.py -k name    # single test
 uv run pytest --testmon       # fast loop: only tests affected by the change (91s→<1s)
 uv run vulture                # dead-code guard
+uv run python -m hunt_core.engine BTC/USDT:USDT   # движок end-to-end (см. ниже)
 ```
+`python -m hunt_core.engine` — **вторая точка входа**, отдельная от `watch`. Отвечает на вопрос,
+которого не покрывает ни один тест и ни один `verify_*`-скрипт: **двигает ли WS кадр или мы
+смотрим на замёрзший REST-сид.** `ws_advanced=True` появляется, когда за прогон закроется 1m-бар
+(нужно >60 с); плоскость без свежести уходит в `not_ready`, а не подменяется числом.
+Это диагностика самого дорогого класса инцидентов здесь — застрявший кадр → тихий блэкаут
+вселенной (память `stale-htf-cache-trap`). ⚠ До 2026-07-26 команда не была упомянута НИГДЕ, кроме
+собственной докстроки: инструмент без читателя неотличим от мёртвого кода, и именно так и был
+опознан при чистке. `test_levels_reachability.py` держит его в списке осознанных исключений.
 ⚠️ **`--no-telegram` глушит МАНИПУЛЯЦИИ целиком, а не только отправку.** В
 `_cycle_loop.py::_manipulation_scan_loop` вызов `deliver_manipulation_setups` спрятан за
 `if send_telegram and broadcaster is not None and symbols` — а эта функция делает и ДЕТЕКТ.
