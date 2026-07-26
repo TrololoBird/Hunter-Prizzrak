@@ -70,9 +70,13 @@ def test_deep_base_surfaces_with_extended_lookback() -> None:
     assert pk["poc"] is not None and 100.0 <= pk["poc"] <= 110.0 + 1e-6
 
 
-def test_cotrend_perezakup_not_flagged_even_if_worked() -> None:
-    """★ A co-trend ПОК re-buy is the author's PRIMARY limit — a prior reaction (worked) must NOT
-    flag it «по факту» (video refines стр.31). Only counter-trend перезакуп is «по факту»."""
+def test_cotrend_perezakup_survives_and_counter_trend_one_is_dropped() -> None:
+    """★ Со-трендовый перезакуп — ПЕРВИЧНЫЙ лимит автора: прошлая реакция его НЕ дисквалифицирует
+    (видео уточняет стр.31), он обязан остаться в карте чистым. Контр-трендовый — наоборот,
+    из карты УБИРАЕТСЯ: помечать его «по факту» и тут же предлагать в плане значило печатать
+    «бери» и «не бери» в одном сообщении (замерено на живом BTC 2026-07-26).
+
+    Этот тест и держит границу: фильтр обязан быть ИЗБИРАТЕЛЬНЫМ, а не сплошным."""
     bars = _flat_base(lo=100.0, hi=110.0, cycles=10, vol=500.0)
     bars.append(_bar(110.0, 130.0, 110.0, 128.0))
     bars += [_bar(128.0, 129.0, 127.0, 128.0) for _ in range(4)]
@@ -81,25 +85,26 @@ def test_cotrend_perezakup_not_flagged_even_if_worked() -> None:
     pk_co = co["horizons"]["local"]["perezakup"]
     assert pk_co["by_fact"] is False and pk_co["fact_reason"] == ""  # co-trend → clean limit
     against = build_symbol_setups(common, price=128.0, cfg=_CFG, structure={"htf_bias": {"bias": "short"}})
-    pk_ag = against["horizons"]["local"]["perezakup"]
-    assert pk_ag["by_fact"] is True and pk_ag["fact_reason"] == "против тренда"  # add longs «по факту»
+    assert "perezakup" not in (against["horizons"].get("local") or {})
+    assert (against.get("dropped_by_fact") or {}).get("против тренда", 0) >= 1
 
 
-def test_near_resistance_surfaces_and_by_fact_marks_counter_trend() -> None:
-    """A base straddling price yields a 🔴 short at the ceiling; a counter-trend zone is «по факту»."""
+def test_near_resistance_surfaces_and_counter_trend_is_dropped() -> None:
+    """Бокс вокруг цены даёт шорт у потолка, но отработанный уровень убирается из карты со счётом.
+
+    Избирательность фильтра держит ``test_cotrend_perezakup_survives_and_counter_trend_one_is_dropped``:
+    со-трендовый перезакуп в той же машинерии обязан ОСТАТЬСЯ."""
     bars = _flat_base(lo=100.0, hi=110.0, cycles=10)
     bars.append(_bar(105.0, 105.5, 104.5, 105.0))  # sit INSIDE → straddle
     out = build_symbol_setups(
         {"4h": bars}, price=105.0, cfg=_CFG,
         structure={"htf_bias": {"bias": "long"}},  # a short here is counter-trend
     )
-    hz = out["horizons"].get("local")
-    assert hz is not None
-    shorts = hz.get("short") or []
-    assert shorts, f"near resistance (ceiling ≈110) must surface: {hz}"
-    assert min(abs(z["hi"] - 110.0) for z in shorts) < 1.5
-    # A short against a long bias is «по факту», not a set-and-forget limit.
-    assert all(z["by_fact"] for z in shorts)
+    # Потолок этого бокса цена трогала десять раз, то есть уровень ОТРАБОТАН — лимитом он больше
+    # не торгуется (стр.31). В карту он не попадает, но и не исчезает молча: причина сосчитана,
+    # и карточка скажет «чистых зон нет — отработан: N» вместо того, чтобы просто замолчать (I-6).
+    assert not (out["horizons"].get("local") or {}).get("short")
+    assert sum((out.get("dropped_by_fact") or {}).values()) >= 1
 
 
 def test_perezakup_never_reports_a_poc_outside_its_own_zone() -> None:

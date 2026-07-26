@@ -297,96 +297,6 @@ _SNIPER_BAND_HI = 0.82  # [0.58, 0.82)·price → «Снайпер» (deep level
 _NEAR_BAND_HI = 1.0
 
 
-def _lvl_str(lv: dict[str, Any], *, strong: bool) -> str:
-    px = _num(lv.get("price"))
-    t = int(lv.get("touches") or 0)
-    s = f"<code>{fmt_price(px)}</code>" + (f"×{t}" if t > 1 else "")
-    return f"<b>{s}</b>" if strong else s
-
-
-def _deep_horizons(ladder: dict[str, Any], price: float) -> list[str]:
-    """🟢 Ближние + 🎯 Снайпер (deep untested levels) + 🟢 Спот (macro floor + ATL), sliced by depth
-    from the full-history spot ladder — the author's «глубокий спот-ladder … от ATL» (POL/MATIC разбор).
-
-    The three bands TILE the whole ``(0, price)`` range, so no rung can fall between them and vanish.
-    The strongest-touch level in each band is bolded as its volume core (the author's «ПОК» of that
-    horizon; touch-density is our public proxy — VRVP-over-a-band is unavailable). Empty when the ladder
-    has no level in the band (I-6: no fabricated floor)."""
-    below = [
-        lv for lv in (ladder.get("below") or [])
-        if isinstance(lv, dict) and _num(lv.get("price")) is not None
-    ]
-    above_any = [
-        lv for lv in (ladder.get("above") or [])
-        if isinstance(lv, dict) and _num(lv.get("price")) is not None
-    ]
-    if price <= 0 or (not below and not above_any):
-        return []
-    near = [lv for lv in below if _SNIPER_BAND_HI * price <= float(lv["price"]) < _NEAR_BAND_HI * price]
-    sniper = [lv for lv in below if _SPOT_BAND_HI * price <= float(lv["price"]) < _SNIPER_BAND_HI * price]
-    spot = [lv for lv in below if float(lv["price"]) < _SPOT_BAND_HI * price]
-    atl = _num(ladder.get("atl"))
-    out: list[str] = []
-
-    def _horizon(title: str, emoji: str, lvls: list[dict[str, Any]], *, tail: str = "",
-                 ascending: bool = False) -> None:
-        if not lvls and not tail:
-            return
-        lines = [f"<b>{title}</b>"]
-        if lvls:
-            top_t = max(int(lv.get("touches") or 0) for lv in lvls)
-            # Срез в 6 штук обязан начинаться с БЛИЖАЙШЕЙ к цене ступени, иначе он выбрасывает
-            # именно те уровни, до которых цена дойдёт первыми. Снизу ближайшая — самая высокая,
-            # сверху — самая низкая, поэтому направление сортировки зависит от стороны.
-            ordered = sorted(lvls, key=lambda lv: float(lv["price"]) * (1 if ascending else -1))[:6]
-            parts = " · ".join(
-                _lvl_str(lv, strong=(top_t > 1 and int(lv.get("touches") or 0) == top_t))
-                for lv in ordered
-            )
-            lines.append(f"{emoji} {parts}{tail}")
-        elif tail:
-            # No level in the band — the tail is the whole line, so drop its leading separator
-            # («🟢  ·  ATL 0.0288» read as a missing value; it is simply «🟢 ATL 0.0288»).
-            lines.append(f"{emoji} {tail.strip().lstrip('·').strip()}")
-        out.extend(lines)
-
-    # Name the source whenever it is NOT the plain spot sibling, so a thinner or proxied history is
-    # visible rather than inferred: Binance lists no spot pair for its tokenized XAU/XAG perps, so
-    # gold reads its levels off PAXG (same 1 oz, 309 weeks) and silver off its own contract (29).
-    src = str(ladder.get("source") or "spot_1w")
-    scope = "спот-история"
-    if src == "contract_1w":
-        scope = "история контракта"
-    elif src.startswith("spot_1w:"):
-        scope = f"спот-история {src.split(':', 1)[1].split('/')[0]}"
-    _horizon(f"Ближние · {scope}", "🟢", near)
-    _horizon(f"Снайпер · {scope}", "🎯", sniper)
-    atl_tail = f"  ·  ATL <code>{fmt_price(atl)}</code>" if atl is not None else ""
-    _horizon("Спот · накопление", "🟢", spot, tail=atl_tail)
-
-    # ── ВЕРХ лестницы ────────────────────────────────────────────────────────────────────────
-    # ``structure.spot_weekly_ladder`` возвращает ``above`` и ``ath`` с самого начала, платит за них
-    # фетч SpotEngine каждый deep-тик — и карточка читала только ``below``/``atl``. То есть
-    # макро-сопротивления у неё не было ВООБЩЕ, и блок «Зоны интереса» был смещён в лонг целиком.
-    # Автор держит верх наравне с низом: на кадре f_0241 разбора BTC 1ч от 2026-07-25 при полном
-    # отдалении видны 15 его линий выше цены (95 303,7 · 88 195,0 · … · 68 590,2), невидимых на
-    # рабочем зуме. Полосы зеркальны нижним: те же доли цены, взятые обратными множителями.
-    above = [
-        lv for lv in (ladder.get("above") or [])
-        if isinstance(lv, dict) and _num(lv.get("price")) is not None
-    ]
-    near_up = [lv for lv in above if price < float(lv["price"]) < price / _SNIPER_BAND_HI]
-    far_up = [
-        lv for lv in above if price / _SNIPER_BAND_HI <= float(lv["price"]) < price / _SPOT_BAND_HI
-    ]
-    top_up = [lv for lv in above if float(lv["price"]) >= price / _SPOT_BAND_HI]
-    ath = _num(ladder.get("ath"))
-    ath_tail = f"  ·  ATH <code>{fmt_price(ath)}</code>" if ath is not None else ""
-    _horizon(f"Сверху · {scope}", "🔴", near_up, ascending=True)
-    _horizon(f"Дальше сверху · {scope}", "🔴", far_up, ascending=True)
-    _horizon("Историч. максимумы", "🔴", top_up, tail=ath_tail, ascending=True)
-    return out
-
 
 # Ниже этой ШИРИНЫ КОРИДОРА между ближайшими встречными уровнями сетап помечается «тесно».
 # Измерено на разборе ASTR (2026-07-25), где автор отказался от сделки на отличном уровне
@@ -745,7 +655,10 @@ def _plan_hint(setups: dict[str, Any]) -> str:
     if any(h.get("dobor") for h in hzs):
         bits.append("добор по сетке")
     if any(h.get("short") for h in hzs):
-        bits.append("шорт по факту («уровень есть уровень»)")
+        # Было «шорт по факту («уровень есть уровень»)». «По факту» — это вход в отработанную или
+        # контр-трендовую зону, а такие зоны в карту больше не попадают (``setups._drop_by_fact``),
+        # так что подпись описывала то, чего в сообщении уже нет.
+        bits.append("шорт от сопротивления")
     return ", ".join(bits)
 
 
@@ -855,17 +768,23 @@ def _abstain_reason_line(
             return float("inf")
         return abs(float(e) / price - 1.0)
 
-    parts: list[str] = []
-    for key in _ABSTAIN_PRIORITY:
-        same = [r for r in rows if r.get("reason") == key]
-        if not same:
-            continue
-        text = _abstain_one(min(same, key=_closeness))
-        if text:
-            parts.append(text)
-        if len(parts) >= 3:
-            break
-    return "почему нет сделки: " + " · ".join(parts) if parts else None
+    # ОДИН кандидат, а не смесь. Каждая ветка отказа делает `return`, поэтому у кандидата ровно
+    # одна причина — и «три причины» в строке всегда означали ТРИ РАЗНЫХ отброшенных кандидата с
+    # чужими друг другу числами. На живом BTC это читалось как одна сделка: «вход 64244.7 · RR 1.19
+    # < 2.0 · … · R:R по худшему заливу 1.92 < 2.0 · стоп широкий 6.22%», где 1.92 > 1.19 и оба
+    # относятся к разным входам. Берём ближайшего к цене — он и есть «сделка, которая почти была», —
+    # а остальных только считаем.
+    known = [r for r in rows if r.get("reason") in _ABSTAIN_PRIORITY]
+    if not known:
+        return None
+    rank = {k: i for i, k in enumerate(_ABSTAIN_PRIORITY)}
+    pick = min(known, key=lambda r: (_closeness(r), rank.get(str(r.get("reason")), 99)))
+    text = _abstain_one(pick)
+    if not text:
+        return None
+    rest = len(known) - 1
+    tail = f" · ещё {rest} отклонено" if rest > 0 else ""
+    return f"почему нет сделки: {text}{tail}"
 
 
 def _norm_sym(symbol: str) -> str:
@@ -1011,8 +930,12 @@ def format_prizrak_post(analysis: AnalystReport) -> str:
         hz = horizons.get(name)
         if isinstance(hz, dict):
             zlines.extend(_horizon_block(title, hz))
-    _ladder = analysis.spot_ladder
-    zlines.extend(_deep_horizons(_ladder if isinstance(_ladder, dict) else {}, price))
+    # Спот-лестница (ближние/снайпер/спот + верх/историч. максимумы) в карточку НЕ идёт. Это шесть
+    # блоков десятилетней истории вплоть до ATL под сообщением о внутридневной торговле: замерено
+    # на живом BTC 2026-07-26 — собранное сообщение 3883 символа при лимите 3900, и в логе 21
+    # отправка на 11 карточек, то есть каждая приходила ДВУМЯ кусками со вторым, обрезанным по «…».
+    # Автор так не пишет: у него график и три фразы. Лестница остаётся продюсером — её читают
+    # zone_watch и счётчик recall, — но перестаёт быть текстом.
     hr = _headroom_line(setups, price)
     if hr:
         zlines.append(hr)
@@ -1022,7 +945,14 @@ def format_prizrak_post(analysis: AnalystReport) -> str:
     if zlines:
         parts.extend(["", "🔎 <b>Зоны интереса</b>", *zlines])
     else:
-        parts.extend(["", "🔎 <i>Качественных зон накопления сейчас нет — ждём формирования</i>"])
+        # «Зон нет» и «все зоны отработаны» — разные сообщения, и второе как раз то, что автор
+        # проговаривает вслух («эти все уровни мы ранее уже отработали… не актуальны»).
+        drop = setups.get("dropped_by_fact") if isinstance(setups, dict) else None
+        if isinstance(drop, dict) and drop:
+            snyato = ", ".join(f"{k}: {v}" for k, v in sorted(drop.items(), key=lambda kv: -kv[1]))
+            parts.extend(["", f"🔎 <i>Чистых зон нет — все уровни сняты ({html.escape(snyato)})</i>"])
+        else:
+            parts.extend(["", "🔎 <i>Качественных зон накопления сейчас нет — ждём формирования</i>"])
 
     prib = _pribory_line(analysis, market)
     if prib:

@@ -393,6 +393,56 @@ def _dedupe_horizons(horizons: dict[str, Any]) -> None:
                     hz.pop(key, None)
 
 
+def _drop_by_fact(horizons: dict[str, Any]) -> dict[str, int]:
+    """Убрать из карты зоны, которые торговать НЕЛЬЗЯ, и вернуть счёт убранного по причинам.
+
+    Метка «по факту» задумывалась как редкое предупреждение, а на живом BTC оказалась на КАЖДОЙ
+    зоне: при нисходящем старшем тренде каждый лонг контр-трендовый, а отработанных уровней в
+    зрелой структуре большинство. Метка на всём не значит ничего, и хуже — карточка печатала
+    «🎯 План: ТВХ ★64141.3», указывая в полосу, которую строкой выше сама же дисквалифицировала
+    как «против тренда». Читателю предлагалось одновременно и брать, и не брать.
+
+    Курс тут однозначен: отработанный уровень лимитом больше не торгуется (стр.31), по пиле ждут
+    выхода (стр.28), против тренда входят только по факту слома. Всё это — НЕ сетапы, а история.
+    Возвращается счёт, чтобы карточка могла честно сказать «чистых зон нет, N отработаны» вместо
+    того, чтобы просто замолчать (I-6: пусто и «нечего показать» — разные вещи).
+    """
+    dropped: dict[str, int] = {}
+    for hname in list(horizons):
+        hz = horizons.get(hname)
+        if not isinstance(hz, dict):
+            continue
+        for key in ("perezakup", "dobor", "short"):
+            raw = hz.get(key)
+            zs = raw if isinstance(raw, list) else ([raw] if isinstance(raw, dict) else [])
+            keep = []
+            for z in zs:
+                if isinstance(z, dict) and z.get("by_fact"):
+                    reason = str(z.get("fact_reason") or "по факту")
+                    dropped[reason] = dropped.get(reason, 0) + 1
+                    continue
+                keep.append(z)
+            if raw is None:
+                continue
+            if isinstance(raw, list):
+                if keep:
+                    hz[key] = keep
+                else:
+                    hz.pop(key, None)
+            elif keep:
+                hz[key] = keep[0]
+            else:
+                hz.pop(key, None)
+        # Горизонт без единой зоны — это не горизонт; цели без своих ступеней тоже бессмысленны.
+        if not any(hz.get(k) for k in ("perezakup", "dobor")):
+            hz.pop("long_targets", None)
+        if not hz.get("short"):
+            hz.pop("short_targets", None)
+        if not any(hz.get(k) for k in ("perezakup", "dobor", "short")):
+            horizons.pop(hname, None)
+    return dropped
+
+
 def _headroom(horizons: dict[str, Any], *, price: float) -> dict[str, Any] | None:
     """Ход до БЛИЖАЙШЕГО встречного уровня по всем горизонтам, вверх и вниз.
 
@@ -478,7 +528,10 @@ def build_symbol_setups(
                 horizons[name] = hz
                 break  # first TF with usable zones wins for this horizon
     _dedupe_horizons(horizons)
+    dropped = _drop_by_fact(horizons)
     out: dict[str, Any] = {"horizons": horizons, "price": float(price), "bias": bias}
+    if dropped:
+        out["dropped_by_fact"] = dropped
     headroom = _headroom(horizons, price=float(price))
     if headroom is not None:
         out["headroom"] = headroom

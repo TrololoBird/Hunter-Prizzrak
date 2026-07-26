@@ -103,8 +103,12 @@ def test_diver_tokens_omitted_when_unknown() -> None:
     assert "RSI" in out  # RSI still shown — it was computed
 
 
-def test_counter_trend_short_marked_po_faktu() -> None:
-    """A short against a long HTF bias renders 🔴 шорт flagged «по факту» (not a set-and-forget)."""
+def test_counter_trend_short_is_absent_from_the_card() -> None:
+    """Контр-трендовый/отработанный шорт в карточку не попадает вовсе.
+
+    Помечать зону «по факту» и одновременно предлагать её в плане — значит печатать «бери» и
+    «не бери» в одном сообщении; замерено на живом BTC 2026-07-26, где метка стояла на КАЖДОЙ
+    зоне и потому не значила ничего."""
     bars = _flat_base(lo=100.0, hi=110.0, cycles=10)
     bars.append(_bar(105.0, 105.5, 104.5, 105.0))  # sit inside → straddle → ceiling short
     setups = build_symbol_setups(
@@ -117,8 +121,9 @@ def test_counter_trend_short_marked_po_faktu() -> None:
         structure={"htf_bias": {"bias": "long", "regime": ""}},
         features=_features(55.0, 55.0),
     )
-    assert "🔴 шорт" in out
-    assert "по факту" in out
+    assert "🔴 шорт" not in out
+    # И НЕ молчание: карточка обязана сказать, что зоны были и почему их сняли (I-6).
+    assert "Чистых зон нет" in out
 
 
 def test_sovokupnost_from_confluence_drivers() -> None:
@@ -155,24 +160,6 @@ def test_pochemu_net_sdelki_from_abstain_on_wait() -> None:
     assert "почему нет сделки" in out and "RR 2.3 &lt; 3.0" in out
 
 
-def test_deep_horizons_sniper_and_spot_with_atl() -> None:
-    """🎯 Снайпер + 🟢 Спот horizons slice the full-history ladder by depth; ATL + volume-core shown."""
-    ladder = {
-        "below": [
-            {"price": 150.0, "touches": 2}, {"price": 140.0, "touches": 1},  # sniper band [116,164)
-            {"price": 110.0, "touches": 3}, {"price": 100.0, "touches": 1},  # spot band [0,116)
-        ],
-        "above": [], "atl": 80.0, "ath": 500.0,
-    }
-    out = _post(
-        symbol="BCHUSDT", price=200.0, setups={"horizons": {}, "price": 200.0, "bias": ""},
-        spot_ladder=ladder, features=_features(50.0, 50.0),
-    )
-    assert "Снайпер" in out and "150" in out and "140" in out
-    assert "Спот · накопление" in out and "110" in out and "100" in out
-    assert "ATL" in out and "80" in out
-    assert "×3</b>" in out  # the strongest-touch spot level (110×3) is bolded as the volume core
-
 
 def test_active_signal_shows_entry_stop_tp() -> None:
     """An emitted LONG/SHORT renders its tracked trade plan (вход/стоп/цели/R:R), not just the label."""
@@ -199,39 +186,6 @@ def test_no_active_plan_on_wait() -> None:
     assert "вход <code>" not in out and "стоп <code>" not in out
 
 
-def test_deep_horizons_bands_tile_and_keep_the_nearest_rungs() -> None:
-    """★ No level below price may fall between the bands and vanish.
-
-    Regression (measured against the author's 2026-07-25 alts обзор): the bands stopped at
-    0.82·price, so every spot-history rung inside 18% under price matched neither ``sniper`` nor
-    ``spot`` and was dropped silently — SAND 0.045 (his active 0.044–0.046 buy zone), CHZ 0.0125,
-    THETA 0.1230 «LONG». The card then began one horizon BELOW his nearest zone.
-    """
-    ladder = {
-        "below": [
-            {"price": 199.0, "touches": 1},  # 0.995·price — the dropped band, right under price
-            {"price": 170.0, "touches": 2},  # 0.850·price — the dropped band's floor
-            {"price": 150.0, "touches": 1},  # sniper
-            {"price": 100.0, "touches": 1},  # spot
-        ],
-        "above": [], "atl": 80.0, "ath": 500.0,
-    }
-    out = _post(
-        symbol="BCHUSDT", price=200.0, setups={"horizons": {}, "price": 200.0, "bias": ""},
-        spot_ladder=ladder, features=_features(50.0, 50.0),
-    )
-    assert "Ближние" in out and "199" in out and "170" in out
-    assert "Снайпер" in out and "150" in out
-    assert "Спот · накопление" in out and "100" in out
-
-
-def test_deep_horizons_empty_ladder_omitted() -> None:
-    """I-6: an empty ladder yields no spot/sniper block (never a fabricated floor)."""
-    out = _post(
-        symbol="BCHUSDT", price=200.0, setups={"horizons": {}, "price": 200.0, "bias": ""},
-        spot_ladder={"below": [], "above": [], "atl": None}, features=_features(50.0, 50.0),
-    )
-    assert "Снайпер" not in out and "Спот · накопление" not in out and "Ближние" not in out
 
 
 def test_no_pochemu_net_sdelki_when_signal_active() -> None:

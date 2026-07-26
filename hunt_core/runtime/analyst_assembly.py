@@ -169,8 +169,6 @@ async def send_analyst_change_telegram(
     """
     import html
 
-    from hunt_core.deliver._sections import format_intraday_maps_telegram
-    from hunt_core.deliver.confluence_grid import build_confluence_grid_native, format_grid_telegram
     from hunt_core.prizrak.arbiter import (
         evaluate_deep_delivery,
         mark_wait_sent,
@@ -196,7 +194,6 @@ async def send_analyst_change_telegram(
             LOG.info("analyst_pinned_tg_skipped_arbiter", symbol=sym, blockers=blockers)
             return False
 
-    price = float(native.view.last_price or 0)
     blocks: list[str] = []
     if lifecycle_event == "activated":
         sym_label = sym.replace("USDT", "-USDT")
@@ -215,27 +212,14 @@ async def send_analyst_change_telegram(
     analysis = build_deep_report(native, include_watch_appendix=False)
     blocks.append(format_deep_analysis_telegram(analysis))
 
-    grid = build_confluence_grid_native(native.prizrak, native.features, price=price)
-    if grid:
-        blocks.extend(["", format_grid_telegram(grid, price=price)])
-    maps_block = format_intraday_maps_telegram(native)
-    if maps_block:
-        blocks.extend(["", maps_block])
-
-    from hunt_core.prizrak.engines.delivery_policy import format_cycle_peers_footer
-    from hunt_core.prizrak.engines.signal_queue import format_queue_telegram
+    # ТОЛЬКО карточка. Грид конфлюенса, карты внутридневной ликвидности, соседи по циклу и очередь
+    # сигналов приклеивались к КАЖДОМУ сообщению и вместе с ней давали 3883 символа при лимите
+    # 3900 — карточка физически не влезала и уходила двумя кусками (замерено на живом прогоне
+    # 2026-07-26: 21 отправка на 11 карточек). Причём очередь показывала ЧУЖОЙ символ (в карточке
+    # BTC — «#1 ETH-USDT ЛОНГ»), а её заголовок печатал подстановки «ранг # (позиция)» как текст.
+    # Автор публикует пост про ОДИН инструмент; всё остальное — это отдельные продукты, и место им
+    # в своих сообщениях, а не в хвосте чужого.
     from hunt_core.runtime.query_service import format_row_freshness_footer
-
-    v2cfg = load_analyst_config()
-    if cycle_peers:
-        peer_block = format_cycle_peers_footer(native, cycle_peers)
-        if peer_block:
-            blocks.extend(["", peer_block])
-    if v2cfg.signal_queue_tg_footer:
-        # No arg → reads the freshest persisted queue (refresh_pinned_signal_queue wrote it).
-        qblock = format_queue_telegram()
-        if qblock:
-            blocks.extend(["", qblock])
     # As-of stamp, last line. The broadcaster buffers on circuit-open and replays later, so a
     # pinned card can land long after it was built — without this the reader can't tell.
     blocks.append(format_row_freshness_footer(native, source="analyst tick"))
