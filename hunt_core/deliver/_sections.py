@@ -78,6 +78,13 @@ def format_liquidation_map_section(row: dict[str, Any]) -> str:
         )
     lines = [header]
 
+    # `liq_heatmap_clusters` — это ТОП-3 ПО НОТИОНАЛУ (`maps/liquidation.py`: `clusters[:3]`
+    # после сортировки по объёму), а сам магнит `nearest_*_liquidation` выбирается по БЛИЗОСТИ
+    # из ПОЛНОГО списка. Размер и близость не связаны, поэтому промах — норма, а не край. Прежний
+    # текст «без значимого кластера» утверждал ОТСУТСТВИЕ там, где система кластер измерила и
+    # молча не показала: человек обесценивал реальный ликвидационный магнит. (2026-07-26)
+    _NOT_IN_TOP3 = " · <i>вне топ-3 по объёму</i>"
+    _SUBFLOOR = " · <i>без значимого кластера</i>"
     clusters = market.get("liq_heatmap_clusters")
     clusters = clusters if isinstance(clusters, list) else []
     cur_price = 0.0
@@ -109,13 +116,16 @@ def format_liquidation_map_section(row: dict[str, Any]) -> str:
             if best_d is None or d < best_d:
                 best, best_d = c, d
         if best is None or price <= 0 or best_d is None or best_d / price > 0.005:
-            return ""
+            return ""  # на этой стороне в топ-3 ничего рядом — это НЕ «кластера нет»
         notional = float(best.get("total_notional") or 0.0)
         intensity = float(best.get("intensity") or 0.0)
         # Below the floor the cluster is an undersampled single force-order, not a
         # density — suppress the whole tail so "100% плотн." never rides on $128.
         if notional < _LIQ_MIN_CLUSTER_NOTIONAL_USD:
-            return ""
+            # Кластер НАЙДЕН и измерен, но слишком тонок, чтобы звать его магнитом — это
+            # содержательное «незначим», в отличие от «не попал в топ-3». Раньше оба случая
+            # возвращали "" и печатались одним текстом.
+            return _SUBFLOOR
         parts: list[str] = []
         if notional > 0:
             parts.append(_fmt_usd_compact(notional))
@@ -131,14 +141,14 @@ def format_liquidation_map_section(row: dict[str, Any]) -> str:
     if nearest_long is not None:
         pull = market.get("liq_magnet_pull_long_pct")
         dist = f" ({pull:.1f}%)" if pull is not None else ""
-        tail = _cluster_size_tail(float(nearest_long), side="long") or " · <i>без значимого кластера</i>"
+        tail = _cluster_size_tail(float(nearest_long), side="long") or _NOT_IN_TOP3
         lines.append(f"Лонг-ликвидации ↓ <code>{_fmt_price(float(nearest_long))}</code>{dist}{tail}")
     elif any_side:
         lines.append("Лонг-ликвидации ↓ <i>нет значимого кластера снизу</i>")
     if nearest_short is not None:
         pull = market.get("liq_magnet_pull_short_pct")
         dist = f" ({pull:.1f}%)" if pull is not None else ""
-        tail = _cluster_size_tail(float(nearest_short), side="short") or " · <i>без значимого кластера</i>"
+        tail = _cluster_size_tail(float(nearest_short), side="short") or _NOT_IN_TOP3
         lines.append(f"Шорт-сквиз ↑ <code>{_fmt_price(float(nearest_short))}</code>{dist}{tail}")
     elif any_side:
         lines.append("Шорт-сквиз ↑ <i>нет значимого кластера сверху</i>")

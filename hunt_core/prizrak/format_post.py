@@ -21,6 +21,8 @@ source is absent** — never a fabricated «диверов нет» printed over
 from __future__ import annotations
 
 import html
+import os
+import time
 from typing import TYPE_CHECKING, Any
 
 from hunt_core.deliver._labels import fmt_price
@@ -29,6 +31,11 @@ from hunt_core.prizrak.orchestrator import _INTEREST_ZONE_MAX_WIDTH_PCT
 
 if TYPE_CHECKING:
     from hunt_core.prizrak.build import AnalystReport
+
+
+# Тот же дефолт, что у рефрешера (`prizrak/macro_refresh.py::_DOMINANCE_INTERVAL_S`);
+# читается из того же env, чтобы порог устаревания не разъехался с частотой обновления.
+_DOMINANCE_REFRESH_S = float(os.getenv("HUNT_DOMINANCE_REFRESH_S", "3600") or 3600)
 
 
 def _num(x: Any) -> float | None:
@@ -520,6 +527,25 @@ def _dominance_token() -> str:
     except Exception:  # noqa: BLE001 — display path must never raise
         return ""
 
+    # Возраст снимка. Печатался новейший КЭШИРОВАННЫЙ снимок без проверки возраста, в одном ряду
+    # с живыми RSI и фандингом, — при отвале CoinGecko человек читал многодневную макро-картину
+    # как текущее показание прибора (`_MAX_SNAPSHOTS` держит ~16 дней). Порог не «разумное
+    # значение» (I-7): рефрешер ходит раз в час (`HUNT_DOMINANCE_REFRESH_S`, default 3600), поэтому
+    # снимок старше ДВУХ циклов означает, что рефрешер не отработал, а не что данные такие.
+    age_s: float | None = None
+    ts_ms = now.get("ts_ms")
+    if isinstance(ts_ms, (int, float)) and ts_ms > 0:
+        age_s = max(0.0, time.time() - float(ts_ms) / 1000.0)
+    stale_note = ""
+    if age_s is None:
+        stale_note = " · <i>возраст неизвестен</i>"
+    elif age_s > 2 * _DOMINANCE_REFRESH_S:
+        hours = age_s / 3600.0
+        stale_note = (
+            f" · <i>снимок {hours:.0f}ч назад</i>" if hours < 48
+            else f" · <i>снимок {hours / 24:.0f}д назад</i>"
+        )
+
     def _fmt_one(label: str, key: str, ch_key: str, unit: str) -> str | None:
         v = now.get(key)
         if not isinstance(v, (int, float)):
@@ -549,7 +575,9 @@ def _dominance_token() -> str:
             _fmt_total3(),
         ) if t
     ]
-    return " · ".join(toks)
+    if not toks:
+        return ""
+    return " · ".join(toks) + stale_note
 
 
 def _pribory_line(analysis: AnalystReport, market: dict[str, Any]) -> str:

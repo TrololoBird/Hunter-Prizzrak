@@ -1095,11 +1095,16 @@ def _htf_bias(
     # `regime` is published so the render can say WHICH kind of neutral this is: a
     # detected accumulation is the most informative read on the card, and collapsing it
     # into the same "neutral/undetermined" caption as "no data" throws that away.
+    # `weight_available` здесь считается ПО-НАСТОЯЩЕМУ. Раньше на обеих этих ветках стоял
+    # литерал 1.0 — заявка «покрытие полное» от кода, который покрытие не мерил: цикл ниже,
+    # который его накапливает, на этот путь не доходит. Потребитель, желающий дисконтировать
+    # вывод по объёму доказательств, получал ложную единицу вместо реальной доли.
+    _cov = sum(w for tf_key, w, _ in weights if struct_by_tf.get(tf_key))
     if trend_4h == "bull" and (trend_1w == "bear" or trend_1d == "bear"):
-        return {"bias": "neutral", "score": 0.0, "weight_available": 1.0, "votes": votes, "struct_by_tf": struct_by_tf, "weights": weights_pub, "regime": "accumulation"}
+        return {"bias": "neutral", "score": 0.0, "weight_available": round(_cov, 3), "votes": votes, "struct_by_tf": struct_by_tf, "weights": weights_pub, "regime": "accumulation"}
     # Distribution: 4h bear against higher-TF bull → no directional edge
     if trend_4h == "bear" and (trend_1w == "bull" or trend_1d == "bull"):
-        return {"bias": "neutral", "score": 0.0, "weight_available": 1.0, "votes": votes, "struct_by_tf": struct_by_tf, "weights": weights_pub, "regime": "distribution"}
+        return {"bias": "neutral", "score": 0.0, "weight_available": round(_cov, 3), "votes": votes, "struct_by_tf": struct_by_tf, "weights": weights_pub, "regime": "distribution"}
 
     # All TFs agree or mixed without accumulation — use weighted vote.
     net = 0.0
@@ -1119,6 +1124,13 @@ def _htf_bias(
 
     if weight_available <= 0.0:
         return {"bias": "unknown", "score": 0.0, "weight_available": 0.0, "votes": votes, "struct_by_tf": struct_by_tf, "weights": weights_pub}
+    # ⚠ Нормировка на ДОСТУПНЫЙ вес — намеренная (см. `confluence/mtf.py::_htf_bias`: «single
+    # warmed HTF can still express a bias, но без прогретых HTF — unknown, не ложный neutral»).
+    # Цена этого решения: прогрет только 1h (вес 0.10 из 1.00) и он бычий → norm = +1.0, то есть
+    # МАКСИМАЛЬНАЯ уверенность с 10% доказательств, и она перебивает порог 0.30 легче, чем
+    # полностью прогретый символ со спорящими ТФ. Порог покрытия здесь НЕ вводится: любое число
+    # было бы непромеренным (I-7). Дисконтировать вывод потребитель может по `weight_available`,
+    # который теперь честен на всех ветках возврата.
     norm = net / weight_available
     if norm >= cfg.htf_bias_threshold:
         bias = "long"

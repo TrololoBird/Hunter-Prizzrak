@@ -104,7 +104,17 @@ def _build_factors(
 def _build_vp(frames: dict[str, pl.DataFrame]) -> dict[str, VolumeProfile]:
     """Per-TF POC/VAH/VAL + direction (reuses ``volume_profile_with_direction``; empty → skip)."""
     out: dict[str, VolumeProfile] = {}
-    for tf, field, lookback in (("1h", "h1", 48), ("15m", "m15", VP_LOOKBACK_15M)):
+    # 5m добавлен 2026-07-26. `deliver/confluence_grid.py` строит строку для «1h/15m/5m», и для 5m
+    # `tsum` (дончианы) есть, а `vp` не было НИКОГДА — строка выходила с реальными уровнями и вечно
+    # пустым ПОК, читаясь как «объёмного узла на 5m нет», хотя профиль просто не считали.
+    # Окно не выдумано (I-7): 288 = VP_LOOKBACK_15M(96) × 3, то есть ТО ЖЕ окно по стенным часам,
+    # что у 15m-профиля (96×15м = 288×5м = 24 часа). Другая длина сделала бы ПОК разных ТФ
+    # несравнимыми на одной карточке — а карточка ставит их в одну колонку.
+    for tf, field, lookback in (
+        ("1h", "h1", 48),
+        ("15m", "m15", VP_LOOKBACK_15M),
+        ("5m", "m5", VP_LOOKBACK_15M * 3),
+    ):
         frame = frames.get(field)
         if frame is None or frame.is_empty():
             continue

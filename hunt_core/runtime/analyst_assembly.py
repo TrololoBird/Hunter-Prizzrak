@@ -320,18 +320,47 @@ async def analyst_pinned_loop(
             from hunt_core.prizrak.arbiter import deep_cooldown_ok, mark_deep_sent
 
             queue = load_signal_queue()
-            natives_only = [n for n, _, _ in lifecycle_candidates]
-            if v2cfg.signal_queue_tg_batch and len(lifecycle_candidates) > 1:
+            # Кулдаун применяется ДО выбора героя. Раньше схлопывание шло первым, а кулдаун
+            # проверялся уже внутри цикла отправки — если герой оказывался остывшим, цикл не слал
+            # НИЧЕГО, хотя другой кандидат на другом символе был готов. `pick_hero_row` ранжирует
+            # по силе и про кулдаун не знает, поэтому сильный символ мог голодом морить чужой
+            # сетап по 300 с за раз, а лог тихого цикла был неотличим от «ничего не сработало».
+            eligible = [
+                (n, tr, k)
+                for n, tr, k in lifecycle_candidates
+                if deep_cooldown_ok(f"{_compact_symbol(n.view.symbol)}:{k}")
+            ]
+            if not eligible:
+                LOG.info(
+                    "deep_all_candidates_in_cooldown",
+                    candidates=len(lifecycle_candidates),
+                    symbols=[_compact_symbol(n.view.symbol) for n, _, _ in lifecycle_candidates][:5],
+                )
+            natives_only = [n for n, _, _ in eligible]
+            if v2cfg.signal_queue_tg_batch and len(eligible) > 1:
                 # Batch mode: collapse to a single hero message (config-controlled). Multi-emission
                 # (one message per setup_kind) is the non-batch path below.
                 hero = pick_hero_row(natives_only, queue)
                 to_send = (
-                    [(hero, tr, k) for n, tr, k in lifecycle_candidates if n is hero]
+                    [(hero, tr, k) for n, tr, k in eligible if n is hero]
                     if hero is not None
-                    else lifecycle_candidates[:1]
+                    else eligible[:1]
                 )
+                # Подавленное называется поимённо: молчание, которое нельзя отличить от «нечего
+                # слать», — это тихая деградация, даже когда оно по замыслу (I-6).
+                if len(eligible) > len(to_send):
+                    sent_ids = {id(n) for n, _, _ in to_send}
+                    LOG.info(
+                        "deep_batch_suppressed",
+                        kept=[_compact_symbol(n.view.symbol) for n, _, _ in to_send],
+                        suppressed=[
+                            f"{_compact_symbol(n.view.symbol)}:{k}"
+                            for n, _, k in eligible
+                            if id(n) not in sent_ids
+                        ],
+                    )
             else:
-                to_send = lifecycle_candidates
+                to_send = eligible
             for native, transition, kind in to_send:
                 sym = _compact_symbol(native.view.symbol)
                 # Per-(symbol, setup_kind) cooldown so distinct theses on one symbol each get

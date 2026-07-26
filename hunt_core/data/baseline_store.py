@@ -142,13 +142,29 @@ def baseline_zscores(baseline: SymbolBaseline | None) -> dict[str, float | None]
     if baseline is None:
         return {}
     qv_z = multi_tf_z(baseline.quote_volume)
-    oi_z = multi_tf_z(baseline.oi)
     trade_z = multi_tf_z(baseline.trade_count)
+    # ⚠ `oi_z` / `oi_z_5m` БОЛЬШЕ НЕ ПУБЛИКУЮТСЯ — у серии `baseline.oi` нет продюсера.
+    #
+    # Единственный вызывающий, `_cycle_loop::batch_update_baselines`, передаёт пустой
+    # `oi_by_sym`, а нормализованная строка тикера (`market/symbols.py::normalize_ticker_rows`)
+    # ключа `oi`/`openInterest` не содержит вовсе — значит `_append` (который пропускает None)
+    # не добавляет ни одной точки с момента переписывания транспорта.
+    #
+    # Замер 2026-07-26 по 421 файлу в `data/baseline/`: у 81 серия пуста, у остальных ЗАМОРОЖЕНА
+    # — 1000BONKUSDT несёт 288 точек, но лишь 10 уникальных значений, последние 12 идентичны,
+    # тогда как `quote_volume` обновляется каждый цикл. На этой мёртвой серии `z_5m` честно
+    # отдавал None (константа — мерить нечего), а `z_1h` выдавал **+2.08**: число из истории,
+    # которое `scanner/detect/expansion_readiness.py::_z_component(oi_z, weight=0.5)` принимал
+    # за живое и превращал в 50 из 100 очков `energy` — а `energy` решает допуск символа в
+    # юниверс сканирования.
+    #
+    # Заполнять нечем: движок знает OI только по ПРОГРЕТЫМ символам, а прескан идёт по всей
+    # вселенной, и bulk-эндпоинта OI у Binance нет. Поэтому — явное отсутствие вместо
+    # правдоподобного числа (I-6). Потребители читают через `.get()` и корректно получают None.
+    # Вернуть ключи можно только вместе с настоящим продюсером.
     return {
         "volume_z": qv_z.get("z_24h"),
         "volume_z_5m": qv_z.get("z_5m"),
-        "oi_z": oi_z.get("z_24h"),
-        "oi_z_5m": oi_z.get("z_5m"),
         "trade_rate_z": trade_z.get("z_24h"),
     }
 

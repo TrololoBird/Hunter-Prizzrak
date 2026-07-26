@@ -2,7 +2,8 @@
 
 Two separate outputs — never one number:
 - ``energy`` 0..100: coiling / preparation strength (NOT price change).
-- ``direction``: bull | bear | undecided from absorption / funding / flow.
+- ``direction``: bull | bear | undecided from absorption / flow (полоса фандинга
+  удалена 2026-07-26 — у `row["funding_rate"]` нет продюсера, см. ниже).
 
 ``abs(change_pct)`` is metadata only — forbidden as primary ranking key.
 
@@ -89,7 +90,6 @@ def compute_expansion_readiness(
     high = _safe_float(row.get("high_price") or row.get("high_24h"))
     low = _safe_float(row.get("low_price") or row.get("low_24h"))
     pos = _pos_in_range(last, high, low)
-    funding = _safe_float(row.get("funding_rate"))
     oi_chg = oi_change_pct if oi_change_pct is not None else _safe_float(row.get("oi_change_pct"))
     # is-None fallthrough: a delta/CVD of exactly 0.0 means BALANCED FLOW — a real
     # measurement — and `or` discarded it, falling through to the alternate key and,
@@ -113,6 +113,11 @@ def compute_expansion_readiness(
     vol_z = zs.get("volume_z_5m")
     if vol_z is None:
         vol_z = zs.get("volume_z")
+    # `oi_z`/`oi_z_5m` больше не публикуются `baseline_store.baseline_zscores` — у серии
+    # `baseline.oi` нет продюсера, и она была ЗАМОРОЖЕНА (замер: 1000BONKUSDT — 288 точек,
+    # 10 уникальных значений, последние 12 идентичны), из-за чего `z_1h` отдавал +2.08 из
+    # истории, а `_z_component(oi_z, weight=0.5)` превращал это в 50 из 100 очков energy.
+    # Чтение оставлено: ключи вернутся сами, как только появится настоящий продюсер.
     oi_z = zs.get("oi_z_5m")
     if oi_z is None:
         oi_z = zs.get("oi_z")
@@ -170,11 +175,15 @@ def compute_expansion_readiness(
             bull += 25.0
         elif pos >= 0.75:
             bear += 25.0
-    if funding is not None:
-        if funding > 0.0003:
-            bear += 15.0
-        elif funding < -0.0001:
-            bull += 15.0
+    # УДАЛЕНА полоса фандинга (±15 очков), по прецеденту двух предыдущих полос выше.
+    # `row["funding_rate"]` не пишет НИ ОДИН продюсер строк: единственный источник —
+    # `market/symbols.py::normalize_ticker_rows` — отдаёт symbol/last_price/
+    # price_change_percent/quote_volume/trade_count/underlying_type/high_price/low_price.
+    # Значит `funding` всегда None, и полоса не начисляла ничего никогда. Удаление —
+    # тождество на `direction`, но теперь дыра ВИДНА, а не спрятана за кодом, который
+    # выглядит работающим. Настоящий фандинг живёт на аналитическом пути
+    # (`view.derivs.funding`, `scanner/feed.py::_funding_for`) — воскрешать здесь можно
+    # только вместе с продюсером на строке тикера. (2026-07-26)
     if oi_chg is not None:
         if oi_chg > 1.0 and (delta or 0) > _FLOW_NOISE:
             bull += 10.0

@@ -551,10 +551,24 @@ async def deliver_manipulation_setups(
                 "pattern_type": setup.pattern_type,
                 "score": setup.score,
                 "steps": f"{setup.steps_covered}/{setup.total_steps}",
-                "dump_score": 0,
-                "dump_fuel": 0,
-                "long_score": 0,
-                "long_fuel": 0,
+                # Реальный score в ключ СВОЕГО направления, шкала 0–100 (её ждут
+                # `deliver/telegram.py` и `_setup_lines.py`), а `*_fuel` не пишется вовсе.
+                #
+                # Было: четыре литеральных нуля рядом с настоящим `"score": setup.score`.
+                # `tracker.py` берёт `dump_score`/`long_score` по направлению и кладёт в сигнал,
+                # оттуда — в закрытые строки и леджер исходов. А `track/outcomes.py::is_polluted`
+                # отсеивает строку только по `score is None` — ноль не None, поэтому КАЖДЫЙ исход
+                # полосы манипуляций попадал в live-WR и калибровку с оценкой 0, неотличимо от
+                # честно слабого сетапа. `deliver/readiness.py` по той же причине рисовал
+                # «готовность 0/100 · только наблюдение» для сетапа, который карточка оценила в 100%.
+                #
+                # Топлива эта полоса НЕ измеряет — поэтому ключ отсутствует, и `is_polluted` честно
+                # исключит строку из живой статистики, вместо того чтобы считать её измеренной (I-6).
+                **(
+                    {"dump_score": round(setup.score * 100.0, 1)}
+                    if setup.direction == "short"
+                    else {"long_score": round(setup.score * 100.0, 1)}
+                ),
                 "confirm_hard": [],
             }
             lifecycle = {"phase": "pre_dump" if setup.direction == "short" else "pre_pump"}
