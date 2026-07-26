@@ -616,6 +616,13 @@ def _abstain_reason_line(reasons: tuple[dict[str, Any], ...] | list[dict[str, An
     kind = pick.get("reason")
     if kind == "rr_below_floor":
         parts = [f"RR {pick.get('rr')} < {pick.get('min_rr')}"]
+        # ВХОД печатается первым и обязательно. Без него стоп и цель нечитаемы: на живом BTC
+        # 2026-07-25 строка выглядела как «стоп 56603.4 · TP1 63834.2» при цене 64 441 — стоп в
+        # 12% под рынком, цель НИЖЕ текущей. Числа были согласованы между собой (вход — глубокая
+        # зона 58 955–60 614), но якорь, относительно которого они имеют смысл, отсутствовал,
+        # и геометрия читалась как сломанная. Три связанных числа — печатаем все три.
+        if pick.get("entry") is not None:
+            parts.insert(0, f"вход {fmt_price(float(pick['entry']))}")
         if pick.get("stop") is not None:
             buf = pick.get("buffer_pct")
             parts.append(f"стоп {fmt_price(float(pick['stop']))}" + (f" (буфер {buf}%)" if buf else ""))

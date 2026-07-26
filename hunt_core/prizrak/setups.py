@@ -223,21 +223,35 @@ def _horizon_zones(
     # the author's June-sub-base 196). Reaching the sub-base ПОК needs «база-в-базе» detection (A4).
     below_boxes = [z for z in zones if float(z["hi"]) < price]
     base = max(below_boxes, key=lambda z: float(z.get("zone_volume") or 0)) if below_boxes else None
-    vah: float | None = None
     if base is not None:
-        # None ⇒ that base's value area sits entirely above price: no re-buy band, and `vah` stays
-        # None so the добор/цели filters below fall back to "no value-area floor" instead of
-        # inheriting a bogus one.
+        # None ⇒ that base's value area sits entirely above price: no re-buy band. Дальше полоса
+        # перезакупа читается из ``out["perezakup"]``, а не через отдельную переменную-копию: её
+        # верх больше НЕ служит полом для доборов (см. ниже), и хранить его отдельно значило бы
+        # держать наготове ровно тот ключ, который и создавал дефект.
         pk = _perezakup_view(window, bars, base, cfg=cfg, bias=bias, price=price)
         if pk is not None:
             out["perezakup"] = pk
-            vah = pk["hi"]
-    # 🟡 ДОБОР — tight support boxes ABOVE the value area, below price (nearer add-to-long rungs);
-    # straddle floors included via the long-side decomposition.
+    # 🟡 ДОБОР — tight support boxes below price: и БЛИЖНИЕ (над перезакупом), и ГЛУБОКИЕ (под ним).
+    #
+    # Раньше стоял гейт «hi > vah» — добор обязан лежать выше верха value area перезакупа. На
+    # широком перезакупе это выбрасывало ВСЁ, что глубже, и стоило измеримо: в разборе BTC
+    # 2026-07-25 автор называет своей ЕДИНСТВЕННОЙ четырёхчасовой зоной интереса полосу
+    # 58 539,7–60 507,2, а у нас её не было ни на одном горизонте — перезакуп 61 806–63 982
+    # накрыл собой пол и отрезал всё под ним. Он же держит зоны на РАЗНОЙ глубине одновременно
+    # («по ключевым зонам буду добирать лонги», курс стр.30 — крупная база дробится на ордера).
+    # Исключается только пересечение с самим перезакупом, чтобы не печатать его дважды.
     below_long, _ = _split_below_above(zones, price=price, decompose_short=False)
+    pk_band = (float(out["perezakup"]["lo"]), float(out["perezakup"]["hi"])) \
+        if isinstance(out.get("perezakup"), dict) else None
+
+    def _clashes_with_perezakup(z: dict[str, Any]) -> bool:
+        if pk_band is None:
+            return False
+        return float(z["lo"]) <= pk_band[1] and float(z["hi"]) >= pk_band[0]
+
     dobor_src = [
         z for z in _tight(below_long)
-        if float(z["hi"]) < price and (vah is None or float(z["hi"]) > vah) and z is not base
+        if float(z["hi"]) < price and z is not base and not _clashes_with_perezakup(z)
     ]
     dobor_src.sort(key=lambda z: z["hi"], reverse=True)  # nearest-first
     if dobor_src:
@@ -255,12 +269,12 @@ def _horizon_zones(
         return None
     # Цели: opposing structural levels (long → resistance above the long zones; short → below).
     #
-    # Отсчёт ведётся от ВСЕХ опубликованных зон своей стороны, а не от одного `vah`. Добор по
-    # построению живёт ВЫШЕ value area (`float(z["hi"]) > vah` в фильтре выше), поэтому «цель выше
-    # перезакупа» могла оказаться НИЖЕ входа в добор: измерено на живом LTC 4h — цели 45.80 и 46.27
-    # при верхе лонг-зоны 46.34, то есть карточка предлагала фиксировать прибыль под собственным
-    # входом. И берутся именно ОПУБЛИКОВАННЫЕ кромки: `_zone_view` сужает бокс до value area, так
-    # что сырой `z["hi"]` — уже не та цена, которую увидит читатель.
+    # Отсчёт ведётся от ВСЕХ опубликованных зон своей стороны, а не от верха перезакупа. Добор
+    # может лежать и ВЫШЕ него, и ГЛУБЖЕ, поэтому «цель выше перезакупа» могла оказаться НИЖЕ входа
+    # в добор: измерено на живом LTC 4h — цели 45.80 и 46.27 при верхе лонг-зоны 46.34, то есть
+    # карточка предлагала фиксировать прибыль под собственным входом. И берутся именно
+    # ОПУБЛИКОВАННЫЕ кромки: `_zone_view` сужает бокс до value area, так что сырой `z["hi"]` — уже
+    # не та цена, которую увидит читатель.
     long_edges = [float(z["hi"]) for z in (out.get("dobor") or [])]
     pk_out = out.get("perezakup")
     if isinstance(pk_out, dict):
