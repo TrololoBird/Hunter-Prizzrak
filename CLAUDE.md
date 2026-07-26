@@ -103,15 +103,11 @@ _cli.py::main  (watch; pid-lock data/watch.pid)
   `engine.py::derive_map_features` (`MapBundle` → плоские фичи), `cross.py` (кросс-венью стены).
 - **`confluence/mtf.py`** — МТФ-согласие: `build_mtf_confluence_native(view, features)` → типизированный
   `MTFConfluence` (`mtf_confluence_to_dict` — только для персиста/печати).
-- **`levels/`** — ⚠ **почти целиком недостижим** (замер 2026-07-26): прод входит сюда ровно
-  дважды — `confluence/mtf.py` берёт `long_min_sl_dist_pct` / `short_min_sl_dist_pct`. Оба
-  построителя уровней (`structural_long_levels`, `structural_short_levels`), обе TP-лестницы,
-  `adaptive_level_params`, `build_liquidity_context`, `continuation_short_targets`,
-  `reanchor_setup_levels` и весь `features/fib.py` вызовов не имеют — 863 из 1563 строк.
-  Внутри мёртвого лежит инверсия: `worst` анкерит ЛУЧШИЙ залив вопреки имени и комментарию
-  (канон — `contract.py::worst_entry_edge`). Достижимость закреплена
-  `tests/test_levels_reachability.py`: оживление любой из них уронит тест.
-  **Геометрию сетапов сегодня считает `prizrak/` (`setups.py`, `grid.py`), не `levels/`.**
+- **`levels/`** — ⚠ **не геометрия сетапов**, вопреки прежнему описанию: после чистки
+  2026-07-26 здесь 92 строки — только пол дистанции стопа (`long_min_sl_dist_pct` /
+  `short_min_sl_dist_pct`) для единственного потребителя `confluence/mtf.py`.
+  **Геометрию сетапов считает `prizrak/` (`setups.py`, `grid.py`), полосу манипуляций —
+  `scanner/detect/patterns.py`.**
 - **`toolkit/`** — stateless-хелперы (с 2026-07-26 проверяется mypy, blanket-override снят)
 - **`domain/`** — настройки и схемы (`config.py` — интервалы) · **`params/store.py`** — калибровка
   гейтов + пер-символьные оверрайды · **`regime/market_regime.py`** — кросс-секционный режим рынка
@@ -240,11 +236,19 @@ conf 80) · `scripts/check_prohibited_apis.py` (приватные CCXT-вызо
 CI (`.github/workflows/ci.yml`) добавляет к этому mypy, `pip-audit` (CVE в зависимостях) и
 `pytest --cov-fail-under=45` — порог равен ИЗМЕРЕННОМУ покрытию, чтобы ловить деградацию.
 Тестами закреплены: граница призрак↔манипуляции (`tests/test_module_boundary.py`),
-достижимость `levels/` (`test_levels_reachability.py`) и контракты полосы манипуляций
-(`test_cycle_loop_contracts.py` — в т.ч. что `--no-telegram` глушит ДЕТЕКТ, а не только send).
-⚠ **vulture при conf 80 мёртвый `levels/` не поймал**: публичная функция, которую импортирует
-хотя бы один модуль, уверенной находкой не считается — даже если сам этот модуль никем не
-импортируется (`features/fib.py`). Проверять достижимость, а не только «есть ли импорт».
+**достижимость каждого модуля от точки входа** (`test_levels_reachability.py`) и контракты
+полосы манипуляций (`test_cycle_loop_contracts.py` — в т.ч. что `--no-telegram` глушит ДЕТЕКТ,
+а не только send).
+
+⚠ **Мёртвый код здесь не ловится ни покрытием, ни vulture.** Чистка 2026-07-26 сняла 1913
+строк, не исполнявшихся ни разу (крупнейшее — `levels/levels.py`, 1575 → 92). Почему проехало:
+покрытие 17% читается как «недотестировано», а не «не исполняется»; vulture при `conf 80` не
+считает находкой публичную функцию, которую импортирует хотя бы один модуль, — **даже если сам
+этот модуль не импортирует никто** (`features/fib.py` держал так `fib_retracement_levels`).
+Проверять надо ДОСТИЖИМОСТЬ от `__main__`, а не наличие импорта; граф обязан идти по
+относительным импортам (`from .x import y`) — сканер без них объявил живое мёртвым и удаление
+словили только тесты.
+
 Всё остальное — включая инварианты выше — проза + ревью-агенты, поэтому именно оно и гниёт.
 
 ## Subagents

@@ -5,8 +5,6 @@ from typing import Any
 
 import structlog
 
-from hunt_core.maps.liquidation import realized_liq_magnet
-
 from hunt_core.toolkit._mapping import dict_field
 
 LOG = structlog.get_logger(__name__)
@@ -19,6 +17,12 @@ def collect_upward_targets(row: dict[str, Any], price: float) -> tuple[list[floa
     # REALIZED magnets only — a synthetic leverage-tier estimate must not become a
     # forecast target (see realized_liq_magnet). Note `liq_forward_zones` below is a
     # DECLARED forward/synthetic surface and stays in play by design.
+    # Ленивый импорт РАЗРЫВАЕТ ЦИКЛ toolkit.forecast → toolkit.targets → maps/__init__ →
+    # toolkit.forecast. Цикл существовал и раньше, но держался на случайном порядке импортов
+    # (мёртвый levels.py успевал втянуть hunt_core.maps первым); его удаление 2026-07-26 цикл
+    # обнажило. Модульный импорт здесь возвращать нельзя.
+    from hunt_core.maps.liquidation import realized_liq_magnet
+
     short_liq = realized_liq_magnet(market, side="short")
     if short_liq is not None and short_liq > price:
         targets.append(short_liq)
@@ -73,10 +77,10 @@ def collect_upward_targets(row: dict[str, Any], price: float) -> tuple[list[floa
     void_above = market.get("map_void_above")
     if void_above is not None:
         try:
-            # Имя было `vp` — то же, которым выше связан словарь volume_profile (:44).
-            # Поведение сегодня верное (словарь читается на :45, до перезаписи), но это
-            # ловушка: любое будущее чтение vp как словаря ниже сломалось бы молча.
-            # Вскрыто mypy после снятия blanket-override с toolkit/ (2026-07-26).
+            # Имя было `vp` — то же, которым выше связан словарь volume_profile. Поведение
+            # оставалось верным (словарь дочитывается до перезаписи), но это ловушка: любое
+            # будущее чтение `vp` как словаря ниже сломалось бы молча. Вскрыто mypy после
+            # снятия blanket-override с toolkit/ (2026-07-26).
             void_price = float(void_above)
             if void_price > price:
                 targets.append(void_price)
@@ -104,6 +108,8 @@ def collect_downward_targets(row: dict[str, Any], price: float) -> tuple[list[fl
     factors: list[str] = []
 
     # REALIZED magnets only — mirror of collect_upward_targets (see realized_liq_magnet).
+    from hunt_core.maps.liquidation import realized_liq_magnet  # см. выше: разрыв цикла
+
     long_liq = realized_liq_magnet(market, side="long")
     if long_liq is not None and long_liq < price:
         targets.append(long_liq)
