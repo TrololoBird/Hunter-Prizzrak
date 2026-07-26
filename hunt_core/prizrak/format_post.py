@@ -416,7 +416,62 @@ def _slom_token(structure: dict[str, Any]) -> str:
             bits.append(f"{tf} CHoCH↑")
         elif s.get("choch_bear"):
             bits.append(f"{tf} CHoCH↓")
-    return "слом: " + ", ".join(bits) if bits else ""
+    if bits:
+        return "слом: " + ", ".join(bits)
+    # Отсутствие — тоже показание прибора, и автор проговаривает его наравне с наличием: «нет
+    # часовых разворотных структур», «нет часовых/4ч диверов». Молчание не отличает «слома нет»
+    # от «не посчитали», а это разные вещи (I-6). Утверждаем ТОЛЬКО когда флаги реально считались.
+    known = [
+        lbl for lbl, tf in (("4ч", "4h"), ("1ч", "1h"))
+        for s in [sbt.get(tf)]
+        if isinstance(s, dict) and any(
+            s.get(k) is not None for k in ("bos_up", "bos_down", "choch_bull", "choch_bear")
+        )
+    ]
+    return f"разворотных структур {'/'.join(known)} нет" if known else ""
+
+
+def _dominance_token() -> str:
+    """Доминация и стейблкоины — «приборы» рынка, а не одного символа.
+
+    Считались и раньше, но сворачивались в НЕВИДИМЫЙ множитель уверенности
+    (`dominance.compute_dominance_factor` → `multiplier`), а строки-обоснования выбрасывались.
+    Автор же проговаривает их прямо и наравне с RSI: «Стейблкоины пришли к поддержке и РСИ
+    глобальной трендовой», «догоняющее движение на разгрузке Доминации ЕТН». Поэтому показания
+    печатаются как есть. Чтение кэш-онли и полностью защищённое — путь отображения не падает.
+    """
+    try:
+        from hunt_core.prizrak.dominance_source import (
+            _read_snapshots,
+            read_cached_changes_24h,
+        )
+
+        snaps = _read_snapshots()
+        if not snaps:
+            return ""
+        now = snaps[-1]
+        ch = read_cached_changes_24h() or {}
+    except Exception:  # noqa: BLE001 — display path must never raise
+        return ""
+
+    def _fmt_one(label: str, key: str, ch_key: str, unit: str) -> str | None:
+        v = now.get(key)
+        if not isinstance(v, (int, float)):
+            return None
+        d = ch.get(ch_key)
+        # 24ч-дельта появляется только когда в кэше есть снимок суточной давности; до тех пор
+        # печатается один уровень, а не выдуманный ноль.
+        tail = f" ({float(d):+.2f}{unit}/24ч)" if isinstance(d, (int, float)) else ""
+        return f"{label} {float(v):.2f}%{tail}"
+
+    toks = [
+        t for t in (
+            _fmt_one("BTC.D", "btc_d", "btc_d_change_24h", "pp"),
+            _fmt_one("ETH.D", "eth_d", "eth_d_change_24h", "pp"),
+            _fmt_one("стейблы", "stable_cd", "stable_cd_change_24h", "pp"),
+        ) if t
+    ]
+    return " · ".join(toks)
 
 
 def _pribory_line(analysis: AnalystReport, market: dict[str, Any]) -> str:
@@ -485,6 +540,10 @@ def _pribory_line(analysis: AnalystReport, market: dict[str, Any]) -> str:
         toks.append(f"ликв.↓ <code>{fmt_price(float(nl))}</code>")
     if isinstance(ns, (int, float)):
         toks.append(f"сквиз↑ <code>{fmt_price(float(ns))}</code>")
+
+    dom = _dominance_token()
+    if dom:
+        toks.append(dom)
 
     return " · ".join(toks)
 
@@ -574,6 +633,67 @@ def _abstain_reason_line(reasons: tuple[dict[str, Any], ...] | list[dict[str, An
 
 def _norm_sym(symbol: str) -> str:
     return _base(symbol)
+
+
+def _open_line(symbol: str) -> str | None:
+    """💰 ОТКРЫТЫЕ сделки по символу: вход, цели, стоп и статус управления.
+
+    Это заголовок его поста, которого у карточки не было вовсе: «💰 Здесь — цели по всем локальным
+    лонгам, набранным за последние недели — так что не забываем фиксировать часть профита. И не
+    забываем оставлять что-то в сделках…» (BTC, 2026-07-25). Карточка печатала только ЗАКРЫТЫЕ —
+    то есть отчитывалась о прошлом и молчала о том, чем человек управляет прямо сейчас.
+
+    Трекер уже несёт всё нужное (``entry_lo/hi``, ``tp1..tp3``, ``stop_loss``, ``sl_at_breakeven``,
+    ``tp1_hit``, ``partial_fixed_pct``) — не хватало только рендера. Напоминание про фиксацию
+    печатается ПО ФАКТУ достижения TP1 без отмеченной фиксации, а не как дежурная фраза.
+
+    Best-effort + полностью защищено: любая неожиданная форма → ``None``, строка просто отсутствует.
+    """
+    try:
+        from hunt_core.track.tracker import load_tracker_state
+
+        state = load_tracker_state()
+    except Exception:  # noqa: BLE001 — display path must never raise
+        return None
+    sigs = state.get("signals") if isinstance(state, dict) else None
+    if not isinstance(sigs, dict):
+        return None
+    target = _norm_sym(symbol)
+    out: list[str] = []
+    for key, sig in sigs.items():
+        if not isinstance(sig, dict) or sig.get("status") == "closed":
+            continue
+        s_sym = sig.get("symbol") or str(key).partition(":")[0]
+        if _norm_sym(str(s_sym)) != target:
+            continue
+        d = str(sig.get("direction") or str(key).partition(":")[2] or "").lower()
+        dr = "лонг" if d == "long" else "шорт" if d == "short" else (d or "сделка")
+        bits = [dr]
+        lo, hi = sig.get("entry_lo"), sig.get("entry_hi")
+        if isinstance(lo, (int, float)) and isinstance(hi, (int, float)):
+            bits.append(
+                f"вход <code>{fmt_price(float(lo))}</code>–<code>{fmt_price(float(hi))}</code>"
+                if float(lo) != float(hi) else f"вход <code>{fmt_price(float(lo))}</code>"
+            )
+        tps = [float(t) for k in ("tp1", "tp2", "tp3")
+               for t in [sig.get(k)] if isinstance(t, (int, float))]
+        if tps:
+            bits.append("💰 " + " · ".join(f"<code>{fmt_price(t)}</code>" for t in tps))
+        sl = sig.get("stop_loss")
+        if isinstance(sl, (int, float)):
+            be = " (в БУ)" if sig.get("sl_at_breakeven") else ""
+            bits.append(f"стоп <code>{fmt_price(float(sl))}</code>{be}")
+        fixed = sig.get("partial_fixed_pct")
+        if isinstance(fixed, (int, float)) and float(fixed) > 0:
+            bits.append(f"зафиксировано {float(fixed):.0f}%")
+        elif sig.get("tp1_hit"):
+            # Курс и его посты: на первой цели фиксируется ЧАСТЬ, остаток держится. TP1 взят,
+            # а фиксация не отмечена — это то самое «не забываем фиксировать часть профита».
+            bits.append("<b>TP1 взят — фиксировать часть</b>")
+        out.append(" · ".join(bits))
+    if not out:
+        return None
+    return "💰 <b>В работе</b>: " + " ⁚ ".join(out[:3])
 
 
 def _closed_line(symbol: str) -> str | None:
@@ -681,6 +801,10 @@ def format_prizrak_post(analysis: AnalystReport) -> str:
         if why:
             parts.append(f"<i>{html.escape(why)}</i>")
 
+    # Сначала то, чем управляют СЕЙЧАС, потом отчёт о закрытом — порядок его постов.
+    opened = _open_line(analysis.symbol)
+    if opened:
+        parts.extend(["", opened])
     closed = _closed_line(analysis.symbol)
     if closed:
         parts.extend(["", closed])
