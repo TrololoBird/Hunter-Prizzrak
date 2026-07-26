@@ -136,6 +136,14 @@ def _build_regime(frames: dict[str, pl.DataFrame]) -> Regime:
 
     ``btc_*`` correlation + ``pump_cycle`` need a BTC reference frame (cross-symbol) not available in a
     single-symbol build — left ``None`` here; threaded in at the tick where BTC's frame exists (tracked).
+
+    ⚠ Уточнение 2026-07-26: у этих полей нет не только продюсера, но и **читателя** — `rg` по
+    `btc_beta_1h` / `btc_corr_1h` / `btc_decoupled_pump` / `btc_decoupled_dump` / `pump_cycle` не
+    находит ни одного потребителя вне самой модели. При этом `Regime` сериализуется в персист
+    (`_cycle_tick.py`, `track/_native_context.py`), то есть они годами пишутся в журнал как `null`.
+    Поэтому «дотянуть BTC-кадр» сейчас дало бы поле, которое никто не прочтёт: сперва нужен
+    потребитель, потом продюсер. Удалять тоже рано — пометка «tracked» описывает реальный
+    методологический пробел (декаплинг от BTC), а не забытый код.
     """
     w4h, w1h, w15 = _nonempty(frames.get("h4")), _nonempty(frames.get("h1")), _nonempty(frames.get("m15"))
     if w4h is None:

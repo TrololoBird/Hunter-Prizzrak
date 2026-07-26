@@ -1,6 +1,8 @@
 """MTF family-voting confluence (P6 — extracted from deep_signal)."""
 from __future__ import annotations
 
+import structlog
+
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -17,6 +19,9 @@ def _min_sl_pct(symbol: str, direction: str) -> float:
     from hunt_core.levels.levels import long_min_sl_dist_pct, short_min_sl_dist_pct
 
     return long_min_sl_dist_pct(symbol) if direction == "long" else short_min_sl_dist_pct(symbol)
+
+LOG = structlog.get_logger("hunt.confluence.mtf")
+
 
 @dataclass
 class TFSignal:
@@ -171,8 +176,20 @@ def build_mtf_confluence(
         if v > 0:
             atr = v
             break
-    if atr <= 0:
+    # ⚠ ATR СФАБРИКОВАН, когда ни один ТФ его не дал. Держится потому, что несущий: на нём
+    # стоят ширина полосы входа (±0.3·ATR), запасной стоп (±2·ATR) и пол дистанции — при нуле
+    # полоса схлопнулась бы в точку, а стоп сел бы на цену. Но 1% — это не измерение
+    # волатильности, а предположение, и раньше оно уходило в сценарий молча.
+    #
+    # Теперь подмена ПОМЕЧЕНА: `atr_assumed` попадает в evidence обоих сценариев, и потребитель
+    # видит, что геометрия построена на допущении. Механизм честной пометки в этом файле уже
+    # есть (`TFSignal.data_quality == "insufficient_history"`, исключающий ТФ из согласия) — здесь
+    # он просто не применялся. Настоящее решение — не строить сценарий без ATR вовсе, но это
+    # перестройка билдера; уровень находки (journal-only) её не оправдывает. (2026-07-26)
+    atr_assumed = atr <= 0
+    if atr_assumed:
         atr = price * 0.01
+        LOG.debug("mtf_atr_assumed", symbol=symbol, price=price, assumed_atr=atr)
 
     def _build(direction: str) -> ScenarioScore:
         # HTF score — only count TFs with a determinate trend (bull or bear).
@@ -247,6 +264,10 @@ def build_mtf_confluence(
 
         if htf_total:
             evidence.insert(0, f"HTF {htf_aligned}/{htf_total}")
+        if atr_assumed:
+            # Геометрия ниже построена на ДОПУЩЕННОЙ волатильности, а не измеренной — читатель
+            # и калибровка должны это видеть, а не получать её наравне с настоящей.
+            evidence.append("atr_assumed")
 
         return ScenarioScore(
             direction=direction,  # type: ignore[arg-type]
