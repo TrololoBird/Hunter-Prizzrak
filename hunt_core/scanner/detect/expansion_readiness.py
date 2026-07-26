@@ -104,8 +104,18 @@ def compute_expansion_readiness(
     delta = _safe_float(_delta)
     cvd_slope = _safe_float(_cvd)
 
-    vol_z = zs.get("volume_z_5m") or zs.get("volume_z")
-    oi_z = zs.get("oi_z_5m") or zs.get("oi_z")
+    # is-None-fallthrough, а НЕ `or`: z-скор ровно 0.0 — законное измерение («последняя
+    # выборка равна медиане окна»), robust_z отдаёт None, когда мерить нечего. `or` выбрасывал
+    # измеренное «всплеска на 5m нет» и молча подставлял 24-часовой z, который может быть большим,
+    # раздувая energy — а energy решает допуск символа в юниверс сканирования. Ровно этот приём
+    # применён к delta/cvd десятью строками выше с комментарием «a measured 0.0 must count as
+    # measured»; здесь его не применили. (2026-07-26)
+    vol_z = zs.get("volume_z_5m")
+    if vol_z is None:
+        vol_z = zs.get("volume_z")
+    oi_z = zs.get("oi_z_5m")
+    if oi_z is None:
+        oi_z = zs.get("oi_z")
     trade_z = zs.get("trade_rate_z")
     oi_accel = 0.0
     if oi_chg is not None and oi_chg > 0:

@@ -10,6 +10,7 @@ from __future__ import annotations
 import time
 from typing import Any, NamedTuple
 
+import polars as pl
 import structlog
 
 from hunt_core.engine import rest
@@ -20,6 +21,7 @@ from hunt_core.maps.engine import MapBundle, MapTimeSeriesStore
 from hunt_core.maps.feed import build_map_bundle
 from hunt_core.engine.funding_stats import funding_trend, funding_zscore
 from hunt_core.engine.oi_stats import oi_change, oi_series
+from hunt_core.toolkit.robust_stats import robust_z
 from hunt_core.maps.oi import oi_bars_from_frames
 from hunt_core.prizrak.assemble import assemble_prizrak
 from hunt_core.prizrak.models import PrizrakOutput
@@ -106,7 +108,7 @@ _FUNDING_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 
 async def _fetch_oi_bars(
     exchange: Any, symbol: str, view: MarketView
-) -> tuple[list[dict[str, Any]] | None, float | None]:
+) -> tuple[list[dict[str, Any]] | None, float | None, float | None]:
     """1h OI history (48 bars) joined to the 1h frame, plus the OI %-change over that window.
 
     The raw OI rows are cached per symbol for ``_OI_BARS_TTL_S`` (they change on Binance's ~5-min
@@ -119,11 +121,11 @@ async def _fetch_oi_bars(
     ``oi_regime_from_row`` resolved every regime to ``"unknown"`` for want of this one number.
 
     Returns:
-        ``(bars, oi_change_pct)`` — each independently ``None`` when its input is absent.
+        ``(bars, oi_change_pct, oi_z)`` — each independently ``None`` when its input is absent.
     """
     h1 = view.klines.h1
     if h1 is None:
-        return None, None
+        return None, None, None
     now = time.monotonic()
     cached = _OI_BARS_CACHE.get(symbol)
     if cached is not None and now - cached[0] < _OI_BARS_TTL_S:
@@ -137,15 +139,21 @@ async def _fetch_oi_bars(
         if rows:
             _OI_BARS_CACHE[symbol] = (now, rows)  # cache only real data (fail-loud absent isn't cached)
     if not rows:
-        return None, None
+        return None, None, None
     # ×100: `oi_change` returns a FRACTION, the field is named `_pct`. This project has already
     # shipped a fraction under a percent name once (`buffer_pct` → negative stop price), so the
     # conversion is explicit and local. window=24 over 1h-period rows = a 24h move, the only
     # pairing that can reach `classify_oi_regime`'s ±15% band (measurement in `oi_stats.oi_change`).
     raw = oi_change(oi_series(rows), window=_OI_CHANGE_WINDOW_BARS)
     oi_change_pct = raw * 100.0 if raw is not None else None
+    # z-скор той же серии — бесплатно, строки уже скачаны. `features/build.py` держал
+    # `deriv_oi_z=None` с пометкой «needs OI-history z-score refresher (tracked)»; refresher
+    # существует с 2026-07-19 (`engine/oi_stats.py::oi_series`), а `_fetch_oi_bars` тянет 48
+    # часовых баров с 2026-07-22. `robust_z` отдаёт None при нехватке точек и на константной
+    # серии — то есть «мерить нечего», а не сфабрикованный 0.0 (I-6).
+    oi_z = robust_z(pl.Series("oi", oi_series(rows)))
     bars = oi_bars_from_frames(rows, h1)
-    return (bars or None), oi_change_pct
+    return (bars or None), oi_change_pct, oi_z
 
 
 def _price_change_pct(view: MarketView, *, window: int = _OI_CHANGE_WINDOW_BARS) -> float | None:
@@ -219,7 +227,7 @@ async def assemble_native_analyst(
     trades = list((getattr(ex, "trades", {}) or {}).get(symbol) or [])
     cross_liq = rt.multi.cross_liquidations(symbol)
     contract_sizes: dict[str, float | None] = {"binance": eng.contract_size(symbol)}
-    oi_bars, oi_change_pct = await _fetch_oi_bars(ex, symbol, view)
+    oi_bars, oi_change_pct, oi_z = await _fetch_oi_bars(ex, symbol, view)
     cross_walls = aggregate_cross_walls(await rt.multi.cross_orderbook(symbol))
 
     maps = build_map_bundle(
@@ -229,7 +237,7 @@ async def assemble_native_analyst(
         cross_liq=cross_liq,
         contract_sizes=contract_sizes,
         oi_bars=oi_bars,
-        oi_z=panel.factors.deriv_oi_z,
+        oi_z=oi_z,  # измеренный здесь; panel.factors.deriv_oi_z структурно None
         cross_walls=cross_walls,
     )
     prizrak = assemble_prizrak(view, maps)

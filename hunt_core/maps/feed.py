@@ -33,6 +33,34 @@ class MapTrade(NamedTuple):
     is_buy: bool
 
 
+def _book_levels(levels: list[tuple[float, float]]) -> list[dict[str, float]]:
+    """``[(price, qty), …]`` → ``[{"price", "qty", "notional_usd"}, …]`` для истории стакана.
+
+    Форма фиксирована потребителями: `maps/orderbook.py::derive_sticky_walls`,
+    `depth_heatmap_matrix` и `spoof_flags` читают именно эти три поля. `notional_usd`
+    считается здесь, а не у потребителя, потому что qty осмысленна только вместе с ценой
+    того же уровня.
+
+    Args:
+        levels: Уровни стакана как ``(price, qty)`` из типизированного ``view.book``.
+
+    Returns:
+        Уровни в словарной форме; строки с непригодной ценой или объёмом отбрасываются
+        (fail-loud: лучше пропустить уровень, чем внести в карту ноль как измерение).
+    """
+    out: list[dict[str, float]] = []
+    for lvl in levels:
+        try:
+            price = float(lvl[0])
+            qty = float(lvl[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if price <= 0 or qty <= 0:
+            continue
+        out.append({"price": price, "qty": qty, "notional_usd": price * qty})
+    return out
+
+
 def _to_map_trades(trades: list[dict[str, Any]] | None) -> list[MapTrade]:
     """ccxt unified trade dicts → ``MapTrade`` tuples (fail-loud skip, never a fabricated side/qty)."""
     out: list[MapTrade] = []
@@ -107,7 +135,22 @@ def build_map_bundle(
     asks = list(view.book.asks or ())
     top_n = cfg.book_deep_top_n
     if bids or asks:
-        store.sample_book(view.symbol, {"bids": bids[:top_n], "asks": asks[:top_n]})
+        # Ключи и форма ОБЯЗАНЫ совпадать с тем, что читают детекторы истории стакана:
+        # `sticky_walls`, `depth_heatmap_matrix` и `spoof_flags` (maps/orderbook.py) берут
+        # `snap["bid_levels"]` / `snap["ask_levels"]` и ждут СЛОВАРИ с `price` / `notional_usd`.
+        # До 2026-07-26 здесь писались кортежи под ключами `bids`/`asks`, поэтому все три
+        # детектора получали пустой вход ВСЕГДА, а карточка под заголовком «Тепловая карта
+        # ликвидности (история стакана · sticky/spoof)» показывала только «Разрежение» —
+        # читатель делал вывод «стенок и спуфа нет», хотя их просто не из чего было считать.
+        # Тесты этого не ловили: они строят снапшот сразу в форме `*_levels`, которой
+        # продюсер не писал, то есть проверяли форму, не существовавшую в проде.
+        store.sample_book(
+            view.symbol,
+            {
+                "bid_levels": _book_levels(bids[:top_n]),
+                "ask_levels": _book_levels(asks[:top_n]),
+            },
+        )
 
     map_trades = _to_map_trades(trades)
     _ingest_liq(store, view.symbol, cross_liq, contract_sizes)
@@ -152,11 +195,19 @@ def build_map_bundle(
         orderbook=orderbook,
         liquidation=liq_map,
         volume_profile=vp_map,
+        # Имена ОБЯЗАНЫ нести префикс `map_`: `derive_map_features` вливает `bundle.extra` в
+        # плоский словарь фич как есть (`out.update(bundle.extra)`), а потребители — карточка
+        # ПРИЗРАКа (`prizrak/format_post.py`) и `map_accumulation_score` — читают `map_funding_rate`,
+        # `map_oi_z`, `map_basis_pct`, `map_ws_cvd`. До 2026-07-26 здесь писались имена БЕЗ
+        # префикса, а префиксные — только в `maps/engine.py::build_map_bundle`, у которого нет ни
+        # одного вызывающего. Итог: живой, измеренный фандинг лежал в том же словаре одним ключом
+        # в стороне, а строка «🌪 По приборам» молча не показывала его никогда — читатель не мог
+        # отличить «фандинга нет» от «фандинг не входит в эту карточку».
         extra={
-            "oi_z": oi_z,
-            "funding": view.derivs.funding,
-            "basis": view.derivs.basis,
-            "ws_cvd": view.orderflow.cvd_5m,
+            "map_oi_z": oi_z,
+            "map_funding_rate": view.derivs.funding,
+            "map_basis_pct": view.derivs.basis,
+            "map_ws_cvd": view.orderflow.cvd_5m,
         },
     )
 

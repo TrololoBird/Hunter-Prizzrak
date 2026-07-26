@@ -197,8 +197,33 @@ def _prior_swing_high(df: pl.DataFrame, lookback: int = 60, *, exclude_last: int
     return last_sh, start
 
 
-def _micro_df(micro_15m: pl.DataFrame | None, meso_df: pl.DataFrame) -> pl.DataFrame:
-    return micro_15m if micro_15m is not None and len(micro_15m) > 20 else meso_df.tail(50)
+def _micro_df(micro_15m: pl.DataFrame | None, meso_df: pl.DataFrame) -> pl.DataFrame | None:
+    """The LTF frame for reversal confirmation, or ``None`` when it is unusable.
+
+    Returns ``None`` instead of substituting ``meso_df.tail(50)``, which is what this did until
+    2026-07-26. Why that substitution was a defect and not a convenience:
+
+    * ``scanner/feed.py::frames_for`` omits a timeframe **exactly when it is stale or failed**
+      ("a stale/absent TF is simply omitted (I-6)"). So ``micro_15m is None`` is not "no 15m
+      exists" — it is "the 15m data could not be trusted". The fallback fired precisely at the
+      moment of distrust.
+    * ``micro_tf`` is a plain parameter defaulting to ``"15m"``; it is never derived from the
+      frame actually read. So a ``bos_down``/``choch_bear`` computed on **4h bars** was stamped
+      ``micro_confirmed=True, micro_tf="15m"``.
+    * That flag is a hard emission gate: ``deliver/manipulation_delivery.py`` suppresses every
+      unconfirmed short behind ``HUNT_MANIP_SHORT_REQUIRE_LTF``, and the card prints
+      «Разворот на 15m: подтверждён» plus a live «📍 Вход» instead of «⏳ ОЖИДАНИЕ — НЕ вход».
+      A human opened a short on a confirmation nobody observed.
+
+    The substitution arrived in the initial snapshot (``b67d659``, 2026-07-09) with no recorded
+    rationale — inherited, not designed.
+
+    Callers must treat ``None`` as *not confirmed* (fail-closed), never as confirmed: absence of
+    evidence is not evidence (I-6).
+    """
+    if micro_15m is not None and len(micro_15m) > 20:
+        return micro_15m
+    return None
 
 
 def _consolidation_long_entry(meso_df: pl.DataFrame, bokovik: dict[str, Any]) -> float:
@@ -549,7 +574,9 @@ def _advance_pattern_a(
             if swept_low > 0 and float(meso_df["close"][-1]) < swept_low * 0.95:
                 return new_symbol_state(), None
             micro_df = _micro_df(micro_15m, meso_df)
-            if not (bos_up(micro_df) or choch_bull(micro_df)):
+            # Нет пригодного 15m → подтверждения НЕ наблюдали. Ждём, как и при ненайденном
+            # сломе: раньше здесь бы сработал bos_up по 4h-барам и пропустил сетап дальше.
+            if micro_df is None or not (bos_up(micro_df) or choch_bull(micro_df)):
                 return state, None  # no слом yet — keep waiting
             vol_ok = bullish_volume(meso_df) or (micro_15m is not None and bullish_volume(micro_15m))
             a_entry = _consolidation_long_entry(meso_df, bokovik)
@@ -608,7 +635,8 @@ def _advance_pattern_a(
         if float(meso_df["close"][-1]) < lo * 0.95:
             return new_symbol_state(), None
         micro_df = _micro_df(micro_15m, meso_df)
-        if not (bos_up(micro_df) or choch_bull(micro_df)):
+        # То же самое: без 15m ветка ниже безусловно ставила ltf_confirmed = True.
+        if micro_df is None or not (bos_up(micro_df) or choch_bull(micro_df)):
             return state, None  # no слом yet — keep waiting
         ltf_confirmed = True
         vol_ok = bullish_volume(meso_df) or (micro_15m is not None and bullish_volume(micro_15m))
@@ -774,7 +802,7 @@ def _advance_pattern_b(
         if not absorbed:
             return state, None
         micro_df = _micro_df(micro_15m, meso_df)
-        ltf_confirmed = bool(bos_down(micro_df) or choch_bear(micro_df))
+        ltf_confirmed = micro_df is not None and bool(bos_down(micro_df) or choch_bear(micro_df))
         # TP = just inside the impulse-set low (full pump absorption), NOT a distant
         # distance-ranked pool. This is the reachable level the method banks at; the
         # deepest structural pool only inflated RR into fantasy (ZEC #18718: TP 220.5,
@@ -927,7 +955,7 @@ def _advance_pattern_c(
                                   funding_mult=_funding_target_mult("long", funding_ctx))
             c_target = _lad[0] if _lad else _to_float(meso_df["high"].max())
         micro_df = _micro_df(micro_15m, meso_df)
-        ltf_confirmed = bool(bos_up(micro_df) or choch_bull(micro_df))
+        ltf_confirmed = micro_df is not None and bool(bos_up(micro_df) or choch_bull(micro_df))
         # «Почему» must DISCRIMINATE, not restate preconditions. asc_ok/desc_ok/zakrep
         # are hard gates above (`if not …: return`), so those tokens are present on EVERY
         # emitted C → tautological (BILL=CRV=HEI verbatim). Lead with the VARYING factors

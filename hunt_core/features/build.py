@@ -92,7 +92,12 @@ def _build_factors(
         # funding fraction → percentage-points ×50 (matches the legacy funding_pct·50 slope).
         deriv_funding=_clamp(funding * 5000.0, -1.0, 1.0) if funding is not None else None,
         flow_cmf15=_clamp(cmf, -1.0, 1.0) if cmf is not None else None,
-        deriv_oi_z=None,  # needs OI-history z-score refresher (tracked)
+        # Остаётся None ОСОЗНАННО: чистые фичи считаются из `MarketView`, а OI-история — это REST,
+        # которого на этом уровне нет. Реальный z-скор считает `runtime/native_assembly.py::
+        # _fetch_oi_bars` из тех же 48 баров, что уже скачаны, и передаёт его в `build_map_bundle`
+        # напрямую — до 2026-07-26 туда шло вот это поле, поэтому `map_oi_z` был пуст всегда.
+        # Поле держится ради формы FactorPanel; потребителям нужен путь через native_assembly.
+        deriv_oi_z=None,
     )
 
 
