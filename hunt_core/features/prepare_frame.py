@@ -99,9 +99,21 @@ def _materialize_series(
 
 
 def _numeric_item(df: pl.DataFrame, row: int, column: str, default: float = 0.0) -> float:
+    """Значение ячейки или ``default`` — контракт функции, который она сама не держала.
+
+    ``ColumnNotFoundError`` наследуется от ``PolarsError``, а не от ``ValueError``, поэтому
+    отсутствующая КОЛОНКА — самый вероятный отказ здесь — пролетала мимо except и убивала вызов.
+    Поймано на живом боте 2026-07-25 18:04: `_market_regime` страхует `adx14` явной проверкой
+    `"adx14" not in work_4h.columns`, а строкой ниже читает `atr_pct` из 15м-фрейма без такой же
+    страховки. Деградировавшая сеть (2357 WS-реконнектов, 180 отказов fetch_ohlcv за 18 минут)
+    оставила фрейм без колонки — и `ColumnNotFoundError` снёс не одну метрику, а СИМВОЛ целиком:
+    `snapshot_unhandled_exc` + `watch_symbol_data_reject` по ВСЕМ 7 пиннед-символам разом, то есть
+    и главный тик, и глубокий цикл. Ровно то, что запрещает I-6: нет данных → явное «нет данных»
+    и деградация одной величины, а не падение всего пути.
+    """
     try:
         value = df.item(row, column)
-    except (IndexError, ValueError):
+    except (IndexError, ValueError, pl.exceptions.ColumnNotFoundError):
         return default
     try:
         return default if value is None else float(value)

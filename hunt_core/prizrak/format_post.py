@@ -123,8 +123,11 @@ def _plan_line(setups: dict[str, Any], price: float, market: dict[str, Any]) -> 
     """
     hr = setups.get("headroom") if isinstance(setups, dict) else None
     bits: list[str] = []
+    tight = False
     if isinstance(hr, dict):
         dn, up = hr.get("down_price"), hr.get("up_price")
+        w = hr.get("width_pct")
+        tight = isinstance(w, (int, float)) and float(w) < _TIGHT_HEADROOM_PCT
         if dn is not None:
             bits.append(f"поддержка <code>{fmt_price(float(dn))}</code>")
         if up is not None:
@@ -149,13 +152,26 @@ def _plan_line(setups: dict[str, Any], price: float, market: dict[str, Any]) -> 
                 touches = float(z.get("touches") or 0)
                 if best is None or touches > best[0]:
                     best = (touches, lo, hi)
-    if best is not None:
+    if best is not None and tight:
+        # Тесный коридор и «закуп здесь» — взаимоисключающие утверждения, а карточка печатала их
+        # рядом. Разбор BTC 2026-07-25 показывает, что автор в ровно этой ситуации говорит
+        # противоположное: «нет никакого уровня, которому можно дать акцент», «нету понятной
+        # нормальной точки входа, с которой можно работать» — и предписывает, ЕСЛИ входить, брать
+        # весь диапазон с частичной фиксацией и безубытком, а не точку. Полоса остаётся видна ниже
+        # в карте зон; здесь снимается только рекомендация, которой он бы не дал.
+        bits.append(
+            f"чёткой ТВХ нет — <b>весь диапазон</b> <code>{fmt_price(best[1])}</code>–"
+            f"<code>{fmt_price(best[2])}</code> с частичной фиксацией"
+        )
+    elif best is not None:
         bits.append(f"закуп <code>{fmt_price(best[1])}</code>–<code>{fmt_price(best[2])}</code>")
+    if best is not None:
         # Кластер ликвидаций МЕЖДУ ценой и зоной закупа — второе независимое основание ждать, а не
         # брать с текущих: путь к лимиткам проходит через съём ликвидности. Автор проговаривает это
         # прямо в разборе ASTR («ликвидности снизу предостаточно, здесь наш часовой уровень…
         # желательно как раз в этот момент будет проработка ликвидности»), и потому кладёт заявки
-        # заранее — проработка бывает импульсной.
+        # заранее — проработка бывает импульсной. Печатается в ОБОИХ случаях: тесный коридор
+        # ликвидность по пути не отменяет, а делает ожидание ещё более обоснованным.
         magnet = market.get("liq_heatmap_nearest_long")
         if isinstance(magnet, (int, float)) and best[2] < float(magnet) < price:
             bits.append(f"⚡ ликвидность по пути <code>{fmt_price(float(magnet))}</code>")
