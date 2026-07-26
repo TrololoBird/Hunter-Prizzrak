@@ -81,15 +81,21 @@ def make_secondary(venue: str) -> Any:
     swaps); ccxt unifies symbols so ``BTC/USDT:USDT`` maps across venues.
     """
     cls = dns_cached_class(getattr(ccxtpro, venue))
-    return cls(
-        {
-            "enableRateLimit": True,
-            "newUpdates": True,
-            "options": {
-                "defaultType": "swap",
-                "OHLCVLimit": params.OHLCV_LIMIT,
-                "tradesLimit": params.TRADES_LIMIT,
-                "watchOrderBookLimit": params.ORDER_BOOK_LIMIT,
-            },
-        }
-    )
+    opts: dict[str, Any] = {
+        "defaultType": "swap",
+        "OHLCVLimit": params.OHLCV_LIMIT,
+        "tradesLimit": params.TRADES_LIMIT,
+        "watchOrderBookLimit": params.ORDER_BOOK_LIMIT,
+    }
+    if venue == "bybit":
+        # Вторичные площадки нужны РОВНО для USDT-перпов (кросс-венью фандинг/OI/long-short), но
+        # ccxt у bybit грузит четыре категории — spot, linear, inverse, option — и обходит шесть
+        # опционных цепочек (BTC/ETH/SOL/XRP/MNT/DOGE) отдельными запросами. Именно они валили
+        # load_markets на живом прогоне 2026-07-26 (04:41 и 04:48,
+        # instruments-info?category=option&baseCoin=…), а вслед за ним площадка молча выпадала
+        # на всю сессию.
+        #
+        # Замер A/B на живом API: как есть — FAIL за 11.6 с; только linear — OK за 2.8 с и 656
+        # USDT-перпов, то есть ровно та вселенная, которую кросс-опрос и использует.
+        opts["fetchMarkets"] = {"types": ["linear"]}
+    return cls({"enableRateLimit": True, "newUpdates": True, "options": opts})
