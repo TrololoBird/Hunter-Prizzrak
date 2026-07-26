@@ -427,10 +427,24 @@ def _fmt_price(v: Any) -> str:
 
 
 def format_grid_telegram(grid: list[dict[str, Any]], *, price: float = 0) -> str:
+    """Только УСИЛЕННЫЙ мульти-ТФ конфлюенс. Поуровневый дамп больше не печатается.
+
+    Карточка несла ДВЕ карты уровней сразу: зоны из ``format_post`` (структура + ПОК + цели) и эту,
+    посчитанную другим кодом по другим входам, — и они расходились в числах на одном и том же
+    экране. Живой BTC 2026-07-26: зоны говорят «4h шорт 64473–64919 · 65484–65750», а этот дамп —
+    «4h сопротивл=65780.0»; зоны — «1d добор 62232–62316», дамп — «1d поддержка=61297.0». Читателю
+    предлагалось выбрать самому. Плюс безымянная строка «зона 2» с сопротивлением, записанным
+    задом наперёд (67255.4–66924.1).
+
+    Уникальное здесь ровно одно — совпадение уровня на НЕСКОЛЬКИХ ТФ («сопротивл 64514.1
+    (5m+15m+1h)»), чего карта зон не показывает: она разносит горизонты по отдельным блокам.
+    Его метод это ценит прямо («сила уровня определяется ТФ и объёмом», стр.22), поэтому строка
+    остаётся, а дублирующий и противоречивый дамп уходит.
+    """
     if not grid:
         return ""
 
-    lines = ["<b>Карта уровней</b> <i>(POC/структура · не стакан и не ликвидации)</i>"]
+    lines: list[str] = []
     _K_RU = {"poc": "POC", "support": "поддержка", "resistance": "сопротивл", "vah": "VAH", "val": "VAL"}
     _KIND_ORDER = ("poc", "support", "resistance", "vah", "val")
     # The same TF can appear twice — once from legacy donchian levels, once from
@@ -490,7 +504,6 @@ def format_grid_telegram(grid: list[dict[str, Any]], *, price: float = 0) -> str
     # глубже/выше list tokens carry no TF set and are never folded.)
     _tf_rank = {t: i for i, t in enumerate(("1m", "5m", "15m", "1h", "4h", "1d", "1w"))}
     conf_bits: list[str] = []
-    absorbed: set[tuple[str, str, float]] = set()
     for k in ("support", "resistance"):
         groups: list[dict[str, Any]] = []
         pts = sorted((v, tf) for tf in order for v in num_by[tf].get(k, []))
@@ -507,8 +520,6 @@ def format_grid_telegram(grid: list[dict[str, Any]], *, price: float = 0) -> str
                 matched["members"].append((tf, pv))
         for g in groups:
             if len(g["tfs"]) >= 2:
-                for m_tf, m_pv in g["members"]:
-                    absorbed.add((m_tf, k, m_pv))
                 tfs = "+".join(sorted(g["tfs"], key=lambda t: _tf_rank.get(t, 99)))
                 # Same distance grammar as the per-TF lines, but inside the (TF · %)
                 # group — fmt_dist wraps its own parens, so strip them before nesting.
@@ -517,29 +528,9 @@ def format_grid_telegram(grid: list[dict[str, Any]], *, price: float = 0) -> str
                 tail = f" · {inner}" if inner else ""
                 conf_bits.append(f"{_K_RU[k]} {_fmt_price(g['price'])} ({tfs}{tail})")
 
-    for tf in order:
-        parts: list[str] = []
-        for k in _KIND_ORDER:
-            nums = num_by[tf].get(k, [])
-            if k == "support":
-                nums = sorted(nums, reverse=True)  # nearest (highest) first
-            elif k == "resistance":
-                nums = sorted(nums)  # nearest (lowest) first
-            for val in nums:
-                if (tf, k, val) in absorbed:
-                    continue  # shown once in the «усиленные» confluence line instead
-                # Distance is what makes a level readable at a glance: a support 0.1%
-                # away and one 9.6% away used to render identically, leaving the reader
-                # to divide every number on the card by spot in their head.
-                parts.append(f"{_K_RU.get(k, k)}={_fmt_price(val)}{_fmt_dist(val, price)}")
-            for tok in tok_by[tf].get(k, []):
-                parts.append(f"{_K_RU.get(k, k)}={tok}")
-        if parts:
-            lines.append(f"· {tf}: " + ", ".join(parts[:6]))
-
     if conf_bits:
         lines.append("🔗 <b>мульти-ТФ конфлюенс</b> (усиленные): " + ", ".join(conf_bits))
-    return "\n".join(lines) if len(lines) > 1 else ""
+    return "\n".join(lines)
 
 
 __all__ = ["build_confluence_grid", "format_grid_telegram"]
