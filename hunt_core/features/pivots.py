@@ -370,6 +370,37 @@ def _spec_cvd_expr(frame: pl.DataFrame) -> pl.Expr:
     return delta.cum_sum()
 
 
+# Полурамер фрактала для пивотов ДИВЕРГЕНЦИИ: экстремум окна ``2N+1``.
+#
+# Было N=2 (окно 5) — НИЖЕ всех найденных формализаций сразу. Внешняя сверка 2026-07-26:
+#   • встроенный TradingView «Divergence Indicator» (шаблон, с которого скопировано большинство
+#     портов): lbL=lbR=5, окно 11; rangeLower=5, rangeUpper=60;
+#   • Pine-библиотека lib_divergence: 5/5 (v2 правое плечо 3), дистанция 5..50;
+#   • LonesomeTheBlue «Divergence for Many Indicators» (Editor's Pick): 5/5;
+#   • MQL5 Divergence Dashboard: 5/5, «11-bar pattern»;
+#   • TrendSpider RSI Divergences: 10/10;
+#   • Bulkowski, 19 294 сэмпла: пивот = экстремум ±8 дней (окно 17).
+# Медиана найденных дефолтов — 5 с каждой стороны; ни одного детектора дивергенций с N=2 не нашлось.
+# N=2 совпадает с фракталом Билла Вильямса (MetaTrader), но там это РАЗМЕТКА графика, а не детектор.
+#
+# Почему это было дефектом, а не настройкой: при N=2 два пивота физически не могут стоять ближе
+# 3 баров, и наш замер (медиана 3–7, max 16) лёг ровно на этот геометрический пол — детектор мерил
+# сетку собственного фрактала, а не рыночный свинг. Lo–Mamaysky–Wang (Journal of Finance) прямо
+# отвергают определение экстремума по соседним барам как дающее «слишком много экстремумов».
+#
+# Замер перехода на живых данных (12 символов × 15m/1h/4h/1d, 96 проверок):
+#   N=2 → 13 флагов, разнос пивотов медиана 5, p90 9, max 20
+#   N=5 → 15 флагов, разнос пивотов медиана 7, p90 19, max 24
+# Частота практически не меняется, а МАСШТАБ качелей расширяется вдвое по p90 — то, ради чего
+# правка и делается.
+#
+# ⚠️ ОСТАЁТСЯ РАЗРЫВ: типовая дивергенция литературы (20–60 баров) у нас всё ещё не формируется,
+# потому что сравниваются только ДВА СОСЕДНИХ пивота. Реализации, дающие такой размах, сравнивают
+# текущий пивот с 10–16 предыдущими (LonesomeTheBlue maxpp=10..16, TrendSpider max 100 баров).
+# Это отдельная правка, и она НЕ сделана здесь — менять сравнение без эталона нельзя.
+_DIV_PIVOT_N = 5
+
+
 def _pivot_rows(
     work: pl.DataFrame,
     *,
@@ -402,7 +433,7 @@ def _pivot_rows(
     if work.height < 7 or price_column not in work.columns or indicator_column not in work.columns:
         return []
     current_idx = int(work.item(-1, "_spec_idx"))
-    high_mask, low_mask = _swing_points(work, n=2, include_unconfirmed_tail=False)
+    high_mask, low_mask = _swing_points(work, n=_DIV_PIVOT_N, include_unconfirmed_tail=False)
     mask = low_mask if pivot == "low" else high_mask
     # Live-safe divergence pivots: exclude the two tail bars before comparing neighbors.
     mask = mask & (work["_spec_idx"] <= current_idx - 2)

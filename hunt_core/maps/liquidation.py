@@ -771,7 +771,13 @@ def build_liquidation_map(
     if current_price <= 0:
         return None
 
-    combined: collections.deque[LiqEvent] = collections.deque(maxlen=16_000)
+    # Потолок объединённого буфера ДОЛЖЕН вмещать все площадки целиком. Жёсткие 16 000 при
+    # per-venue deque(maxlen=8_000) (engine.py:145) и четырёх площадках (binance + okx + bybit +
+    # bitget) давали 32 000 против 16 000, а вливание идёт ПО ОЧЕРЕДИ, венью за венью, а не по
+    # времени — значит на плотном каскаде ПЕРВАЯ площадка вытеснялась из карты полностью, при том
+    # что она продолжала числиться в `venues`. Настоящий фильтр здесь — временное окно
+    # (`window_seconds` ниже), а deque только страхует память, поэтому он не имеет права связывать.
+    combined: collections.deque[LiqEvent] = collections.deque()
     venues: list[str] = []
     # Per-venue event counts for THIS symbol within the map window. `len(buf)` counted
     # the whole ring buffer — every symbol in the universe, over the buffer's full
@@ -1083,7 +1089,10 @@ def realized_liq_clusters(market: Any) -> list[dict[str, Any]]:
 def merge_liquidation_buffers(
     *buffers: collections.deque[LiqEvent],
 ) -> collections.deque[LiqEvent]:
-    out: collections.deque[LiqEvent] = collections.deque(maxlen=16_000)
+    # Тот же дефект, что в build_liquidation_map: фиксированный потолок меньше суммы источников
+    # молча терял ПЕРВЫЕ влитые площадки. Границу задают сами источники.
+    cap = sum((b.maxlen or len(b)) for b in buffers) or None
+    out: collections.deque[LiqEvent] = collections.deque(maxlen=cap)
     for buf in buffers:
         for ev in buf:
             out.append(ev)
