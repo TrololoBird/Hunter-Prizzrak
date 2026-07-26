@@ -150,6 +150,14 @@ verify the key is actually read (skill `config`, agent `config-drift-auditor`).
   число** (no `or 1.0` on zero confidence). This is THE recurring bug family here: phantom
   keys (read, never written → dead branch), falsy-zero `or`-chains where `0.0` is valid data,
   orphan fields, name-lies. `/phantom-key-scan` + agent `phantom-key-auditor`.
+- **I-7. Окно без замера — не настройка, а магическое число.** Аудит 2026-07-26
+  ([`docs/audit/windows-2026-07-26.md`](docs/audit/windows-2026-07-26.md)): **167 из 205 окон
+  без обоснования**, и часть доказанно ИНЕРТНА — выглядит настраиваемой, не связывая никогда
+  (`max_lookback=50` при реальном разносе ≤16; H&S `lookback=80` с вердиктом `None` во всех 24
+  срезах; `_SAW_WINDOW_BARS` с 0 срабатываний из 280). Прежде чем «настраивать» окно — проверь
+  A/B на одном живом снимке, что оно вообще что-то меняет, и не упирается ли оно в другой предел
+  раньше себя (окно 300 с при кэше в 1000 сделок — это не окно 300 с). Новая константа обязана
+  нести рядом цитату курса со страницей либо замер; «разумное значение» не считается.
 
 ## Key rules
 - **No pandas / no requests** — mechanically enforced, not prose: ruff `TID251` banned-api
