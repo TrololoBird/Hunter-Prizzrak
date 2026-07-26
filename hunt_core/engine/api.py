@@ -225,7 +225,6 @@ class Engine:
                     )
                     if basis is not None:
                         st.put_value("basis", basis, PlaneStamp(Source.REST_SEED, now, now, bound))
-                    await asyncio.sleep(params.FUTURES_DATA_SPACING_S)
             await asyncio.sleep(params.FUTURES_DATA_POLL_S)
 
     def snapshot(self, symbol: str, required: Sequence[str]) -> MarketSnapshot:

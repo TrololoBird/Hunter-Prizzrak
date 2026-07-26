@@ -9,6 +9,7 @@ fabricates a value: a missing/failed datum returns ``None`` and is logged, never
 """
 from __future__ import annotations
 
+import asyncio
 import math
 import re
 import time
@@ -16,6 +17,7 @@ from typing import Any
 
 import structlog
 
+from hunt_core.engine import params
 from hunt_core.engine.freshness import Bar
 
 # --- /futures/data ban backoff (Binance error -1003) ---------------------------------------------
@@ -26,6 +28,10 @@ from hunt_core.engine.freshness import Bar
 # wider ban. Module-level so it is shared across all pollers/symbols on the one egress. (Native ban
 # surfacing — the capability the legacy ccxt_guard/weight_registry used to provide.)
 _BAN_UNTIL_MS: float = 0.0
+# Ворота темпа для ВСЕХ вызовов /futures/data: лимит у эндпоинта один на IP, значит и сериализация
+# одна на процесс. Ставится здесь, а не в циклах-вызывателях — их два, и они друг о друге не знают.
+_FD_LAST_MS: float = 0.0
+_FD_GATE = asyncio.Lock()
 _BAN_RE = re.compile(r"banned until (\d+)")
 _DEFAULT_BAN_MS = 120_000.0  # fallback pause when a -1003 carries no parseable timestamp
 
@@ -305,6 +311,19 @@ async def poll_futures_data(
     fabricated series.
     """
     global _BAN_UNTIL_MS
+    # ГЛОБАЛЬНЫЙ интервал между ЛЮБЫМИ запросами /futures/data — здесь, а не в цикле-вызывателе.
+    #
+    # Пауза, разложенная по циклу позиционирования (engine/api.py), уменьшила -1003 с четырёх за
+    # 83 минуты до одного за 15, но не убрала: в тот же лимит независимо стучит deep-тик
+    # (runtime/native_assembly.py:106, история OI по каждому пиннед-символу), и два цикла идут
+    # параллельно, ничего друг о друге не зная. Лимит у эндпоинта ОДИН на IP, значит и ворота
+    # должны быть одни — там же, где уже живёт общий ``_BAN_UNTIL_MS``.
+    async with _FD_GATE:
+        global _FD_LAST_MS
+        wait = (_FD_LAST_MS + params.FUTURES_DATA_SPACING_S * 1000.0) - time.time() * 1000.0
+        if wait > 0:
+            await asyncio.sleep(wait / 1000.0)
+        _FD_LAST_MS = time.time() * 1000.0
     now_ms = time.time() * 1000.0
     if now_ms < _BAN_UNTIL_MS:
         return None  # paused during an active -1003 ban — hitting the endpoint would extend it
