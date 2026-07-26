@@ -49,10 +49,24 @@ PROHIBITED_METHODS = (
     "fetchWithdrawals",
 )
 
+def _snake(name: str) -> str:
+    """camelCase → snake_case — ccxt's Python spelling of the same method."""
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+
+
+# ccxt-python exposes BOTH spellings (verified against a live ``ccxt.binance()`` 2026-07-26: the
+# camelCase and snake_case attributes both resolve), and snake_case is the idiomatic Python form —
+# the one this codebase uses EXCLUSIVELY (measured the same day: 10 snake_case exchange calls,
+# 0 camelCase). Until then this scan matched camelCase only, i.e. the spelling nobody here writes:
+# a file planted in hunt_core/ calling the private order and balance methods in snake_case passed
+# with "OK — no prohibited CCXT calls" and exit 0. The project's first rule is "public data only,
+# never private", so both spellings must be covered.
+_ALL_SPELLINGS = tuple(dict.fromkeys([*PROHIBITED_METHODS, *(_snake(m) for m in PROHIBITED_METHODS)]))
+
 _ROOT = pathlib.Path(__file__).resolve().parent.parent
 _SCAN_DIR = _ROOT / "hunt_core"
-# Match a method *call* on some object: ``.createOrder(`` — not a substring in a word.
-_PATTERN = re.compile(r"\.(" + "|".join(PROHIBITED_METHODS) + r")\s*\(")
+# Match a method *call* on some object — not a substring inside a longer word.
+_PATTERN = re.compile(r"\.(" + "|".join(_ALL_SPELLINGS) + r")\s*\(")
 
 # stdlib json → use hunt_core.serde. ``\bjson\.`` won't match inside ``orjson.``.
 _JSON_PATTERN = re.compile(r"(^\s*import json\b|\bjson\.(dumps|dump|loads|load|JSONDecodeError)\b)")

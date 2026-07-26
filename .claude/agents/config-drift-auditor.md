@@ -15,8 +15,10 @@ config-file-map for the map.
 For each TOML section and key, verify:
 
 1. **Dead section** — a `[section]` whose keys are read by NOBODY. Grep every key across
-   hunt_core/research/scripts/tests. Zero readers → the section is stale (its consuming
-   code was removed). Report for deletion.
+   `hunt_core/`, `research/`, `scripts/` and `tests/` (four separate trees — the earlier
+   slash-joined spelling read as one bogus path `hunt_core/research/...` and tripped a
+   dead-reference scan). Zero readers → the section is stale (its consuming code was
+   removed). Report for deletion.
 2. **Doc-only key (the dangerous one)** — a key that LOOKS authoritative but whose
    effective value is a hardcoded fallback, so editing the TOML silently does nothing.
    Trace: does the key reach a reader via the translation OR a dedicated loader? Watch for
