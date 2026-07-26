@@ -267,15 +267,8 @@ def _horizon_block(title: str, hz: dict[str, Any]) -> list[str]:
     short = hz.get("short")
     if isinstance(short, list) and short:
         lines.extend(_rung_line("🔴", "шорт", short))
-    # Обе стороны, а не первая непустая. `long_targets or short_targets` выбрасывало цели шорта на
-    # любом горизонте, где есть и лонговые ступени, и шортовые — а `setups._horizon_zones`
-    # заполняет оба ключа. Читатель видел 🔴 шорт-ступени, под которыми стоят «💰 цели» ВЫШЕ цены.
-    for key, label in (("long_targets", "💰 цели лонга"), ("short_targets", "💰 цели шорта")):
-        vals = hz.get(key)
-        if isinstance(vals, list) and vals:
-            tl = _targets_line(vals, label=label)
-            if tl:
-                lines.append(tl)
+    # Цели тут БОЛЬШЕ НЕ ПЕЧАТАЮТСЯ: направление у карты одно, значит и встречная стена одна.
+    # Они считаются глобально (``setups._global_targets``) и выводятся один раз под всей картой.
     return lines if len(lines) > 1 else []
 
 
@@ -704,8 +697,16 @@ _ABSTAIN_PRIORITY = ("rr_below_floor", "rr_worst_fill_below_floor", "stop_too_wi
 
 
 def _abstain_one(pick: dict[str, Any]) -> str | None:
-    """Одна причина отказа человеческим языком, с её числами."""
+    """Одна причина отказа человеческим языком, с её числами.
+
+    Направление печатается ПЕРВЫМ. Без него строка читается как сломанная геометрия: на живом ETH
+    2026-07-26 отказ выглядел как «вход 4056.45 · стоп 4140.10 · TP1 4018.63» — стоп ВЫШЕ входа,
+    тейк НИЖЕ, — при том что вся карта зон была лонговой. Это был корректный ШОРТ (риск 83.65,
+    профит 37.82, R:R 0.45), но узнать это из текста было нельзя.
+    """
     kind = pick.get("reason")
+    d = str(pick.get("direction") or "").lower()
+    side = {"long": "лонг", "short": "шорт"}.get(d, "")
     if kind == "rr_below_floor":
         parts = [f"RR {pick.get('rr')} < {pick.get('min_rr')}"]
         # ВХОД печатается первым и обязательно. Без него стоп и цель нечитаемы: на живом BTC
@@ -720,7 +721,7 @@ def _abstain_one(pick: dict[str, Any]) -> str | None:
             parts.append(f"стоп {fmt_price(float(pick['stop']))}" + (f" (буфер {buf}%)" if buf else ""))
         if pick.get("tp1") is not None:
             parts.append(f"TP1 {fmt_price(float(pick['tp1']))}")
-        return " · ".join(parts)
+        return (f"{side}: " if side else "") + " · ".join(parts)
     if kind == "rr_worst_fill_below_floor":
         return f"R:R по худшему заливу {pick.get('rr')} < {pick.get('min_rr')}"
     if kind == "stop_too_wide":
@@ -936,6 +937,24 @@ def format_prizrak_post(analysis: AnalystReport) -> str:
     # отправка на 11 карточек, то есть каждая приходила ДВУМЯ кусками со вторым, обрезанным по «…».
     # Автор так не пишет: у него график и три фразы. Лестница остаётся продюсером — её читают
     # zone_watch и счётчик recall, — но перестаёт быть текстом.
+    # ОДНА лесенка целей — по направлению, которое карточка реально предлагает.
+    #
+    # Печатать обе стороны нельзя: уровень, лежащий МЕЖДУ лонговыми и шортовыми зонами, годится
+    # цели и там, и там, и одно и то же число выходило дважды. Замерено на живом ETH 2026-07-26:
+    # «цели лонга 1876.85 · 1891.18 · 1911.07» и «цели шорта 1911.07 · 1892.39 · 1876.85» — две
+    # трети чисел общие, читается как поломка. Направление берётся у эмитированного сетапа, иначе
+    # у плана (зона закупа под ценой ⇒ лонг), иначе у того, что вообще есть на карте.
+    action = str(summary.get("action") or "").lower()
+    if action in {"long", "short"}:
+        side = action
+    elif _plan_zone(setups, price) is not None:
+        side = "long"
+    else:
+        side = "short" if setups.get("short_targets") else "long"
+    tl = _targets_line(setups.get(f"{side}_targets") or [],
+                       label="💰 цели лонга" if side == "long" else "💰 цели шорта")
+    if tl:
+        zlines.append(tl)
     hr = _headroom_line(setups, price)
     if hr:
         zlines.append(hr)

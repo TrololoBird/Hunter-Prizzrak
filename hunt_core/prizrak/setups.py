@@ -199,6 +199,16 @@ def _perezakup_view(
     # дробится на ордера, но не переопределяет вход; переопределяет она его только у добора/шорта,
     # где полоса «корявая» и выраженной моды нет.
     lines = zone_lines(raw_window, zone=base, band=(lo, hi), cfg=cfg)
+    # Широкая полоса БЕЗ надёжного якоря — это не зона входа, а диапазон. Перезакуп намеренно не
+    # проходит гейт ширины (``_tight``), потому что якорь ему даёт ПОК крупной базы (стр.30) — но
+    # когда ПОК бимодален, якоря нет вовсе, и публиковать нечего. Замер на живом ETH 2026-07-26:
+    # дневная полоса 3361.81–3765.99 шириной 12.02% с «ПОК неустойчив», лесенка ордеров растянута
+    # на 8.71% — рядом с пятнадцатиминутной зоной шириной 0.267% это объекты разного рода, и лимит
+    # по ней поставить некуда.
+    if (hi / lo - 1.0) * 100.0 > _INTEREST_ZONE_MAX_WIDTH_PCT and not (
+        poc is not None and lo <= poc <= hi and stable
+    ):
+        return None
     anchor = poc if (poc is not None and lo <= poc <= hi and stable) else hi
     flags = _course_flags(bars, level=anchor, side="long")
     by_fact, reason = _fact_reason(flags, side="long", bias=bias, is_perezakup=True)
@@ -283,30 +293,16 @@ def _horizon_zones(
         ]
     if "perezakup" not in out and "dobor" not in out and "short" not in out:
         return None
-    # Цели: opposing structural levels (long → resistance above the long zones; short → below).
-    #
-    # Отсчёт ведётся от ВСЕХ опубликованных зон своей стороны, а не от верха перезакупа. Добор
-    # может лежать и ВЫШЕ него, и ГЛУБЖЕ, поэтому «цель выше перезакупа» могла оказаться НИЖЕ входа
-    # в добор: измерено на живом LTC 4h — цели 45.80 и 46.27 при верхе лонг-зоны 46.34, то есть
-    # карточка предлагала фиксировать прибыль под собственным входом. И берутся именно
-    # ОПУБЛИКОВАННЫЕ кромки: `_zone_view` сужает бокс до value area, так что сырой `z["hi"]` — уже
-    # не та цена, которую увидит читатель.
-    long_edges = [float(z["hi"]) for z in (out.get("dobor") or [])]
-    pk_out = out.get("perezakup")
-    if isinstance(pk_out, dict):
-        long_edges.append(float(pk_out["hi"]))
-    if long_edges:
-        floor_up = max(long_edges)
-        ups = sorted(float(z["lo"]) for z in zones if float(z.get("lo") or 0) > floor_up)
-        if ups:
-            out["long_targets"] = ups[:3]
-    short_edges = [float(z["lo"]) for z in (out.get("short") or [])]
-    if short_edges:
-        floor_dn = min(short_edges)
-        downs = sorted((float(z["hi"]) for z in zones if 0 < float(z.get("hi") or 0) < floor_dn),
-                       reverse=True)
-        if downs:
-            out["short_targets"] = downs[:3]
+    # Сырые структурные уровни горизонта — сюда, а цели считаются ГЛОБАЛЬНО (:func:`_global_targets`)
+    # после того, как собраны все горизонты. Считать их внутри своего горизонта было прямой ошибкой:
+    # на живом ETH 2026-07-26 часовой перезакуп 3987.63–4015.59 получил «цель 4035.09», которая
+    # лежит ВНУТРИ пятнадцатиминутного добора 4030.49–4041.24 — карточка одновременно велела
+    # покупать 4030–4041 и фиксировать прибыль на 4035. И одна и та же стена сверху печаталась
+    # тремя числами (1ч 4121.74 · 1д 4128.09 · 15м 4130.18, разброс 0.205%), потому что каждый
+    # горизонт видел её со своим разрешением и не знал о соседях.
+    out["_levels"] = sorted(
+        {float(z[k]) for z in zones for k in ("lo", "hi") if float(z.get(k) or 0) > 0}
+    )
     return out
 
 
@@ -443,6 +439,68 @@ def _drop_by_fact(horizons: dict[str, Any]) -> dict[str, int]:
     return dropped
 
 
+# Насколько близко две цели должны стоять, чтобы считаться ОДНОЙ стеной. Замер на живом ETH
+# 2026-07-26: 4121.74 / 4128.09 / 4130.18 — разброс 0.205%, это одно сопротивление с трёх
+# разрешений. Из кластера берётся БЛИЖНЯЯ цена: до неё сделка дойдёт первой.
+_TARGET_MERGE_PCT = 0.5
+
+
+def _published_bands(horizons: dict[str, Any], side: str) -> list[tuple[float, float]]:
+    """Опубликованные полосы одной стороны по ВСЕМ горизонтам."""
+    keys = ("perezakup", "dobor") if side == "long" else ("short",)
+    out: list[tuple[float, float]] = []
+    for hz in horizons.values():
+        if not isinstance(hz, dict):
+            continue
+        for key in keys:
+            raw = hz.get(key)
+            zs = raw if isinstance(raw, list) else ([raw] if isinstance(raw, dict) else [])
+            for z in zs:
+                if isinstance(z, dict):
+                    out.append((float(z["lo"]), float(z["hi"])))
+    return out
+
+
+def _merge_close(levels: list[float]) -> list[float]:
+    """Схлопнуть уровни, стоящие ближе ``_TARGET_MERGE_PCT``, в один — ближний к началу списка."""
+    out: list[float] = []
+    for lv in levels:
+        if all(abs(lv / k - 1.0) * 100.0 > _TARGET_MERGE_PCT for k in out):
+            out.append(lv)
+    return out
+
+
+def _global_targets(horizons: dict[str, Any]) -> dict[str, list[float]]:
+    """Цели — ОБЩИЕ для всей карты, а не свои у каждого горизонта.
+
+    Направление у карты одно, значит и встречная стена одна. Цель обязана лежать ВНЕ всех
+    опубликованных полос своей стороны: уровень внутри чужой зоны закупа — это чья-то ТВХ, а не
+    место фиксации прибыли (замерено на живом ETH 2026-07-26, см. ``_horizon_zones``).
+    """
+    levels = sorted({lv for hz in horizons.values() if isinstance(hz, dict)
+                     for lv in (hz.get("_levels") or [])})
+    out: dict[str, list[float]] = {}
+
+    longs = _published_bands(horizons, "long")
+    if longs and levels:
+        floor_up = max(hi for _lo, hi in longs)
+        ups = [lv for lv in levels
+               if lv > floor_up and not any(lo <= lv <= hi for lo, hi in longs)]
+        merged = _merge_close(ups)[:3]
+        if merged:
+            out["long_targets"] = merged
+
+    shorts = _published_bands(horizons, "short")
+    if shorts and levels:
+        floor_dn = min(lo for lo, _hi in shorts)
+        downs = [lv for lv in reversed(levels)
+                 if 0 < lv < floor_dn and not any(lo <= lv <= hi for lo, hi in shorts)]
+        merged = _merge_close(downs)[:3]
+        if merged:
+            out["short_targets"] = merged
+    return out
+
+
 def _headroom(horizons: dict[str, Any], *, price: float) -> dict[str, Any] | None:
     """Ход до БЛИЖАЙШЕГО встречного уровня по всем горизонтам, вверх и вниз.
 
@@ -529,7 +587,11 @@ def build_symbol_setups(
                 break  # first TF with usable zones wins for this horizon
     _dedupe_horizons(horizons)
     dropped = _drop_by_fact(horizons)
-    out: dict[str, Any] = {"horizons": horizons, "price": float(price), "bias": bias}
+    targets = _global_targets(horizons)
+    for hz in horizons.values():  # служебный список уровней наружу не отдаём
+        if isinstance(hz, dict):
+            hz.pop("_levels", None)
+    out: dict[str, Any] = {"horizons": horizons, "price": float(price), "bias": bias, **targets}
     if dropped:
         out["dropped_by_fact"] = dropped
     headroom = _headroom(horizons, price=float(price))
