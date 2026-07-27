@@ -17,23 +17,30 @@ jobs:
       - name: Set up Python 3.14
         run: uv python install 3.14
 
-      - name: Create virtual environment
-        run: uv venv
-
-      - name: Install project (with dev extras)
-        run: uv pip install --python .venv -e ".[dev]"
+      # ⚠ ИМЕННО `uv sync --locked`, а НЕ `uv venv` + `uv pip install -e ".[dev]"`.
+      # Прежняя пара команд ИГНОРИРОВАЛА uv.lock: `uv pip install` — это pip-совместимый
+      # интерфейс, он резолвит зависимости заново по потолкам из pyproject и лок-файл не
+      # читает. Результат, измеренный 2026-07-27: в uv.lock лежала ruff 0.15.22, CI ставил
+      # 0.16.0 (потолка у `ruff>=0.15` не было) и падал с 464 ошибками новых правил —
+      # **14 коммитов подряд красные**, ни один из которых этих ошибок не вносил.
+      # `--locked` вдобавок ПАДАЕТ, если uv.lock разошёлся с pyproject.toml, то есть ловит
+      # забытый `uv lock` вместо того, чтобы тихо резолвить мимо него.
+      # `--all-extras` покрывает [project.optional-dependencies]; группы из
+      # [dependency-groups] (vulture, pre-commit, setuptools) uv sync ставит по умолчанию.
+      - name: Install project (locked, all extras + dependency-groups)
+        run: uv sync --locked --all-extras
 
       - name: Ruff lint
-        run: uv run ruff check .
+        run: uv run --no-sync ruff check .
 
       - name: Vulture (dead-code guard, conf 80 + whitelist)
-        run: uv run vulture
+        run: uv run --no-sync vulture
 
       - name: Prohibited private CCXT API call scan
-        run: uv run python scripts/check_prohibited_apis.py
+        run: uv run --no-sync python scripts/check_prohibited_apis.py
 
       - name: mypy (blocking — backlog cleared, 0 issues)
-        run: uv run mypy hunt_core
+        run: uv run --no-sync mypy hunt_core
 
       # Уязвимости в зависимостях. Поймал PYSEC-2026-3447 (setuptools 82.0.1) за 4 секунды
       # на первом же прогоне 2026-07-26 — до этого гейта в пайплайне не было.
@@ -59,4 +66,4 @@ jobs:
       # Проверка перенесена на живые данные (`scripts/verify_*.py`, `measure_*.py`,
       # `score_vs_razbor.py`) и прогон бота с разбором логов.
       - name: структурные инварианты (граница модулей + достижимость)
-        run: uv run python scripts/check_structure.py
+        run: uv run --no-sync python scripts/check_structure.py

@@ -376,7 +376,7 @@ requires-dist = [
     { name = "aiohttp", specifier = ">=3.13.5,<4" },
     { name = "aiohttp-socks", specifier = ">=0.10.1" },
     { name = "ccxt", specifier = ">=4.5.44" },
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=2.1.0" },
+    { name = "mypy", marker = "extra == 'dev'", specifier = ">=2.3.0,<2.4" },
     { name = "numpy", specifier = ">=2.4.6,<2.5" },
     { name = "opentelemetry-exporter-otlp-proto-http", marker = "extra == 'otel'", specifier = ">=1.30" },
     { name = "opentelemetry-sdk", marker = "extra == 'otel'", specifier = ">=1.30" },
@@ -393,7 +393,7 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "python-socks", extras = ["asyncio"], specifier = ">=2.7.1" },
     { name = "rich", marker = "extra == 'diagnostics'", specifier = ">=13.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.15" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.15.22,<0.16" },
     { name = "structlog", specifier = ">=25.5.0" },
     { name = "tenacity", specifier = ">=9.1.4" },
 ]
