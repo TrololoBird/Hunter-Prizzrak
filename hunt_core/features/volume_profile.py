@@ -33,11 +33,20 @@ def volume_profile_levels(
     lookback: int | None = None,
     buckets: int = 20,
     value_area_pct: float = 0.70,
+    origin_shift: float = 0.0,
 ) -> tuple[float | None, float | None, float | None]:
     """POC, VAH, VAL from a volume histogram.
 
     Each bar distributes its volume across every price bucket touched by
     [low, high] (equal split). More accurate than assigning all volume to mid.
+    (This uniform-over-range rule is the only intrabar placement rule any vendor
+    documents — Sierra Chart states it explicitly; TradingView publishes none.)
+
+    Args:
+        origin_shift: Сдвиг НАЧАЛА сетки корзин, в долях ширины корзины. 0.0 — сетка
+            начинается ровно на минимуме окна. Существует не ради красоты: положение моды
+            гистограммы зависит от начала не меньше, чем от шага, и проверка устойчивости
+            ПОКа обязана перебирать оба (замер: сдвиг начала уводил ПОК до 11.87%).
     """
     if work.is_empty() or not {"high", "low", "volume"}.issubset(work.columns):
         return None, None, None
@@ -56,6 +65,12 @@ def volume_profile_levels(
 
     bucket_count = max(1, int(buckets))
     bucket_size = (price_max - price_min) / bucket_count
+    # НАЧАЛО сетки, а не только её шаг. Мода гистограммы зависит от обоих, и замер
+    # (`scripts/verify_poc_plateau.py`) показал, что начало двигает ПОК не меньше ширины:
+    # при НЕИЗМЕННОМ числе корзин сдвиг сетки на долю корзины уводил ПОК до 11.87% (ETH 4h).
+    # Ни один вендор (Sierra Chart, TradingView, CQG, thinkorswim) начало не документирует,
+    # поэтому проверять устойчивость по нему приходится самим — см. `poc._poc_is_stable`.
+    price_min -= bucket_size * float(origin_shift)
 
     bars = tail.select(
         pl.col("high").cast(pl.Float64, strict=False).alias("hi"),

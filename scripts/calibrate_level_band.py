@@ -37,6 +37,8 @@ import sys
 
 import ccxt.pro as ccxtpro
 
+from hunt_core.toolkit.level_band import mean_abs_increment_pct
+
 # Полосы-кандидаты в процентах — покрывают все константы-допуски, которые есть в дереве.
 _BANDS_PCT = (0.1, 0.2, 0.3, 0.4, 0.6, 0.8, 1.0, 1.5, 2.0)
 _SHUFFLES = 40          # независимых перемешиваний на каждый (символ, ТФ)
@@ -110,7 +112,25 @@ async def main() -> None:
                         hit, tot = _bounce_rate(px, b)
                         if tot >= 20:
                             null[b].append(hit / tot)
-                print(f"=== {sym} {tf} ===")
+                delta = mean_abs_increment_pct(closes)
+                if delta is not None:
+                    dn: list[float] = []
+                    for _ in range(_SHUFFLES):
+                        sh = rets[:]
+                        rng.shuffle(sh)
+                        px = [closes[0]]
+                        for r in sh:
+                            px.append(px[-1] * (1.0 + r))
+                        h, t = _bounce_rate(px, delta)
+                        if t >= 20:
+                            dn.append(h / t)
+                    lh, lt = _bounce_rate(closes, delta)
+                    p0 = statistics.median(dn) if dn else float("nan")
+                    p1 = lh / lt if lt >= 20 else float("nan")
+                    print(f"=== {sym} {tf} ===  δ(τ) = {delta:.3f}%  "
+                          f"→ НУЛЬ {p0:.3f}, ЖИВОЙ {p1:.3f}, превышение {(p1 - p0) * 100:+.1f} п.п.")
+                else:
+                    print(f"=== {sym} {tf} ===")
                 print(f"  {'полоса %':>9s} {'p(отскок) НУЛЬ':>15s} {'n':>5s} "
                       f"{'p(отскок) ЖИВОЙ':>16s} {'событий':>8s} {'превышение п.п.':>16s}")
                 for b in _BANDS_PCT:

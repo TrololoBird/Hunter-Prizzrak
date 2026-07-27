@@ -31,6 +31,7 @@ from typing import Any, Literal
 
 from hunt_core.prizrak.invalidation import build_invalidation
 from hunt_core.prizrak.accumulation import _CLUSTER_TOL, _overlaps, find_accumulation_zone, find_accumulation_zones
+from hunt_core.toolkit.level_band import level_band_from_ohlcv
 from hunt_core.prizrak.confluence import compute_confluence
 from hunt_core.prizrak.config import LadderTF, PrizrakConfig, ScaleTier
 from hunt_core.prizrak.dominance import compute_dominance_factor
@@ -108,7 +109,28 @@ _ENTRY_BAND_PCT = 0.002  # course: entries near POC ± a bit, not one exact tick
 # ПП retest (_pp_candidate), the trap-flip retest (_trap_flip_candidate) and the вымпел
 # boundary (_figure_pennant_candidate). Was three separate literals; unified so they cannot
 # drift apart.
+# ⚠ ЗАПАСНОЕ значение. Рабочую полуширину «цена ТЕСТИРУЕТ уровень» считает `_retest_tol` из
+# самих баров по δ(τ) Garzarelli. Константой она быть не может: критерий Chung & Bellotti —
+# верная полоса даёт на СЛУЧАЙНОМ БЛУЖДАНИИ p(отскок) = 0.5, — и по нему 0.7% проваливается
+# именно там, где чаще всего работает внутридневной тир.
+#
+# ГЕЙТ (`scripts/ab_retest_tol.py`, 4 символа × 3 ТФ, 40 перемешиваний по 1000 баров):
+#                          константа 0.7%   δ(τ)
+#     медиана |нуль−0.5|        0.050       0.016   ← втрое честнее
+#     медиана превышения        +6.3 п.п.   +8.4 п.п. ← сигнал не потерян, а вырос
+# Хуже всего константа как раз на 15m: |нуль−0.5| = 0.217–0.247, то есть случайный ряд
+# «отскакивал» в 72–75% случаев и слово «тест уровня» там ничего не значило. У δ(τ) на тех же
+# рядах 0.008–0.037.
+#
+# ⚠ И почему НЕ подставлено в `accumulation._CLUSTER_TOL`: там прогон через
+# `scripts/score_vs_razbor.py` со случайным контролем УХУДШИЛ превышение (+43.0 → +37.5 п.п.).
+# Задачи разные: δ(τ) калибрует «цена НА уровне», а `_CLUSTER_TOL` — «два пивота одно касание».
 _RETEST_TOL = 0.007
+
+
+def _retest_tol(ohlcv: list[list[float]]) -> float:
+    """Полуширина полосы «цена тестирует уровень» — δ(τ) из баров, с откатом на константу."""
+    return level_band_from_ohlcv(ohlcv, fallback=_RETEST_TOL)
 _FORWARD_ZONE_MIN_DIST_PCT = 0.5  # below this, price is basically already there — reactive path owns it
 _FORWARD_ZONE_MAX_DIST_PCT = 20.0  # beyond this, targeting is too speculative to act on
 # The DEEP structural path (swing-low clusters far from recent action) needs a tighter
@@ -1961,6 +1983,7 @@ def _pp_candidate(
     htf_bias: dict[str, Any] | None = None,
     struct_by_tier: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
+    _rt = _retest_tol(ohlcv)  # δ(τ) из этих же баров, не константа
     bars = bars_from_ohlcv(ohlcv)
     pp = detect_pereprior(bars)
     # A real accumulation zone is required for the stop-buffer structure — no
@@ -1988,7 +2011,7 @@ def _pp_candidate(
         # level, not the break. Emit only for a level price has actually come back to.
         tested = [
             lv for lv in levels
-            if float(lv["z_lo"]) * (1 - _RETEST_TOL) <= price <= float(lv["z_hi"]) * (1 + _RETEST_TOL)
+            if float(lv["z_lo"]) * (1 - _rt) <= price <= float(lv["z_hi"]) * (1 + _rt)
         ]
         if not tested:
             continue
@@ -2076,6 +2099,7 @@ def _trap_flip_candidate(
     for the прокол-vs-пробой distinction — a wick-through that returned is NOT a
     flip and produces no entry here.
     """
+    _rt = _retest_tol(ohlcv)  # δ(τ) из этих же баров, не константа
     bars = bars_from_ohlcv(ohlcv)
     zone = find_accumulation_zone(bars, tf=tf, cfg=cfg)
     if not zone:
@@ -2084,7 +2108,7 @@ def _trap_flip_candidate(
 
     # Upper boundary broken UP -> flips to support -> LONG on retest from above.
     up = classify_level_touch(bars, level=hi, side="short", cfg=cfg)
-    if up.get("kind") == "proboy" and hi * (1 - _RETEST_TOL) <= price <= hi * (1 + _RETEST_TOL):
+    if up.get("kind") == "proboy" and hi * (1 - _rt) <= price <= hi * (1 + _rt):
         direction: Literal["long", "short"] = "long"
         entry = hi
         swing = _extract_swing_levels(struct_by_tier, direction=direction, entry=entry, tf=tf)
@@ -2111,7 +2135,7 @@ def _trap_flip_candidate(
 
     # Lower boundary broken DOWN -> flips to resistance -> SHORT on retest from below.
     down = classify_level_touch(bars, level=lo, side="long", cfg=cfg)
-    if down.get("kind") == "proboy" and lo * (1 - _RETEST_TOL) <= price <= lo * (1 + _RETEST_TOL):
+    if down.get("kind") == "proboy" and lo * (1 - _rt) <= price <= lo * (1 + _rt):
         direction = "short"
         entry = lo
         swing = _extract_swing_levels(struct_by_tier, direction=direction, entry=entry, tf=tf)
@@ -2238,6 +2262,7 @@ def _figure_pennant_candidate(
     targets structural via the
     shared ``_structural_targets`` path, plus a доливка-on-expansion annotation.
     """
+    _rt = _retest_tol(ohlcv)  # δ(τ) из этих же баров, не константа
     bias = (htf_bias or {}).get("bias")
     if bias not in ("long", "short"):
         return None  # вымпел торгуем строго по тренду (стр.57)
@@ -2277,7 +2302,7 @@ def _figure_pennant_candidate(
     # boundary (a converging trendline is best proxied by its latest touch, not the window
     # extreme — in a symmetric pennant the current boundary sits well inside the window's
     # min/max). Same testing band as the ПП/flip retest.
-    if not (boundary * (1 - _RETEST_TOL) <= price <= boundary * (1 + _RETEST_TOL)):
+    if not (boundary * (1 - _rt) <= price <= boundary * (1 + _rt)):
         return None  # not at the trend boundary (or already broken out/down) — no 6-touch entry
     # Stop structure = the WHOLE figure (стр.58), not the narrowed half.
     zone: dict[str, Any] = {
