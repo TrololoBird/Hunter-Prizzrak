@@ -102,20 +102,14 @@ def build_factor_panel(row: dict[str, Any]) -> dict[str, float | None]:
                 LOG.debug("oi_z float conversion failed", exc_info=True)
                 pass
 
-    funding = market.get("funding_pct")
-    if funding is not None:
-            try:
-                fp = float(funding)
-                if math.isfinite(fp):
-                    # funding_pct is in PERCENTAGE POINTS (funding_rate*100, see
-                    # snapshot.py). The 5000 factor was calibrated for the raw FRACTION
-                    # (0.0001·5000=0.5), so on pp-scale input it over-scaled ×100 and
-                    # saturated ±1 at any real funding. 50 restores the intended slope
-                    # (0.01pp≈0.0001 fraction → 0.5).
-                    panel["deriv_funding"] = _clamp11(fp * 50.0)
-            except (TypeError, ValueError):
-                LOG.debug("funding_pct float conversion failed", exc_info=True)
-                pass
+    # Полоса `market["funding_pct"]` снята 2026-07-26: писателя нет НИ ОДНОГО во всём дереве
+    # (`rg` по присваиванию ключа — ноль совпадений), это наследие дословарного пути. Единственный
+    # вызывающий `factor_panel_from_frames` (`features/prepare.py`) вообще не передаёт `market=`,
+    # так что здесь всегда был `{}`. Живой эквивалент — типизированный `FactorPanel.deriv_funding`
+    # (`features/build.py`), который считается из `view.derivs.funding`, а не из словаря.
+    # Соседняя ветка `market["oi_z"]` формально в том же положении, но оставлена: единственное её
+    # упоминание — `prepare_columns.py` (`"oi_z": m.get("oi_z")`), то есть ключ ПРОБРАСЫВАЕТСЯ
+    # дальше по цепочке словарей, и снимать его надо всей цепочкой, а не здесь.
 
     cmf = factor_from_tf(tf15, "cmf20")
     if cmf is not None:

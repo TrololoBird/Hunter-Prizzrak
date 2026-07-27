@@ -97,10 +97,14 @@ def append_ledger_event(record: dict[str, Any], *, path: Path | None = None) -> 
 def _setup_geometry(setup: dict[str, Any] | None) -> dict[str, Any]:
     """Trade geometry for deliver and block rows (counterfactual replay)."""
     s = setup if isinstance(setup, dict) else {}
-    entry = s.get("entry") or s.get("entry_price") or s.get("entry_mid")
+    # Ключ входа ОДИН — `entry`, его ставит мост `runtime/emitter.py`. Альтернативы `entry_price` /
+    # `entry_mid` и синтез зоны из `entry_low` / `entry_high` сняты 2026-07-26: ни одного писателя
+    # в дереве и ни одного вхождения в 4004 живых строках `data/hunt_outcome_ledger.jsonl`. Ветка
+    # синтеза была мертва вдвойне — на живой полосе `entry_zone` и `entry` ставятся ВМЕСТЕ, так что
+    # `zone is None and entry is not None` недостижимо. Геометрия зоны приходит из
+    # `entry_zone=[entry_lo, entry_hi]` (`tracker._entry_zone_from_plan`) — это и есть источник.
+    entry = s.get("entry")
     zone = s.get("entry_zone")
-    if zone is None and entry is not None:
-        zone = {"mid": entry, "low": s.get("entry_low"), "high": s.get("entry_high")}
     return {
         "entry": entry,
         "entry_zone": zone,

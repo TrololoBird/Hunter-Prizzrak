@@ -471,7 +471,9 @@ def feature_vector_from_row(row: dict[str, Any]) -> dict[str, Any]:
         "spot_lead_return_1m": m.get("spot_lead_return_1m"),
         "spot_futures_spread_bps": m.get("spot_futures_spread_bps"),
         "spot_quote_volume_24h": m.get("spot_quote_volume_24h"),
-        "liquidation_score_5m": m.get("liquidation_score_5m"),
+        # `liquidation_score_5m` снят: продюсера нет, колонка ехала в `features_last`
+        # открытого сигнала вечным null. Реальное значение — `view.orderflow.liq_score_5m`;
+        # вернуть можно только вместе с проекцией в market-словарь И потребителем.
         "liquidation_long_notional_5m": liq_long,
         "liquidation_short_notional_5m": liq_short,
         "liquidation_magnitude_5m": liq_magnitude,

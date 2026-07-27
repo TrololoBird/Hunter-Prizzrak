@@ -57,7 +57,7 @@ def _entry_bias_latch(active: dict[str, Any], lc_bias: str) -> str:
 
 def _closed_adx_1h(row: dict[str, Any]) -> float | None:
     tf = row.get("timeframes") or {}
-    block = tf.get("1h_closed") or tf.get("1h") or {}
+    block = tf.get("1h") or {}  # `1h_closed` — сирота без продюсера, снята 2026-07-26
     try:
         val = float(block.get("adx14") or 0)
     except (TypeError, ValueError):

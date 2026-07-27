@@ -69,7 +69,6 @@ breakeven_buffer_min_pct = 1.0
 breakeven_risk_fraction = 0.25
 # Defer trailing until MFE proves the move (APT 2026-07-05: 3.49% MFE → stop_hit без трейлинга).
 min_trail_mfe_pct = 2.5
-dump_active_min_trail_mfe_pct = 2.5
 early_breakeven_mfe_pct = 99.0
 early_breakeven_buffer_pct = 0.12
 dump_active_early_be_mfe_pct = 99.0
@@ -77,11 +76,25 @@ dump_initiating_early_be_mfe_pct = 99.0
 exhaustion_early_be_mfe_pct = 99.0
 accumulation_early_be_mfe_pct = 99.0
 distribution_early_be_mfe_pct = 99.0
-min_trail_age_minutes = 2.0
 tp1_partial_fix_pct_normal = 50.0
 tp1_partial_fix_pct_hot = 80.0
 # After TP1: breakeven buffer as ATR(1h)% × this fraction (fallback: breakeven_buffer_pct).
 tp1_breakeven_atr_fraction = 0.25
+
+# ⚠ Опубликованы 2026-07-26 по свипу фантомных ручек. Все четыре ЧИТАЛИСЬ кодом через
+# `tracker_thresholds()`, но не были записаны НИГДЕ — ни здесь, ни в `UNIVERSAL_DEFAULTS`, ни в
+# несуществующем `data/hunt_calibration.json`. То есть выглядели настройкой, а правке не
+# поддавались: всегда побеждал инлайн-дефолт из `.get(key, <literal>)`. Значения равны этим
+# инлайн-дефолтам — публикация тождественна по поведению, менять числа только по замеру (I-7).
+# Шаг трейла = ATR(1h)% × fraction (`track/_trailing.py`; раньше падал на breakeven_risk_fraction).
+atr_trail_risk_fraction = 0.25
+# Минимальный «храповик» трейла, доля ATR(1h)% — меньше него стоп не двигаем (`track/_trailing.py`).
+trail_min_atr_move = 0.15
+# Q13 chop-гард: при ADX(1h) ниже этого прибыльный сигнал НЕ закрывается по флипу биаса
+# (`track/_followups.py`) — решает, объявить ли инвалидацию по открытой позиции.
+bias_flip_chop_adx_max = 20.0
+# Снайперский выход держит позицию, если MFE уже не ниже этого (`track/_evaluate_levels.py`).
+sniper_hold_min_mfe_pct = 2.0
 
 # Detection thresholds removed — self-calibration lives in hunt_core/detect/calibrate.py
 # and [fusion] below. Feature flags for collect/scoring fuel are in params/store.py.

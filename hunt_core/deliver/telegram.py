@@ -889,39 +889,10 @@ from hunt_core.deliver._labels import (
     trigger_human,
     veto_human,
 )
-from hunt_core.deliver.templates import format_squeeze_telegram as _format_squeeze_telegram
 
 
-def squeeze_trade_direction(row: dict[str, Any]) -> str:
-    """short | long for unified advisory cooldown on squeeze alerts."""
-    sq = row.get("squeeze") or {}
-    lifecycle = row.get("lifecycle") or {}
-    dump = row.get("dump") or {}
-    long_setup = row.get("long") or {}
-    bias = str(lifecycle.get("recommended_bias") or "")
-    if bias in {"short", "long"}:
-        return bias
-    dump_score = float(dump.get("dump_score") or 0)
-    long_score = float(long_setup.get("long_score") or 0)
-    if dump_score > long_score + 5:
-        return "short"
-    if long_score > dump_score + 5:
-        return "long"
-    try:
-        oi_z = float(sq.get("oi_z") or 0)
-        if oi_z < -0.8:
-            return "short"
-        if oi_z > 0.8:
-            return "long"
-    except (TypeError, ValueError):
-        pass
-    return "short" if dump_score >= long_score else "long"
-
-
-def format_squeeze_telegram(row: dict[str, Any]) -> str:
-    return _format_squeeze_telegram(row)
-
-
+# Снято 2026-07-26: `squeeze_trade_direction` и реэкспорт `format_squeeze_telegram` — ноль
+# вызывающих; оба обслуживали squeeze-карточку, у чьего входа `row["squeeze"]` нет продюсера.
 def split_telegram(text: str, *, limit: int = 3900) -> list[str]:
     return _split_telegram_text(text, limit=limit)
 
@@ -957,7 +928,6 @@ __all__ = (
     "build_message_broadcaster",
     "fmt_price",
     "format_followup_telegram",
-    "format_squeeze_telegram",
     "format_symbol_telegram",
     "phase_badge",
     "phase_human",
@@ -965,7 +935,6 @@ __all__ = (
     "rr_emoji",
     "send_telegram_chunks",
     "split_telegram",
-    "squeeze_trade_direction",
     "trigger_human",
     "veto_human",
     "_split_telegram_text",

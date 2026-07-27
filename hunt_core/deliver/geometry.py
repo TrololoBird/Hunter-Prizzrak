@@ -51,11 +51,10 @@ def geometry_block_evidence(
     """Structured geometry veto — code, reason, evidence list."""
     min_rr = resolve_min_rr(setup, direction=direction)
     evidence: list[str] = []
-    if setup.get("levels_viable") is False:
-        veto = setup.get("levels_veto") or []
-        tail = ", ".join(str(v) for v in veto[:2]) if veto else "levels_veto"
-        evidence.extend(str(v) for v in veto[:4])
-        return {"code": "levels_veto", "reason": f"уровни: {tail}", "evidence": evidence}
+    # Здесь стояло гео-вето по `levels_viable` / `levels_veto`. Оба ключа осиротели: их писала
+    # `levels/levels.py::reanchor_setup_levels`, снесённая при чистке 2026-07-26 (1575 → 92 строки).
+    # Ветка не могла сработать, но дерево рекламировало вето, которого нет. Живой пол дистанции
+    # стопа остался там же, в `levels/`, и читает его `confluence/mtf.py` — это другой механизм.
     rr = setup_risk_reward(setup)
     if rr is not None and rr < min_rr:
         evidence.append(f"risk_reward={rr:.3f}")

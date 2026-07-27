@@ -85,7 +85,8 @@ def append_tick_universe_audit(row: dict[str, Any]) -> None:
     """Log per-tick universe state after snapshot (phase + leg_gain + prescan overlay)."""
     if not universe_audit_enabled():
         return
-    if row.get("error") or row.get("liquidity_skip"):
+    # `liquidity_skip` снят 2026-07-26 — сирота без продюсера с `5ba0fea` (см. tick_diagnostics).
+    if row.get("error"):
         return
     try:
         from hunt_core.data.jsonl_io import append_jsonl_lines

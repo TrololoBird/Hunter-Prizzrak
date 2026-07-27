@@ -203,11 +203,23 @@ def build_map_bundle(
         # одного вызывающего. Итог: живой, измеренный фандинг лежал в том же словаре одним ключом
         # в стороне, а строка «🌪 По приборам» молча не показывала его никогда — читатель не мог
         # отличить «фандинга нет» от «фандинг не входит в эту карточку».
+        #
+        # ⚠ Ключ ставится ТОЛЬКО когда значение измерено (I-6). Первая редакция этой правки
+        # (2026-07-26) собирала словарь литералом, поэтому `map_basis_pct` попадал в фичи со
+        # значением `None` у КАЖДОГО символа — замер на живом прогоне: `"map_basis_pct" in market`
+        # → True, `market["map_basis_pct"]` → None у всех семи. Потребитель, отличающий «нет
+        # данных» по НАЛИЧИЮ ключа (так делает и новый `data_plane_audit`, поле `present`),
+        # читал это как «базис измерен и равен пустоте». Отсутствие плана обязано выглядеть как
+        # отсутствие ключа — ровно так же, как это делает `maps/engine.py::build_map_bundle`.
         extra={
-            "map_oi_z": oi_z,
-            "map_funding_rate": view.derivs.funding,
-            "map_basis_pct": view.derivs.basis,
-            "map_ws_cvd": view.orderflow.cvd_5m,
+            key: value
+            for key, value in (
+                ("map_oi_z", oi_z),
+                ("map_funding_rate", view.derivs.funding),
+                ("map_basis_pct", view.derivs.basis),
+                ("map_ws_cvd", view.orderflow.cvd_5m),
+            )
+            if value is not None
         },
     )
 

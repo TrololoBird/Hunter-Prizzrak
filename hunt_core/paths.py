@@ -37,7 +37,6 @@ MAPS_LAKE_JSONL = LAKE / "maps_bundles.jsonl"
 ANALYST_CALIBRATION_JSON = DATA / "analyst_calibration.json"
 ANALYST_SIGNAL_QUEUE_JSON = DATA / "analyst_signal_queue.json"
 BASELINE_DIR = DATA / "baseline"
-LAB_OUTCOME_LEDGER = DATA / "hunt_lab_outcome_ledger.jsonl"
 OUTCOME_LEDGER = DATA / "hunt_outcome_ledger.jsonl"
 DELIVERY_STATE = DATA / "hunt_delivery_state.json"
 DATA_PLANE_AUDIT_JSONL = DATA / "data_plane_audit.jsonl"
@@ -58,7 +57,6 @@ __all__ = [
     "HTF_FRAMES",
     "HUNT_CALIBRATION",
     "HUNT_SCAN_JSONL",
-    "LAB_OUTCOME_LEDGER",
     "LAKE",
     "LAKE_PARQUET",
     "MAPS_LAKE_JSONL",

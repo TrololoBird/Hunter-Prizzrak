@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 import pathlib
+import re
 from typing import Any, Callable
 
 import pytest
@@ -155,4 +156,62 @@ def test_removed_dead_sections_did_not_come_back(raw: dict[str, Any]) -> None:
     assert not back, (
         f"инертные секции вернулись в config.defaults.toml: {back} — "
         f"без провода до читателя они снова будут молчаливым no-op"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+# Ключевой уровень: секция может доходить до читателя ЦЕЛИКОМ и всё равно нести мёртвые ключи.
+#
+# `[tracker]` форвардится словарём (`domain/config.py`), поэтому проверка секции его пропускала,
+# а свип 2026-07-26 нашёл внутри неё дефект С ОБЕИХ сторон сразу:
+#   • ФАНТОМНАЯ РУЧКА — код читает `tr.get("atr_trail_risk_fraction", …)`, но записать значение
+#     негде: ни в TOML, ни в `UNIVERSAL_DEFAULTS`, ни в `data/hunt_calibration.json` (файла нет).
+#     Всегда побеждал инлайн-дефолт: настройка на вид, no-op на деле. Таких было 4.
+#   • КЛЮЧ БЕЗ ЧИТАТЕЛЯ — `dump_active_min_trail_mfe_pct` / `min_trail_age_minutes` лежали среди
+#     работающих ключей секции; `git log -S` не находит читателя НИ В ОДНОМ коммите.
+# Обе стороны одинаково незаметны: ни тест, ни покрытие, ни vulture их не видят.
+#
+# Скан привязан к ПЕРЕМЕННОЙ, а не к каталогу. Первая редакция сканировала `track/**` на `tr.get(`
+# и немедленно дала ложное срабатывание: `tp1_partial_fix_pct_normal/_hot` читает
+# `params/store.py::tp1_partial_fix_pct` — то есть читатель живой, но лежит в другом каталоге и
+# зовётся из `track/` уже готовой функцией. Ловить по имени файла нельзя; ловим по цепочке
+# «переменная получена из `tracker_thresholds(...)` → с неё берут ключ».
+_ASSIGN_RE = re.compile(r"^\s*([a-z_][a-z0-9_]*)\s*=\s*tracker_thresholds\(", re.MULTILINE)
+_INLINE_RE = re.compile(r'tracker_thresholds\([^()]*\)\.get\(\s*"([a-z0-9_]+)"')
+
+
+def _tracker_keys_read_by_code() -> set[str]:
+    found: set[str] = set()
+    for path in (REPO / "hunt_core").rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        if "tracker_thresholds" not in text:
+            continue
+        found |= set(_INLINE_RE.findall(text))
+        for var in set(_ASSIGN_RE.findall(text)):
+            found |= set(
+                re.findall(rf'\b{re.escape(var)}\.get\(\s*"([a-z0-9_]+)"', text)
+            )
+    return found
+
+
+def test_every_tracker_knob_the_code_reads_can_actually_be_set() -> None:
+    """Нет ФАНТОМНЫХ РУЧЕК: всё, что читает `track/`, реально резолвится загрузчиком."""
+    from hunt_core.params.store import tracker_thresholds
+
+    resolvable = set(tracker_thresholds("BTCUSDT"))
+    phantom = sorted(_tracker_keys_read_by_code() - resolvable)
+    assert not phantom, (
+        f"фантомные ручки трекера (код читает, записать негде): {phantom}. "
+        f"Опубликуйте их в config.defaults.toml [tracker] по текущему инлайн-дефолту "
+        f"(тождество по поведению) либо уберите чтение."
+    )
+
+
+def test_no_tracker_key_without_a_reader(raw: dict[str, Any]) -> None:
+    """Зеркало: нет ключей `[tracker]`, которых не читает ни одна строка `track/`."""
+    declared = set(raw.get("tracker") or {})
+    unread = sorted(declared - _tracker_keys_read_by_code())
+    assert not unread, (
+        f"ключи [tracker] без читателя: {unread}. Такой ключ выглядит гейтом, не будучи им — "
+        f"проведите его до кода либо перенесите в docs/config-intended.md"
     )

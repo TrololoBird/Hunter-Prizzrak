@@ -406,59 +406,7 @@ def liquidation_thresholds(symbol: str = "") -> dict[str, float]:
     return {k: float(v) for k, v in merged.items() if isinstance(v, (int, float))}
 
 
-def maps_calibration(symbol: str = "") -> dict[str, float]:
-    """Per-symbol maps forward-confidence calibration from probe outcomes."""
-    maps_sec = universal_section("maps")
-    per = symbol_section(symbol.upper(), "maps") if symbol else {}
-    merged = _deep_merge(maps_sec, per)
-    raw = load_calibration()
-    oc = raw.get("outcome_calibration") if isinstance(raw, dict) else {}
-    maps_oc = oc.get("maps") if isinstance(oc, dict) else {}
-    if isinstance(maps_oc, dict):
-        universal_maps = maps_oc.get("universal")
-        if isinstance(universal_maps, dict):
-            merged = _deep_merge(merged, universal_maps)
-        if symbol:
-            sym_maps = maps_oc.get(symbol.upper())
-            if isinstance(sym_maps, dict):
-                merged = _deep_merge(merged, sym_maps)
-    return {k: float(v) for k, v in merged.items() if isinstance(v, (int, float))}
-
-
-def save_maps_calibration(
-    *,
-    universal: dict[str, float] | None = None,
-    per_symbol: dict[str, dict[str, float]] | None = None,
-    path: Path = HUNT_CALIBRATION,
-) -> None:
-    """Persist maps probe metrics into outcome_calibration.maps."""
-    existing: dict[str, Any] = {}
-    if path.exists():
-        try:
-            existing = serde.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(existing, dict):
-                existing = {}
-        except (OSError, serde.JSONDecodeError):
-            existing = {}
-    oc = existing.setdefault("outcome_calibration", {})
-    if not isinstance(oc, dict):
-        oc = {}
-        existing["outcome_calibration"] = oc
-    maps_oc = oc.setdefault("maps", {})
-    if not isinstance(maps_oc, dict):
-        maps_oc = {}
-        oc["maps"] = maps_oc
-    if universal:
-        maps_oc["universal"] = {k: float(v) for k, v in universal.items()}
-    if per_symbol:
-        for sym, payload in per_symbol.items():
-            if isinstance(payload, dict):
-                maps_oc[str(sym).upper()] = {k: float(v) for k, v in payload.items()}
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(serde.dumps_str(existing, indent=True), encoding="utf-8")
-    invalidate_calibration_cache()
-
-
+# `maps_calibration` снята следом: её единственным вызывающим была удалённая выше ветка.
 def listings_thresholds(symbol: str = "") -> dict[str, float]:
     lst = universal_section("listings")
     per = symbol_section(symbol.upper(), "listings") if symbol else {}

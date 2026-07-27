@@ -22,20 +22,41 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
 # A row is a data-plane FAILURE when its data could not be assembled/validated — NOT
-# merely when it produced no signal (a healthy "neutral" tick is fine). We detect that
-# from any of: an explicit data-shaped `error`, non-empty `data_violations`, or
-# `data_integrity.complete == False`.
+# merely when it produced no signal (a healthy "neutral" tick is fine). Detected from an
+# explicit data-shaped `error`, or from a KLINE plane in `data_violations`.
 _DATA_ERROR_RE = re.compile(r"^(klines?|book|ticker|funding|oi|data)\b|stale|fetch_failed|staleness")
 
-# Normalise a violation string to a stable KIND for bucketing:
-#   "klines.4h.stale.XMRUSDT.40336224ms>36000000ms" -> "klines.4h.stale"
-#   "klines.1m.rows=1<min_raw=300"                   -> "klines.1m.rows"
-#   "klines.1m.fetch_failed"                          -> "klines.1m.fetch_failed"
+# ⚠ ПОЧЕМУ ТОЛЬКО КЛАЙНЫ. `data_violations` теперь пишет `_cycle_tick::_serialize_native_scan_row`
+# из `view.not_ready` — а туда движок кладёт КАЖДЫЙ незакрытый план, включая заведомо
+# необязательные (`liq`, `trades`, `gls`, `basis`), которых у большинства альтов нет штатно.
+# Считать их отказом = объявить блэкаут на здоровой вселенной и, через
+# `should_self_restart_on_blackout`, загнать процесс в цикл перезапусков. Кадры же нужны КАЖДОМУ
+# детектору: замерший клайн — это и есть сигнатура 2026-07-11 и `stale-htf-cache-trap`.
+#
+# ЗАМЕР на живом прогоне 2026-07-26 (7 символов, здоровая вселенная) — граница выбрана не на глаз:
+#   kline.*        в not_ready у   0% строк   ← отказ, и он честно не сработал
+#   basis / liq / global_ls_5m / top_ls_*     у 100%
+#   oi / taker_5m                             у  86%
+# То есть без фильтра `failure_frac` был бы 1.0 на полностью здоровом прогоне → `critical` →
+# самоперезапуск. И наоборот: на клайнах фильтр не даёт ложных срабатываний.
+# Расширять список планов — только повторив этот замер (I-7), не «на всякий случай».
+_FAILING_PLANE_PREFIXES = ("kline", "klines")
+
+# Normalise a violation string to a stable KIND for bucketing. Обе формы:
+#   родная (`view.not_ready`):  "kline.4h: stale 40336224ms>36000000ms" -> "kline.4h.stale"
+#                               "kline.1m: absent"                      -> "kline.1m.absent"
+#   легаси (строковый `error`): "klines.4h.stale.XMRUSDT.40336224ms>…"  -> "klines.4h.stale"
+#                               "klines.1m.rows=1<min_raw=300"          -> "klines.1m.rows"
 _NUM_TAIL_RE = re.compile(r"[.=<>].*$")
+_PLANE_REASON_RE = re.compile(r"^(?P<plane>[\w.]+):\s*(?P<reason>[a-z_]+)")
 
 
 def _violation_kind(v: str) -> str:
     v = str(v)
+    # native `"<plane>: <reason> …"` — the shape engine/api.py::snapshot emits
+    m = _PLANE_REASON_RE.match(v)
+    if m:
+        return f"{m.group('plane')}.{m.group('reason')}"
     # klines.<tf>.<kind>[.symbol.numbers] -> keep the first 3 dotted segments, strip numbers
     parts = v.split(".")
     if len(parts) >= 3 and parts[0].startswith("kline"):
@@ -44,6 +65,10 @@ def _violation_kind(v: str) -> str:
         return f"{parts[0]}.{parts[1]}.{kind}"
     # generic: keep up to the first numeric/operator token
     return _NUM_TAIL_RE.sub("", v.split(" ")[0])
+
+
+def _is_failing_plane(kind: str) -> bool:
+    return kind.split(".", 1)[0] in _FAILING_PLANE_PREFIXES
 
 
 def classify_row_health(row: Mapping[str, Any]) -> str | None:
@@ -65,14 +90,16 @@ def classify_row_health(row: Mapping[str, Any]) -> str | None:
             return "rest_error.timeout"
         return "rest_error.exception"
     violations = row.get("data_violations")
-    if isinstance(violations, (list, tuple)) and violations:
-        return _violation_kind(violations[0])
-    integ = row.get("data_integrity")
-    if isinstance(integ, Mapping) and integ.get("complete") is False:
-        vs = integ.get("violations")
-        if isinstance(vs, (list, tuple)) and vs:
-            return _violation_kind(vs[0])
-        return "data.incomplete"
+    if isinstance(violations, (list, tuple)):
+        for v in violations:
+            kind = _violation_kind(v)
+            if _is_failing_plane(kind):
+                return kind
+    # УДАЛЕНА ветка `data_integrity` — у ключа не было продюсера с 2026-07-22 (`7bec80c` снёс
+    # `features/snapshot.py::data_quality_report`). Форма `{complete, violations}` — это
+    # `data/completeness.py::CompletenessReport`, шейп ЛЕГАСИ-пакета REST, который на родном пути
+    # никто не собирает. Восстанавливать его значило бы возить второй, параллельный источник
+    # истины о свежести; настоящий источник — `view.not_ready`, он и читается выше.
     err = row.get("error")
     if isinstance(err, str) and err and _DATA_ERROR_RE.search(err):
         return _violation_kind(err)

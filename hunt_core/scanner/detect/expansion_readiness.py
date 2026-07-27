@@ -2,10 +2,19 @@
 
 Two separate outputs — never one number:
 - ``energy`` 0..100: coiling / preparation strength (NOT price change).
-- ``direction``: bull | bear | undecided from absorption / flow (полоса фандинга
-  удалена 2026-07-26 — у `row["funding_rate"]` нет продюсера, см. ниже).
+- ``direction``: bull | bear | undecided — **сегодня из ОДНОГО pos-in-range**.
 
 ``abs(change_pct)`` is metadata only — forbidden as primary ranking key.
+
+⚠ Что этот файл НЕ делает, вопреки прежнему описанию. К 2026-07-26 отсюда сняты три полосы
+подряд — фандинг, BB-squeeze и поток (delta/CVD) — и все три по одной причине: функция бежит по
+ВСЕЙ вселенной поверх ``fetch_ticker_24h``, а ``market/symbols.py::normalize_ticker_rows`` отдаёт
+ровно 8 полей (symbol / last_price / price_change_percent / quote_volume / trade_count /
+underlying_type / high_price / low_price). Ключей, на которых гейтились полосы, там нет вовсе,
+поэтому они не начисляли ничего ни разу. Вместе с потоком ушёл и ``fake_energy_veto``.
+Осталось честно: energy = объём + OI + частота сделок, direction = положение в диапазоне.
+**Настоящая продуктовая дыра — «ловец пружин» на слое ВОРОНКИ** (отбор тихих поджатий до первого
+движения). Она теперь видна, а не спрятана за кодом, который выглядел работающим.
 
 Moved here from the now-deleted ``hunt_core/expansion/`` package: this was the
 one piece of that package genuinely wired into a live scoring path
@@ -26,7 +35,6 @@ from hunt_core.data.baseline_store import SymbolBaseline, baseline_zscores, load
 
 Direction = Literal["bull", "bear", "undecided"]
 
-_FLOW_NOISE = 0.05
 _ENERGY_MIN = 15.0
 
 
@@ -68,7 +76,6 @@ class ExpansionReadiness:
     direction: Direction
     bull_score: float
     bear_score: float
-    fake_energy_veto: bool
     change_24h_pct: float
     reasons: tuple[str, ...]
 
@@ -91,25 +98,27 @@ def compute_expansion_readiness(
     low = _safe_float(row.get("low_price") or row.get("low_24h"))
     pos = _pos_in_range(last, high, low)
     oi_chg = oi_change_pct if oi_change_pct is not None else _safe_float(row.get("oi_change_pct"))
-    # is-None fallthrough: a delta/CVD of exactly 0.0 means BALANCED FLOW — a real
-    # measurement — and `or` discarded it, falling through to the alternate key and,
-    # when that was absent, reporting flow as UNKNOWN. That would silently defeat the
-    # flow_known guard below (a measured 0.0 must count as measured).
-    _delta = row.get("delta_ratio")
-    if _delta is None:
-        _delta = row.get("agg_trade_delta_30s")
-    _cvd = row.get("cvd_slope")
-    if _cvd is None:
-        _cvd = row.get("session_cvd_slope")
-    delta = _safe_float(_delta)
-    cvd_slope = _safe_float(_cvd)
+    # УДАЛЕНА полоса ПОТОКА (`delta_ratio`/`agg_trade_delta_30s`/`cvd_slope`/`session_cvd_slope`) —
+    # третья и последняя по счёту в этом файле, по тому же прецеденту, что фандинг и BB-squeeze.
+    # Ни один из четырёх ключей не пишет НИ ОДИН продюсер строк тикера, поэтому:
+    #   • `flow_known` был вечно False → `fake_energy_veto` не взводился НИКОГДА, и
+    #     `readiness_meets_prescan` вырождался в `energy >= min_energy`;
+    #   • полосы ±10 (OI+дельта) и ±12 (CVD) не начисляли ничего → `direction` и так решал
+    #     один pos-in-range.
+    # Удаление — тождество и на `energy`, и на `direction` (проверено ниже по каждой ветке).
+    #
+    # Заполнить на ЭТОМ слое нечем, и это структурно, а не «руки не дошли»: функция бежит по
+    # ВСЕЙ вселенной (~500 символов) поверх `fetch_ticker_24h`, а bulk-эндпоинта taker-потока
+    # у Binance нет; движок знает поток только по ПРОГРЕТЫМ символам. Настоящий поток живёт на
+    # аналитическом пути (`view.orderflow`, `engine/orderflow.py::delta_ratio`) — там он и
+    # считается. Возвращать полосу сюда можно ТОЛЬКО вместе с продюсером на строке тикера.
+    # (2026-07-26, по аудиту осиротевших ключей)
 
     # is-None-fallthrough, а НЕ `or`: z-скор ровно 0.0 — законное измерение («последняя
     # выборка равна медиане окна»), robust_z отдаёт None, когда мерить нечего. `or` выбрасывал
     # измеренное «всплеска на 5m нет» и молча подставлял 24-часовой z, который может быть большим,
-    # раздувая energy — а energy решает допуск символа в юниверс сканирования. Ровно этот приём
-    # применён к delta/cvd десятью строками выше с комментарием «a measured 0.0 must count as
-    # measured»; здесь его не применили. (2026-07-26)
+    # раздувая energy — а energy решает допуск символа в юниверс сканирования. Тот же приём стоял
+    # на delta/cvd (полоса снята выше); здесь его не применили. (2026-07-26)
     vol_z = zs.get("volume_z_5m")
     if vol_z is None:
         vol_z = zs.get("volume_z")
@@ -153,20 +162,12 @@ def compute_expansion_readiness(
     ]
     energy = round(min(100.0, sum(energy_parts)), 1)
 
-    # The veto means "OI and volume surged but there is NO taker flow behind it" —
-    # a fake breakout. That verdict is only meaningful when flow is actually MEASURED.
-    # delta_ratio / cvd_slope are not produced anywhere in the ticker rows this runs
-    # on, so flow_mag collapsed to 0.0 < _FLOW_NOISE and the veto degenerated into
-    # "OI up AND volume up" — i.e. it hard-rejected the pre-pump archetype the scanner
-    # exists to find (readiness_meets_prescan requires `not fake_energy_veto`).
-    # Unknown flow is UNKNOWN, not zero: only veto when flow data is present.
-    flow_known = delta is not None or cvd_slope is not None
-    flow_mag = max(abs(delta or 0.0), abs(cvd_slope or 0.0))
-    oi_up = (oi_chg or 0.0) > 0.5 or (oi_z or 0.0) > 1.0
-    vol_up = (vol_z or 0.0) > 1.0
-    fake_veto = flow_known and oi_up and vol_up and flow_mag < _FLOW_NOISE
-    if fake_veto:
-        energy = round(energy * 0.35, 1)
+    # УДАЛЁН `fake_energy_veto` — «OI и объём выстрелили, но потока за ними НЕТ» (ложный пробой).
+    # Вердикт осмыслен, только когда поток ИЗМЕРЕН, а измерять его здесь нечем (см. выше), поэтому
+    # `flow_known` был вечно False и вето не взводилось ни разу. Формула оставалась в файле,
+    # выглядела рабочей и держала поле `fake_energy_veto` в контракте — ровно тот случай, когда
+    # мёртвый код читается как гарантия. Гейт `readiness_meets_prescan` теперь честно говорит,
+    # что фильтрует ОДНУ величину. Воскрешать вместе с продюсером потока.
 
     bull = 0.0
     bear = 0.0
@@ -184,17 +185,10 @@ def compute_expansion_readiness(
     # выглядит работающим. Настоящий фандинг живёт на аналитическом пути
     # (`view.derivs.funding`, `scanner/feed.py::_funding_for`) — воскрешать здесь можно
     # только вместе с продюсером на строке тикера. (2026-07-26)
-    if oi_chg is not None:
-        if oi_chg > 1.0 and (delta or 0) > _FLOW_NOISE:
-            bull += 10.0
-        if oi_chg > 1.0 and (delta or 0) < -_FLOW_NOISE:
-            bear += 10.0
-    if cvd_slope is not None:
-        if cvd_slope > _FLOW_NOISE:
-            bull += 12.0
-        elif cvd_slope < -_FLOW_NOISE:
-            bear += 12.0
-
+    # Здесь стояли ещё две полосы направления — ±10 (OI>1% И знак дельты) и ±12 (знак CVD).
+    # Обе гейтились на потоке, которого на строке тикера нет, поэтому не начисляли ничего
+    # никогда. Снято вместе с полосой потока: `direction` фактически решает ОДИН pos-in-range,
+    # и теперь это видно из кода, а не только из замера.
     if bull > bear + 8.0:
         direction: Direction = "bull"
     elif bear > bull + 8.0:
@@ -207,8 +201,6 @@ def compute_expansion_readiness(
         reasons.append(f"vol_z={vol_z:.1f}")
     if oi_z is not None:
         reasons.append(f"oi_z={oi_z:.1f}")
-    if fake_veto:
-        reasons.append("fake_energy_veto")
     reasons.append(f"dir={direction}")
 
     return ExpansionReadiness(
@@ -217,14 +209,19 @@ def compute_expansion_readiness(
         direction=direction,
         bull_score=round(bull, 1),
         bear_score=round(bear, 1),
-        fake_energy_veto=fake_veto,
         change_24h_pct=round(change, 2),
         reasons=tuple(reasons[:5]),
     )
 
 
 def readiness_meets_prescan(readiness: ExpansionReadiness, *, min_energy: float = _ENERGY_MIN) -> bool:
-    return readiness.energy >= min_energy and not readiness.fake_energy_veto
+    """Пропуск в воронку сканирования: ОДИН порог по энергии, второго условия больше нет.
+
+    Раньше здесь стояло `and not readiness.fake_energy_veto`. Вето требовало ИЗМЕРЕННОГО потока,
+    которого на строке тикера не бывает, поэтому терм был константой True с самого переписывания
+    транспорта. Гейт не изменился по поведению — изменилась его честность.
+    """
+    return readiness.energy >= min_energy
 
 
 __all__ = [

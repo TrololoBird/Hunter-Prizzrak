@@ -152,3 +152,29 @@ replay_target_atr = 1.5
 # NOT doc-only. Most fields are method invariants (min_rr стр.9, accumulation_min_touches
 # стр.22, stop_buffer_pct стр.33); adding the section wholesale invites re-tuning the method
 # in обход of the PDF — leave it unset unless a specific deploy-time override is needed.
+
+---
+
+## `[tracker]` — два ключа, у которых НИКОГДА не было читателя (сняты 2026-07-26)
+
+Оба лежали в живом `config.defaults.toml`, среди действительно работающих ключей секции, и
+выглядели рабочими гейтами. `git log -S` по `hunt_core/` не находит ни одного коммита, где бы
+они читались, — то есть это не «читатель отвалился при переписывании транспорта», а поле,
+рождённое документацией. Секция `[tracker]` форвардится ЦЕЛИКОМ, поэтому они честно доезжали до
+`tracker_thresholds()` и там молча лежали.
+
+```toml
+# Порог MFE для трейла на dump-active фазе — задуман как отдельный от общего min_trail_mfe_pct.
+# Сегодня значение совпадает с общим (2.5), так что проводка была бы тождественна; отдельный
+# порог имеет смысл только вместе с ЗАМЕРОМ, показывающим, что фазе нужен свой (I-7).
+dump_active_min_trail_mfe_pct = 2.5
+
+# Задумано: не трогать стоп, пока сигналу меньше N минут (защита от трейла по первому же тику).
+# Читателя нет; `track/_trailing.py` отсекает ранний трейл только по MFE (min_trail_mfe_pct).
+min_trail_age_minutes = 2.0
+```
+
+Возврат допустим ТОЛЬКО вместе с читателем. Зеркальный класс — ручка, которую код читает, а
+записать её негде — закрыт в ту же правку: `atr_trail_risk_fraction`, `trail_min_atr_move`,
+`bias_flip_chop_adx_max`, `sniper_hold_min_mfe_pct` опубликованы в живом `[tracker]` по своим
+инлайн-дефолтам. Обе стороны теперь держит `tests/test_config_keys_wired.py`.

@@ -9,10 +9,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from hunt_core import serde
-from hunt_core.paths import DELIVERY_STATE, LAB_OUTCOME_LEDGER
+from hunt_core.paths import DELIVERY_STATE
 
 STATE_PATH = DELIVERY_STATE
-LAB_LEDGER_PATH = LAB_OUTCOME_LEDGER
+# `LAB_LEDGER_PATH` снят 2026-07-26 вместе с лаб-полосой доставки (`deliver/lab.py`):
+# выбрать полосу было невозможно, поэтому в файл не легло ни одной записи.
 
 
 def load_delivery_state(path: Path | None = None) -> dict[str, str]:

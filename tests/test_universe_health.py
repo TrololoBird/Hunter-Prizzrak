@@ -14,9 +14,20 @@ from hunt_core.diagnostics.universe_health import (
 def _stale_row(sym: str) -> dict:
     """A real rejected-row shape (as written to hunt_scan-*.jsonl on the incident)."""
     v = f"klines.4h.stale.{sym}.40336224ms>36000000ms"
+    return {"symbol": sym, "error": v, "no_signal_reason": v, "data_violations": [v]}
+
+
+def _native_stale_row(sym: str) -> dict:
+    """Сегодняшняя форма: `data_violations` = `view.not_ready` из `engine/api.py::snapshot`.
+
+    Продюсер восстановлен 2026-07-26 (`_cycle_tick::_serialize_native_scan_row`) — с 07-22 его не
+    было вовсе, и строка, собравшаяся на ЗАМОРОЖЕННОМ кадре, считалась HEALTHY.
+    """
     return {
-        "symbol": sym, "error": v, "no_signal_reason": v, "data_violations": [v],
-        "data_integrity": {"complete": False, "violations": [v]},
+        "symbol": sym,
+        "price": 1.23,
+        "tick_path": "native_assembly",
+        "data_violations": ["liq: absent", "kline.4h: stale 40336224ms>36000000ms"],
     }
 
 
@@ -32,6 +43,27 @@ def test_classify_normalises_stale_violation_to_a_stable_kind():
 def test_classify_fetch_failed_and_rows_shortfall():
     assert classify_row_health({"data_violations": ["klines.1m.fetch_failed"]}) == "klines.1m.fetch_failed"
     assert classify_row_health({"data_violations": ["klines.1m.rows=1<min_raw=300"]}) == "klines.1m.rows"
+
+
+def test_native_not_ready_shape_is_classified():
+    # `"<plane>: <reason> …"` — то, что реально кладёт движок; ms-хвост отбрасывается.
+    assert classify_row_health(_native_stale_row("XMRUSDT")) == "kline.4h.stale"
+    assert classify_row_health({"data_violations": ["kline.1m: absent"]}) == "kline.1m.absent"
+
+
+def test_optional_planes_absent_is_not_a_blackout():
+    """Ключевая граница: `liq`/`trades`/`gls` штатно отсутствуют у большинства альтов.
+
+    Считать их отказом — объявить блэкаут на здоровой вселенной и через
+    `should_self_restart_on_blackout` загнать процесс в цикл перезапусков.
+    """
+    assert classify_row_health({"data_violations": ["liq: absent"]}) is None
+    assert classify_row_health({"data_violations": ["trades: absent", "gls: absent"]}) is None
+    # ...но клайн в том же списке отказ, даже если он не первый
+    assert (
+        classify_row_health({"data_violations": ["liq: absent", "kline.1m: absent"]})
+        == "kline.1m.absent"
+    )
 
 
 def _rest_error_row(sym: str, *, error: str) -> dict:

@@ -435,21 +435,15 @@ def backfill_from_jsonl(
             continue
         ts_raw = row.get("ts")
         ts = _parse_ts(str(ts_raw)) if ts_raw else None
-        price = float(row.get("price") or 0)
-        ignition = row.get("ignition") if row.get("ignited") else None
-        if isinstance(ignition, dict) and price > 0:
-            direction = str(ignition.get("direction") or "pump")
-            kind: LegKind = "dump" if direction == "dump" else "pump"
-            record_pump_leg(
-                store,
-                symbol=sym,
-                kind=kind,
-                source="ignition",
-                price=price,
-                change_24h_pct=float(row.get("chg_24h_pct") or 0) if row.get("chg_24h_pct") else None,
-                now=ts,
-            )
-            ingested += 1
+        # Здесь стояла ветка засева ноги из `row["ignited"]` / `row["ignition"]`. Снята 2026-07-26:
+        # ни одного вхождения обоих ключей в живых `data/hunt_scan*.jsonl` (проверены все ротации),
+        # и сегодняшний сборщик строки `_cycle_tick::_serialize_native_scan_row` их выставить не
+        # может — продюсер ушёл с легаси-транспортом (хвост G-31 из аудита R2).
+        # Следствие, которое надо помнить: **стартовый бэкфилл не засевает НИ ОДНОЙ ноги** из
+        # ignition — история пампов кормится только `scanner/prescan.py` (source="scanner") и
+        # подтверждёнными в TG сетапами ниже. Переисточить можно на `prescan_outlier` (эту секцию
+        # строка реально несёт), но это ДОБАВИТ данных в `score_bonus` → `hunt_score` → скоринг
+        # вотчлиста, то есть требует замера (I-7), а не просто провода.
         for direction, key in (("short", "dump"), ("long", "long")):
             setup = row.get(key)
             if not isinstance(setup, dict) or not setup.get("telegram_sent"):

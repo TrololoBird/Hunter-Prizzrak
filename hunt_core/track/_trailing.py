@@ -40,7 +40,9 @@ def _squeeze_on_1h(row: dict[str, Any] | None) -> bool:
     tf = row.get("timeframes") or {}
     if not isinstance(tf, dict):
         return False
-    block = tf.get("1h") or tf.get("1h_closed") or {}
+    # Ключ ОДИН — `"1h"`, его пишет `track/_native_context.py::native_lifecycle_row`.
+    # Альтернатива `"1h_closed"` была сиротой: её продюсер (`snapshot_symbol`) ушёл 2026-07-19.
+    block = tf.get("1h") or {}
     return bool(isinstance(block, dict) and block.get("squeeze_on"))
 
 
@@ -237,7 +239,7 @@ def apply_tp1_management(
 
 def _closed_atr1h_pct(row: dict[str, Any]) -> float:
     tf = row.get("timeframes") or {}
-    block = tf.get("1h_closed") or tf.get("1h") or {}
+    block = tf.get("1h") or {}  # `1h_closed` — сирота без продюсера, снята 2026-07-26
     try:
         val = float(block.get("atr_pct") or 0)
     except (TypeError, ValueError):

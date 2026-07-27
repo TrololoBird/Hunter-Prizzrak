@@ -95,9 +95,14 @@ def evaluate_deep_delivery(*, symbol: str, verdict: dict[str, Any]) -> tuple[boo
     kind = str(verdict.get("setup_kind") or "").strip()
     if not deep_cooldown_ok(f"{symbol}:{kind}" if kind else symbol):
         blockers.append("deep_cooldown")
-    action = str(
-        verdict.get("action") or verdict.get("decision") or verdict.get("signal_decision") or "wait"
-    ).lower()
+    # Ключ ровно один. `decision` и `signal_decision` стояли здесь фолбэками, но их не пишет
+    # никто: продюсер сводки — `orchestrator.py` (литеральные ключи) + правки `figures.py`,
+    # старые продюсеры ушли с модулями в `692f7dc`/`b96828c`. Сирота была вдвойне мёртвой —
+    # единственный вызывающий (`runtime/analyst_assembly.py::_send_analyst_card`) заходит сюда
+    # только в `else` от `if action not in {"long","short"}`, т.е. `verdict["action"]` здесь
+    # истинно всегда и замыкает or-цепочку раньше. Блокер `decision_wait` по той же причине
+    # недостижим с живого пути — оставлен как гейт на РЕАЛЬНОМ ключе для будущих вызывающих.
+    action = str(verdict.get("action") or "wait").lower()
     if action not in {"long", "short"}:
         blockers.append("decision_wait")
     # This gate previously only checked cooldown + non-wait — nothing stopped a

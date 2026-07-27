@@ -99,6 +99,25 @@ def _serialize_native_scan_row(
         "session": nav.session or {},
         "freshness": nav.freshness,
         "mtf": mtf_dict,
+        # ВОССТАНОВЛЕННЫЙ ПРОДЮСЕР (2026-07-26). `diagnostics/universe_health.py::classify_row_health`
+        # читает `data_violations` с самого своего появления, но писавший его
+        # `features/snapshot.py::data_quality_report` снесён 2026-07-22 (`7bec80c`). С тех пор
+        # блэкаут детектировался ТОЛЬКО по `tick_path == "rest_error"`, то есть по символам, у
+        # которых сборка упала целиком; строка, которая собралась на ЗАМОРОЖЕННОМ кадре, считалась
+        # HEALTHY — а это ровно сигнатура инцидента 2026-07-11, ради которого модуль и написан.
+        # Занижался `failure_frac`, а от него зависят ops-алерт и `should_self_restart_on_blackout`.
+        #
+        # Продюсер теперь типизированный и родной: `snap.not_ready` (`engine/api.py::snapshot`) —
+        # список планов, которые движок НЕ доказал свежими, в форме `"<plane>: absent"` /
+        # `"<plane>: stale Nms>Mms"`. Пишем список ЦЕЛИКОМ; политику «что из этого считать
+        # отказом» держит один `classify_row_health`, чтобы она не размазалась по продюсерам.
+        "data_violations": list(nav.view.not_ready),
+        # Возраст КАЖДОГО плана прямо со штампов движка (`engine/api.py::plane_ages`, ADR-0004 E7).
+        # `diagnostics/data_plane_audit` до 2026-07-26 брал возрасты из `client.snapshot_rest_cache_ages`
+        # и `pack["_rest_cache_ages"]` — обоих аргументов вызывающий не передаёт с переписывания
+        # транспорта, поэтому на 2000 живых записях У ВСЕХ 16 полей `age_s` был None, а `source`
+        # печатался уверенный. Это единственный настоящий источник возраста в дереве.
+        "plane_ages": dict(nav.view.plane_ages),
     }
 
 

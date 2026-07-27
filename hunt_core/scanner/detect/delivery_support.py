@@ -19,11 +19,11 @@ from hunt_core.contract import price_in_entry_zone  # noqa: F401
 from hunt_core.signals.lifecycle import MID_DUMP_LC_PHASES  # noqa: F401
 REPORT_BLOCK_PRIORITY: tuple[str, ...] = ("not_confirmed", "below_calibrated_gate", "cold_start")
 BOUNCE_MIN_RISK_REWARD = 1.05
-_MIN_RR_FLOOR = 1.6
 
-# Data-quality liquidity floors (skip illiquid symbols — not a strategy filter).
-_MIN_QUOTE_VOL_24H = 3_000_000.0
-_MIN_OI_USD = 250_000.0
+# Здесь стояли `_MIN_RR_FLOOR` / `_MIN_QUOTE_VOL_24H` / `_MIN_OI_USD` — сняты вместе с
+# единственными читавшими их функциями. Живой порог ликвидности вселенной задаёт
+# `[hunter] min_quote_volume_usd` / `min_open_interest_usd` (`scanner/prescan.py`), и это
+# ЕДИНСТВЕННЫЙ такой порог; вторая копия здесь молча расходилась бы с ним.
 
 
 @dataclass(frozen=True)
@@ -33,36 +33,6 @@ class GateResult:
     ok: bool
     code: str = ""
     message: str = ""
-
-
-def liquidity_skip_reason(
-    *,
-    quote_volume: float | None,
-    oi: float | None = None,
-    last_price: float | None = None,
-    symbol: str = "",
-) -> str | None:
-    """Skip symbols too illiquid to trade cleanly (data quality, public-only)."""
-    if quote_volume is not None:
-        try:
-            qv = float(quote_volume)
-            if qv < _MIN_QUOTE_VOL_24H:
-                return f"liquidity_quote_vol_low:{qv:.0f}"
-        except (TypeError, ValueError):
-            return "liquidity_quote_vol_invalid"
-    if oi is not None and last_price is not None:
-        try:
-            oi_usd = float(oi) * float(last_price)
-            if 0 < oi_usd < _MIN_OI_USD:
-                return f"liquidity_oi_low:{oi_usd:.0f}"
-        except (TypeError, ValueError):
-            return "liquidity_oi_invalid"
-    return None
-
-
-def effective_min_rr_for_delivery(setup: dict[str, Any], *_a: Any, **_k: Any) -> float:
-    """Fixed R:R floor; structural geometry from levels.py already enforces R:R."""
-    return _MIN_RR_FLOOR
 
 
 # --- former filters: no veto beyond the fusion gate -------------------------
@@ -85,36 +55,22 @@ def mission_delivery_block(
     return None
 
 
-def delivery_freshness_block(*_a: Any, **_k: Any) -> None:
-    return None
-
-
-def delivery_hard_block(*_a: Any, **_k: Any) -> None:
-    return None
-
-
-def run_gate_pipeline(*_a: Any, **_k: Any) -> GateResult:
-    return GateResult(ok=True)
-
-
 def disabled_phase_pairs(*_a: Any, **_k: Any) -> dict[tuple[str, str], Any]:
     return {}
 
 
 # --- report helpers: surface the fusion gate reason -------------------------
 def evaluate_alert_gate(setup: dict[str, Any], **_k: Any) -> GateResult:
-    """A confirmed fusion setup is alert-worthy; otherwise blocked by gate_reason."""
-    if setup.get("impulse_confirmed") or setup.get("intrabar_confirmed"):
+    """A confirmed fusion setup is alert-worthy; otherwise blocked by gate_reason.
+
+    Ключ подтверждения ОДИН — ``impulse_confirmed`` (пишет ``track/tracker.py``). Стоявший рядом
+    ``intrabar_confirmed`` не писал никто: это хвост правки, доведённой до конца в
+    ``runtime/query_service.py``, но не здесь. Живой эффект — счётчик «n re-alert» в сводке
+    ``/signals`` (``runtime/signals_report.py``) решался и решается одним ``impulse_confirmed``.
+    """
+    if setup.get("impulse_confirmed"):
         return GateResult(ok=True)
     return GateResult(ok=False, code=str(setup.get("gate_reason") or "not_confirmed"))
-
-
-def evaluate_formation(setup: dict[str, Any], **_k: Any) -> GateResult:
-    confirmed = bool(setup.get("impulse_confirmed") or setup.get("intrabar_confirmed"))
-    if confirmed:
-        return GateResult(ok=True, code="confirmed")
-    reason = str(setup.get("gate_reason") or "not_confirmed")
-    return GateResult(ok=False, code=reason, message=reason)
 
 
 def collect_report_blockers(setup: dict[str, Any] | None = None, **_k: Any) -> list[GateResult]:
@@ -124,20 +80,19 @@ def collect_report_blockers(setup: dict[str, Any] | None = None, **_k: Any) -> l
     return []
 
 
+# Снято 2026-07-26 как неисполнявшееся (ни одного вызывающего вне этого файла):
+# `liquidity_skip_reason` (продюсер его ключа `liquidity_skip` ушёл с легаси-транспортом),
+# `effective_min_rr_for_delivery`, `delivery_freshness_block`, `delivery_hard_block`,
+# `run_gate_pipeline`, `evaluate_formation`. `__all__` их держал, и ровно поэтому vulture их не
+# считал находкой — проверять надо ДОСТИЖИМОСТЬ, а не наличие экспорта.
 __all__ = [
     "BOUNCE_MIN_RISK_REWARD",
     "GateResult",
     "MID_DUMP_LC_PHASES",
     "REPORT_BLOCK_PRIORITY",
     "collect_report_blockers",
-    "delivery_freshness_block",
-    "delivery_hard_block",
     "disabled_phase_pairs",
-    "effective_min_rr_for_delivery",
     "evaluate_alert_gate",
-    "evaluate_formation",
-    "liquidity_skip_reason",
     "mission_delivery_block",
     "price_in_entry_zone",
-    "run_gate_pipeline",
 ]

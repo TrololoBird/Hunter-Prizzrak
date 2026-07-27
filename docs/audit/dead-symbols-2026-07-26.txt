@@ -1,0 +1,138 @@
+ПУБЛИЧНЫХ СИМВОЛОВ БЕЗ ЕДИНОЙ ССЫЛКИ: 97 в 38 файлах
+(улика, не приговор — открой код прежде чем удалять)
+
+hunt_core/clock.py:
+    is_synced  (:34)
+    set_offset_ms  (:23)
+hunt_core/contract.py:
+    compute_setup_risk_reward  (:177)
+    normalize_funding_fraction  (:75)
+    parse_liquidation_score  (:64)
+    stamp_market_derivatives_provenance  (:151)
+hunt_core/data/completeness.py:
+    audit_kline_integrity  (:408)
+    audit_prepared_indicators  (:460)
+    audit_ticker  (:506)
+    delivery_derivatives_complete  (:722)
+    repair_kline_map_gaps  (:650)
+    series_chg_pct_strict  (:816)
+    stamp_market_freshness  (:751)
+hunt_core/data/symbol_blacklist.py:
+    blacklist_symbol  (:14)
+    blacklisted_symbols  (:34)
+    unblacklist_symbol  (:19)
+hunt_core/data/tick_jsonl.py:
+    btc_market_context  (:13)
+    resolve_row_mtf  (:86)
+hunt_core/data/universe.py:
+    OfflineEnricher  (:357)
+    early_telegram_enabled  (:249)
+    effective_watch_mode  (:167)
+hunt_core/data_readiness.py:
+    assess_symbol_data_readiness  (:123)
+    kline_fetch_limit  (:55)
+hunt_core/deliver/_labels.py:
+    fmt_price_dist  (:163)
+    signal_strength_rating  (:254)
+hunt_core/deliver/digest.py:
+    advisory_digest_enabled  (:17)
+hunt_core/deliver/readiness.py:
+    confirm_gap_readiness  (:171)
+    readiness_short_for_setup  (:165)
+    readiness_short_ru  (:161)
+hunt_core/deliver/telegram.py:
+    send_telegram_chunks  (:900)
+hunt_core/domain/config.py:
+    load_toml_defaults  (:291)
+hunt_core/domain/schemas.py:
+    AggTrade  (:72)
+    AggTradeSnapshot  (:63)
+    SignalEmitted  (:268)
+    SymbolMeta  (:17)
+    TickProcessed  (:246)
+    VerdictProduced  (:258)
+hunt_core/errors.py:
+    build_runtime_error_payload  (:91)
+hunt_core/features/factors.py:
+    FactorSpec  (:14)
+    adaptive_z_last  (:39)
+hunt_core/features/microstructure.py:
+    add_microstructure_context_columns  (:757)
+    aggregate_microstructure_contexts  (:784)
+hunt_core/features/polars_ta_bridge.py:
+    natr_series  (:363)
+    polars_ta_available  (:34)
+    polars_trading_sharpe_drawdown  (:469)
+hunt_core/features/prepare_columns.py:
+    book_walls_from_depth  (:481)
+    book_walls_from_row  (:516)
+    expected_indicator_columns_for_symbol  (:207)
+    join_derivative_series_asof  (:264)
+    patch_work_4h  (:391)
+    should_bypass_kline_integrity  (:414)
+    violations_are_partial_history_only  (:423)
+hunt_core/features/research_plugins.py:
+    polars_ds_available  (:44)
+    polars_ols_available  (:36)
+    research_snapshot_fields  (:187)
+hunt_core/maps/liquidation.py:
+    liq_contract_size  (:152)
+    liq_contract_units  (:128)
+    liq_price  (:177)
+    merge_liquidation_buffers  (:1076)
+    normalize_liq_side  (:86)
+hunt_core/maps/oi.py:
+    oi_bars_from_scalar_series  (:105)
+hunt_core/params/store.py:
+    basis_thresholds  (:287)
+    btc_corr_thresholds  (:266)
+    filter_thresholds  (:280)
+    liquidation_thresholds  (:402)
+    listings_thresholds  (:410)
+    orderflow_thresholds  (:354)
+    orderflow_use_nq  (:346)
+    phase_matrix_thresholds  (:417)
+    prep_shadow_thresholds  (:374)
+    resolve_float  (:184)
+    self_tuning_frozen  (:24)
+    stats_thresholds  (:367)
+    walk_forward_thresholds  (:389)
+    ws_thresholds  (:273)
+hunt_core/prizrak/engines/delivery_policy.py:
+    filter_notify_candidates  (:53)
+    format_cycle_peers_footer  (:70)
+hunt_core/prizrak/pipeline/_helpers.py:
+    safe_float_opt  (:26)
+hunt_core/prizrak/structural_forecast_native.py:
+    build_structural_forecast_panel_native  (:209)
+hunt_core/regime/market_regime.py:
+    last_snapshot  (:91)
+hunt_core/runtime/analyst_assembly.py:
+    deep_tg_on_change  (:35)
+hunt_core/runtime/query_service.py:
+    row_age_seconds  (:36)
+hunt_core/runtime/state.py:
+    merge_hunt_extremes  (:117)
+    restore_session_checkpoint  (:346)
+    signal_lifecycle_store  (:250)
+hunt_core/runtime/telemetry.py:
+    is_active  (:149)
+hunt_core/runtime/tick_state.py:
+    live_spot_engine  (:155)
+hunt_core/scanner/detect/events.py:
+    break_above_level_recent  (:405)
+    detect_one_candle_absorption  (:182)
+    no_liquidity_below  (:427)
+hunt_core/toolkit/book_math.py:
+    depth_imbalance_from_levels  (:31)
+hunt_core/toolkit/manipulation_fusion.py:
+    squeeze_blocks_predump_short  (:103)
+hunt_core/toolkit/ohlcv.py:
+    min_1m_bars_for_resample  (:198)
+hunt_core/track/events.py:
+    backtest_levels_on_bars  (:114)
+hunt_core/track/outcomes.py:
+    genuine_closed  (:45)
+hunt_core/track/tracker.py:
+    reconcile_orphan  (:1156)
+    signal_confirm_announced  (:163)

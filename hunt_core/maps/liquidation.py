@@ -678,24 +678,11 @@ def _build_heatmap_from_map(
     )
 
 
-def _resolved_forward_confidence(
-    symbol: str,
-    *,
-    event_count: int,
-    forward_blend: float,
-) -> float:
-    """Load probe-validated forward confidence; zone overlap refines in build_liquidation_map."""
-    from hunt_core.params.store import maps_calibration
-
-    cal = maps_calibration(symbol)
-    cal_conf = cal.get("calibrated_forward_confidence")
-    if cal_conf is not None and cal_conf > 0:
-        return min(1.0, float(cal_conf))
-    if event_count > 0:
-        return min(1.0, 0.25 + event_count * 0.04)
-    return forward_blend
-
-
+# Снята `_resolved_forward_confidence` (2026-07-26). Ветка была мертва ДВАЖДЫ: ключ
+# `calibrated_forward_confidence` во всём дереве встречался ровно один раз — в этом самом чтении,
+# а писать его должна была `params/store.py::save_maps_calibration`, у которой ноль вызывающих;
+# плюс единственный вызов передавал `event_count=0`. То есть функция ВСЕГДА возвращала
+# `cfg.forward_blend_ratio` — теперь он передаётся напрямую, без имитации калибровки.
 def build_liquidation_heatmap(
     buffer: collections.deque[LiqEvent],
     *,
@@ -707,10 +694,16 @@ def build_liquidation_heatmap(
     leverage_tiers: tuple[int, ...] | None = None,
     maintenance_margin_rates: tuple[float, ...] | None = None,
     bracket_tiers: list[dict[str, Any]] | None = None,
-    forward_blend: float = 0.35,
     leverage_weights: tuple[float, ...] | None = None,
 ) -> LiquidationHeatmap | None:
-    """Backward-compatible heatmap builder — real events primary, forward overlay scaled."""
+    """Heatmap по РЕАЛЬНЫМ событиям ликвидации; forward-наложение живёт в build_liquidation_map.
+
+    Параметр `forward_blend` снят 2026-07-26 вместе с `_resolved_forward_confidence`: в теле этой
+    функции он не использовался НИКОГДА (она ставит `forward_confidence=1.0` — события реальные,
+    смешивать не с чем), а вызывающий исправно передавал в него `cfg.forward_blend_ratio`. Ручка
+    на уровне сигнатуры — тот же дефект, что фантомная ручка в конфиге; поймал vulture ровно
+    потому, что имя перестало маскироваться одноимённым параметром удалённой функции.
+    """
     if current_price <= 0:
         return None
     mm_rates = maintenance_margin_rates
@@ -817,7 +810,6 @@ def build_liquidation_map(
         leverage_tiers=lev_tiers,
         maintenance_margin_rates=mm_rates,
         bracket_tiers=bracket_tiers,
-        forward_blend=cfg.forward_blend_ratio,
         leverage_weights=cfg.leverage_weights,
     )
 
@@ -875,7 +867,7 @@ def build_liquidation_map(
             price_min=fwd_price_min,
             bucket_size=fwd_bucket_size,
             n_buckets=cfg.liq_n_buckets,
-            forward_confidence=_resolved_forward_confidence(symbol, event_count=0, forward_blend=cfg.forward_blend_ratio),
+            forward_confidence=cfg.forward_blend_ratio,
             realized_events=0,
             zone_source="forward_only",
         )

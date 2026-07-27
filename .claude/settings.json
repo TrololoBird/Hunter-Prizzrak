@@ -19,7 +19,17 @@
       "Bash(git log*)",
       "Bash(git add*)",
       "Bash(git restore*)",
-      "Bash(git reset*)"
+      "Bash(git reset*)",
+      "Bash(git show*)",
+      "Bash(git stash list*)",
+      "Bash(git blame*)",
+      "Bash(rg *)",
+      "Bash(ls *)",
+      "Bash(wc *)",
+      "Bash(jq *)",
+      "Bash(uv tree*)",
+      "Bash(.venv/bin/python -m vulture*)",
+      "Bash(.venv/bin/pre-commit*)"
     ]
   },
   "hooks": {

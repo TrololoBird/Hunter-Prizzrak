@@ -108,7 +108,7 @@ def squeeze_blocks_predump_short(row: dict[str, Any]) -> bool:
 def _squeeze_blocks_predump(row: dict[str, Any]) -> bool:
     """Buildix-style squeeze checklist — blocks predump when crowded shorts + neg funding."""
     market = dict_field(row, "market")
-    funding = _f(row, "market.funding_rate", "market.live_funding_rate")
+    funding = _f(row, "market.funding_rate")  # `live_funding_rate` — сирота с 5ba0fea, снята 2026-07-26
     oi_regime = oi_regime_from_row(row)
     taker = _f(row, "market.taker_5m", "market.taker_15m", default=1.0)
     checks = 0
@@ -182,16 +182,32 @@ def evaluate_manipulation_fusion(row: dict[str, Any]) -> ManipulationAssessment:
     market = dict_field(row, "market")
     oi_regime = oi_regime_from_row(row)
     price = float(row.get("price") or 0)
-    leg_gain = _f(row, "lifecycle.leg_gain_pct", default=0.0)
-    if leg_gain <= 0:
-        session = dict_field(row, "session")
-        leg_gain = float(session.get("leg_gain_pct") or 0)
 
     factors: list[FactorHit] = []
     checks: dict[str, bool] = {}
     check_sources: dict[str, str] = {}
 
-    _MAX_PREDUMP = 6.0
+    # ⚠ ЗНАМЕНАТЕЛЬ ИСПРАВЛЕН 6.0 → 4.0 (2026-07-26). Это не подстройка, а починка шкалы.
+    #
+    # Из шести номинальных факторов predump два не могли сработать НИ РАЗУ:
+    #   • `sweep_reclaim` читал `row["structure"]["choch_detected"|"break_confirmed"]`, а
+    #     единственный вызывающий (`runtime/native_assembly.py`) не передаёт `structure=` вовсе,
+    #     так что `manipulation_fusion_native` кладёт туда `{}` навсегда;
+    #   • `leg_gain` читал `lifecycle.leg_gain_pct` (та же причина) и `session["leg_gain_pct"]`,
+    #     которого `native_producers.session_stats_native` не отдаёт — он отдаёт ровно
+    #     high_24h / low_24h / range_pct_24h / pos_in_range / bars_1m_used.
+    # То есть счёт делился на 6 при потолке 4: `score_predump` физически не мог превысить 66.7,
+    # и любой порог, откалиброванный поверх, калибровался на систематически ЗАНИЖЕННОМ числе.
+    # Знаменатель, считающий факторы, которые не могут сработать, — это не консерватизм, а ошибка.
+    #
+    # ⚠ Правка МЕНЯЕТ ЧИСЛА: те же 4 попадания теперь дают 100, а не 66.7. `pass_count`
+    # журналируется (`track/outcome_ledger.py`), поэтому прогоны до и после сравнимы — но пороги
+    # полосы манипуляций поверх новой шкалы надо перемерить, а не переносить.
+    #
+    # Воскрешать факторы можно ТОЛЬКО с настоящим продюсером: `prizrak/pipeline/structure.py`
+    # пишет ДРУГОЙ словарь (`bos_up`/`bos_down`/`choch_bull`/`choch_bear`), поэтому нужен
+    # адаптер, а не переименование ключа.
+    _MAX_PREDUMP = 4.0
     _MAX_COIL = 7.0
     _MAX_IGNITION = 5.0
 
@@ -226,21 +242,10 @@ def evaluate_manipulation_fusion(row: dict[str, Any]) -> ManipulationAssessment:
     if _apply_check(checks, check_sources, "bear_cvd_div", cvd == "bearish_div", "markettrace"):
         predump += 1.0
         factors.append(FactorHit("D6", "bear_cvd_div", True, 1.0, "markettrace"))
-    struct = dict_field(row, "structure")
-    if _apply_check(
-        checks,
-        check_sources,
-        "sweep_reclaim",
-        bool(struct.get("choch_detected") or struct.get("break_confirmed")),
-        "smc",
-    ):
-        predump += 1.0
-        factors.append(FactorHit("D10", "sweep_reclaim", True, 1.0, "smc"))
+    # `sweep_reclaim` (row["structure"]) и `leg_gain` (lifecycle/session) сняты — см. NB у
+    # `_MAX_PREDUMP`: оба читали ключи, которых ни один продюсер не пишет.
     squeeze_block = _squeeze_blocks_predump(row)
     _apply_check(checks, check_sources, "anti_squeeze", not squeeze_block, "buildix")
-    if leg_gain >= 40.0:
-        predump += 1.0
-        factors.append(FactorHit("D3", "leg_gain", leg_gain, 1.0, "session"))
 
     # --- coil domain ---
     coil = 0.0
@@ -277,7 +282,7 @@ def evaluate_manipulation_fusion(row: dict[str, Any]) -> ManipulationAssessment:
 
     # --- ignition domain ---
     ignition = 0.0
-    funding = _f(row, "market.funding_rate", "market.live_funding_rate")
+    funding = _f(row, "market.funding_rate")  # `live_funding_rate` — сирота с 5ba0fea, снята 2026-07-26
     if _apply_check(checks, check_sources, "neg_funding", funding < -0.0001, "buildix"):
         ignition += 1.0
         factors.append(FactorHit("D8", "neg_funding", funding, 1.0, "buildix"))

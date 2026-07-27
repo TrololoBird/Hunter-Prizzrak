@@ -293,15 +293,12 @@ def build_mtf_confluence(
     else:
         dominant = "neutral"
 
-    if row is not None:
-        _dump = row.get("dump")
-        dump = _dump if isinstance(_dump, dict) else {}
-        _long_setup = row.get("long")
-        long_setup = _long_setup if isinstance(_long_setup, dict) else {}
-        short_ok = dump.get("levels_viable") is not False
-        long_ok = long_setup.get("levels_viable") is not False
-        if not short_ok or not long_ok:
-            dominant = "neutral"
+    # Здесь стояло гашение доминанты в `neutral`, если у `row["dump"]`/`row["long"]` был
+    # `levels_viable is False`. Снято 2026-07-26: писателя у ключа нет с чистки `levels/levels.py`
+    # (1575→92 строки), поэтому `is not False` было константой True и ветка не исполнялась ни
+    # разу. Тот же ключ убран из гео-вето `deliver/geometry.py` — это был один и тот же продюсер.
+    # Сам параметр `row` ЖИВОЙ и остаётся: выше из него читаются `structure` и `liquidity_pools`
+    # для структурных целей (строки 229/233/249/258).
 
     return MTFConfluence(
         symbol=symbol,

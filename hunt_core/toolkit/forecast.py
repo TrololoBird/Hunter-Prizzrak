@@ -122,9 +122,8 @@ def build_ignition_forecast(row: dict[str, Any]) -> dict[str, Any] | None:
 
     # is-None fallthrough: funding of exactly 0.0 is a real, common reading (flat), and
     # `or` discarded it in favour of the other source.
+    # `live_funding_rate` снят 2026-07-26 — сирота с `5ba0fea` (писал легаси-стрим).
     funding = market.get("funding_rate")
-    if funding is None:
-        funding = market.get("live_funding_rate")
     if funding is not None and float(funding) < -0.0001:
         factors.append("neg_funding")
     if market.get("map_cvd_divergence") == "bullish_div":

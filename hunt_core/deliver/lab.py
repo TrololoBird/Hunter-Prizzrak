@@ -1,49 +1,33 @@
-"""Lab vs production delivery lane routing (E1)."""
+"""Доставка: одна полоса — продакшн. Лаб-полоса снесена как НЕВЫБИРАЕМАЯ (2026-07-26).
+
+Что здесь было. ``is_lab_delivery`` решала, уйдёт ли сетап в отдельный лаб-чат и в отдельный
+леджер (``LAB_LEDGER_PATH``). Решение принималось по шести ключам — и ни у одного из шести нет
+продюсера во всём дереве:
+
+* ``ev_primary`` / ``ev_bootstrap`` — писал ``setups_catalog._ev_bootstrap_deliver_enabled`` из
+  удалённого модуля (сегодня имя выживает только в устаревшем ``graphify-out/graph.json``, и это
+  НЕ доказательство писателя); плюс вся ветка была за env ``HUNT_EV_BOOTSTRAP`` (по умолчанию 0);
+* ``long_ramp_reason``, ``delivery_lane`` — ни одной записи в ``hunt_core``, тестах, скриптах,
+  конфиге и в живых ``data/*.jsonl``;
+* ``expansion`` / ``lab_alert`` — мертвы ВДВОЙНЕ: пакет ``hunt_core/expansion/`` удалён, а оба
+  вызывающих передавали ``row=None``, так что ветка не исполнялась в принципе.
+
+То есть маршрутизатор всегда возвращал ``production``, а дерево при этом рекламировало
+экспериментальную полосу доставки. Оставлять «на будущее» нечего: возвращать её нужно вместе с
+продюсером решения, и тогда это будет другой код. Вместе с полосой сняты ``lab_chat_id`` (env
+``TELEGRAM_LAB_CHAT_ID`` / ``HUNT_LAB_CHAT_ID`` — читались только отсюда), ``route_delivery_lane``,
+``is_lab_delivery`` и константа пути ``LAB_LEDGER_PATH``: читателей у неё нет, файла
+``data/hunt_lab_outcome_ledger.jsonl`` на диске не существует — ни одна запись туда не легла.
+"""
 from __future__ import annotations
 
-import os
 from typing import Any
 
 
-def lab_chat_id() -> str:
-    return (
-        os.environ.get("TELEGRAM_LAB_CHAT_ID", "").strip()
-        or os.environ.get("HUNT_LAB_CHAT_ID", "").strip()
-    )
-
-
-def is_lab_delivery(*, setup: dict[str, Any], row: dict[str, Any] | None = None) -> bool:
-    """Exploratory lane: EV bootstrap, catalog EV-primary, expansion advisory."""
-    if os.environ.get("HUNT_EV_BOOTSTRAP", "0").strip().lower() in {"1", "true", "yes"}:
-        if setup.get("ev_primary") or setup.get("ev_bootstrap"):
-            return True
-    if setup.get("long_ramp_reason"):
-        return True
-    if setup.get("delivery_lane") == "lab":
-        return True
-    row = row or {}
-    if str(row.get("delivery_lane") or "") == "lab":
-        return True
-    exp = row.get("expansion")
-    if isinstance(exp, dict) and exp.get("lab_alert"):
-        return True
-    return False
-
-
-def route_delivery_lane(
-    *,
-    setup: dict[str, Any],
-    row: dict[str, Any] | None = None,
-) -> str:
-    return "lab" if is_lab_delivery(setup=setup, row=row) else "production"
-
-
 def ledger_path_for_lane(*, setup: dict[str, Any] | None = None, row: dict[str, Any] | None = None):
-    from hunt_core.deliver.delivery_state import LAB_LEDGER_PATH
+    """Путь леджера. Всегда продакшн — сигнатура сохранена ради единственного вызывающего."""
     from hunt_core.track.outcome_ledger import LEDGER_PATH
 
-    if route_delivery_lane(setup=setup or {}, row=row) == "lab":
-        return LAB_LEDGER_PATH
     return LEDGER_PATH
 
 
@@ -55,11 +39,5 @@ async def send_lane_html(
     row: dict[str, Any] | None = None,
     **kwargs: Any,
 ) -> Any:
-    """Route Telegram HTML to lab or production chat."""
-    chat = lab_chat_id() if route_delivery_lane(setup=setup or {}, row=row) == "lab" else ""
-    if chat:
-        from hunt_core.deliver.telegram import TelegramBroadcaster
-
-        lab_bc = TelegramBroadcaster(broadcaster.token, chat)
-        return await lab_bc.send_html(text, **kwargs)
+    """Отправить HTML в продакшн-чат."""
     return await broadcaster.send_html(text, **kwargs)

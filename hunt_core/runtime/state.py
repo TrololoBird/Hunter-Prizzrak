@@ -169,11 +169,10 @@ def merge_hunt_extremes(
     elif phase:
         sess.last_phase = phase
 
-    mkt = market or {}
-    liq = mkt.get("liquidation_score_5m")
-    if liq is not None:
-        v = float(liq)
-        sess.ws_liq_min_5m = v if sess.ws_liq_min_5m is None else min(sess.ws_liq_min_5m, v)
+    # `ws_liq_min_5m` снят 2026-07-26. Питался ключом `market["liquidation_score_5m"]`, которого
+    # НЕ ПИШЕТ никто: настоящее значение живёт типизированным на `view.orderflow.liq_score_5m` и в
+    # словарь фич не проецируется. Поле было мертво с обеих сторон — не пополнялось и не читалось
+    # ни одним потребителем, только сериализовалось в чекпойнт как вечный null.
 
     save_session(sess)
     return round(rh, 6), round(rl, 6) if rl > 0 else round(rest_hunt_low, 6)

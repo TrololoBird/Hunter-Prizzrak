@@ -131,24 +131,8 @@ FULL_INDICATOR_COLUMNS: frozenset[str] = frozenset(
 
 REQUIRED_OHLCV: frozenset[str] = frozenset({"open", "high", "low", "close", "volume"})
 
-REQUIRED_REST_SCALAR_KEYS: tuple[str, ...] = (
-    "oi",
-    "oi_chg_5m",
-    "oi_chg_1h",
-    "ls_5m",
-    "ls_1h",
-    "top_ls_5m",
-    "top_ls_1h",
-    "global_ls_5m",
-    "global_ls_1h",
-    "taker_5m",
-    "taker_15m",
-    "taker_1h",
-    "funding",
-    "basis_5m",
-)
-
-REQUIRED_BOOK_KEYS: tuple[str, ...] = ("bid_price", "ask_price", "bid_qty", "ask_qty")
+# `REQUIRED_REST_SCALAR_KEYS` / `REQUIRED_BOOK_KEYS` сняты вместе с `audit_rest_pack`: они
+# описывали форму ЛЕГАСИ-пакета REST, которого с 2026-07-19 не существует.
 
 # Minimum market derivatives for hot-lane delivery (fast / hot snapshot tiers).
 DELIVERY_MARKET_KEYS_FAST: tuple[str, ...] = (
@@ -174,7 +158,9 @@ DELIVERY_MARKET_KEYS_FULL: tuple[str, ...] = DELIVERY_MARKET_KEYS_FAST + (
 )
 
 _DELIVERY_KEY_ALIASES: dict[str, tuple[str, ...]] = {
-    "funding": ("funding", "funding_rate", "live_funding_rate", "funding_live"),
+    # `live_funding_rate` / `funding_live` сняты 2026-07-26: их писал легаси-стрим, удалённый
+    # в `5ba0fea`. Алиас без продюсера не «подстраховывает», а маскирует отсутствие поля.
+    "funding": ("funding", "funding_rate"),
     "basis_5m": ("basis_5m", "basis_pct", "basis_bps"),
     "ls_1h": ("ls_1h", "global_ls_1h"),
 }
@@ -513,60 +499,10 @@ def audit_prepared_indicators(
     return violations
 
 
-def audit_rest_pack(pack: dict[str, Any], *, symbol: str) -> list[str]:
-    violations: list[str] = []
-    for key in REQUIRED_REST_SCALAR_KEYS:
-        val = pack.get(key)
-        if val is None:
-            violations.append(f"rest.{key}=null")
-            continue
-        try:
-            if not math.isfinite(float(val)):
-                violations.append(f"rest.{key}=non_finite")
-        except (TypeError, ValueError):
-            violations.append(f"rest.{key}=not_numeric")
-
-    book = pack.get("book_depth")
-    if not isinstance(book, dict):
-        violations.append("rest.book_depth=missing")
-    else:
-        for key in REQUIRED_BOOK_KEYS:
-            if book.get(key) is None:
-                violations.append(f"rest.book.{key}=null")
-            else:
-                try:
-                    if not math.isfinite(float(book[key])):
-                        violations.append(f"rest.book.{key}=non_finite")
-                except (TypeError, ValueError):
-                    violations.append(f"rest.book.{key}=not_numeric")
-
-    agg = pack.get("agg_trades")
-    if agg is None:
-        violations.append("rest.agg_trades=null")
-    else:
-        delta = getattr(agg, "delta_ratio", None)
-        if delta is None or not math.isfinite(float(delta)):
-            violations.append("rest.agg_trades.delta_ratio=invalid")
-
-    for series_key in ("oi_series", "gls_series"):
-        series = pack.get(series_key)
-        if not isinstance(series, list) or len(series) < MIN_SERIES_LEN:
-            violations.append(f"rest.{series_key}.len<{MIN_SERIES_LEN}")
-            continue
-        for i, point in enumerate(series):
-            try:
-                if not math.isfinite(float(point)):
-                    violations.append(f"rest.{series_key}[{i}]=non_finite")
-                    break
-            except (TypeError, ValueError):
-                violations.append(f"rest.{series_key}[{i}]=not_numeric")
-                break
-
-    if violations:
-        violations.insert(0, f"rest_pack.{symbol}")
-    return violations
-
-
+# Снято 2026-07-26 как неисполнявшееся: `audit_beat_dump_tick` (ноль вызывающих во всём дереве)
+# и `audit_rest_pack`, чьим единственным вызывающим она и была. Внутри жила сирота `agg_trades` —
+# ключ пакета REST, который ADR-0004 заменил на `view.orderflow`; писателя у него нет с
+# переписывания транспорта, так что ветка `rest.agg_trades=null` не исполнялась ни разу.
 def audit_ticker(ticker: dict[str, Any] | None, *, symbol: str) -> list[str]:
     if ticker is None:
         return [f"ticker.{symbol}=missing"]
@@ -582,81 +518,6 @@ def audit_ticker(ticker: dict[str, Any] | None, *, symbol: str) -> list[str]:
             except (TypeError, ValueError):
                 violations.append(f"ticker.{key}=not_numeric")
     return violations
-
-
-def audit_beat_dump_tick(
-    *,
-    symbol: str,
-    ticker: dict[str, Any] | None,
-    kline_map: dict[str, Any],
-    prepared_map: dict[str, Any],
-    pack: dict[str, Any],
-    settings: BotSettings,
-    tf_keys: tuple[str, ...],
-) -> CompletenessReport:
-    violations: list[str] = []
-    violations.extend(audit_ticker(ticker, symbol=symbol))
-    violations.extend(audit_rest_pack(pack, symbol=symbol))
-
-    from hunt_core.features.prepare_columns import expected_indicator_columns_for_symbol
-
-    expected_cols = expected_indicator_columns_for_symbol(symbol, full_columns=FULL_INDICATOR_COLUMNS)
-
-    raw_min = raw_frame_minimums(settings)
-    prep_min = effective_prepared_minimums(settings)
-    raw_min.setdefault("1m", 300)
-    raw_min.setdefault("3m", 200)
-    prep_min.setdefault("1m", 100)
-    prep_min.setdefault("3m", 80)
-
-    frame_rows: dict[str, int] = {}
-    indicator_counts: dict[str, int] = {}
-
-    for tf in tf_keys:
-        raw = kline_map.get(tf)
-        prep = prepared_map.get(tf)
-        frame_rows[tf] = int(raw.height) if raw is not None and not raw.is_empty() else 0
-        violations.extend(
-            audit_kline_frame(
-                raw,
-                tf=tf,
-                symbol=symbol,
-                min_raw_bars=int(raw_min.get(tf, raw_min.get("5m", 100))),
-                min_prepared_bars=int(prep_min.get(tf, prep_min.get("5m", 80))),
-            )
-        )
-        for bar_label, idx in (("live", -1), ("closed", -2)):
-            if prep is None or prep.is_empty():
-                violations.append(f"indicators.{tf}.{bar_label}.no_prepared_frame")
-                continue
-            if bar_label == "closed" and prep.height < 2:
-                violations.append(f"indicators.{tf}.closed_bar_unavailable")
-                continue
-            ind_v = audit_prepared_indicators(
-                prep,
-                tf=tf,
-                bar_label=bar_label,
-                idx=idx,
-                expected_columns=expected_cols,
-            )
-            violations.extend(ind_v)
-        if prep is not None and not prep.is_empty():
-            indicator_counts[tf] = len(expected_cols)
-
-    if violations:
-        return CompletenessReport.fail(
-            violations,
-            symbol=symbol,
-            frame_rows=frame_rows,
-            indicator_columns_expected=len(expected_cols),
-            indicator_counts=indicator_counts,
-        )
-    return CompletenessReport.ok(
-        symbol=symbol,
-        frame_rows=frame_rows,
-        indicator_columns=len(expected_cols),
-        indicator_counts=indicator_counts,
-    )
 
 
 def _kline_time_column(df: Any) -> str | None:

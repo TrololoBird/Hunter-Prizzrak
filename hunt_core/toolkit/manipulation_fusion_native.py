@@ -8,7 +8,7 @@ input with no typed source yet is an explicit ``None``-default parameter, and ``
 dependent check inert rather than fabricating a value.
 
 Fusion is display/journal-only — no emission gate reads it — so the not-yet-typed inputs
-(``lifecycle``/``structure``, OI %-change) degrade the fusion score honestly without affecting any
+(``lifecycle``, OI %-change) degrade the fusion score honestly without affecting any
 delivered signal. Wiring typed producers for those is a tracked follow-up, not an emission risk.
 """
 from __future__ import annotations
@@ -35,7 +35,6 @@ def compute_manipulation_fusion_native(
     features: FeaturePanel,
     maps: MapBundle | None,
     *,
-    structure: Mapping[str, Any] | None = None,
     lifecycle: Mapping[str, Any] | None = None,
     session: Mapping[str, Any] | None = None,
     oi_change_pct: float | None = None,
@@ -55,7 +54,6 @@ def compute_manipulation_fusion_native(
             pre-break checks.
         maps: Per-tick :class:`MapBundle` (or ``None``) — source of every ``map_*``/``liq_*`` scalar
             via ``derive_map_features``.
-        structure: ``choch_detected`` / ``break_confirmed`` sub-dict (gap: not on ``FeaturePanel``).
         lifecycle: ``phase`` / ``phase_fusion`` / ``leg_gain_pct`` (gap: no typed lifecycle model).
         session: ``pos_in_range`` / ``leg_gain_pct`` etc. from ``session_stats_native``.
         oi_change_pct: OI %-change for ``oi_regime_from_row`` (gap). ``None`` → regime ``"unknown"``.
@@ -95,7 +93,6 @@ def compute_manipulation_fusion_native(
         "price": price,
         "market": market,
         "timeframes": timeframes,
-        "structure": dict(structure or {}),
         "lifecycle": dict(lifecycle or {}),
         "session": dict(session or {}),
     }
