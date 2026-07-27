@@ -29,6 +29,7 @@ from __future__ import annotations
 from contextvars import ContextVar
 from typing import Any, Literal
 
+from hunt_core.contract import price_in_entry_zone
 from hunt_core.prizrak.invalidation import build_invalidation
 from hunt_core.prizrak.accumulation import _CLUSTER_TOL, _overlaps, find_accumulation_zone, find_accumulation_zones
 from hunt_core.toolkit.level_band import level_band_from_ohlcv
@@ -1538,7 +1539,34 @@ def _zone_edge_candidate(
     )
     if summary is None:
         return None
-    summary["activation"] = "in_entry_zone"
+    # ⚠ АКТИВАЦИЯ ПРОВЕРЯЕТСЯ, А НЕ ОБЪЯВЛЯЕТСЯ. Здесь стояло безусловное
+    # `summary["activation"] = "in_entry_zone"`, тогда как гейт выше пускает цену на
+    # `_ZONE_EDGE_BAND` = 35% вглубь бокса, а регистрируемая полоса — всего `entry ± 0.2%`
+    # (`_ENTRY_BAND_PCT`). Лонг ловится от `lo`, но цена может стоять у `lo + 0.35 × ширина`.
+    #
+    # Чем это оборачивалось: `runtime/emitter.py` переводит `activation == "in_entry_zone"` в
+    # `delivery_tier = "triggered"`, трекер засевает экстремумы ЦЕНОЙ и считает PnL от кромки
+    # полосы — вся разница мгновенно становится MFE. При `accumulation_max_width_pct = 12.0`
+    # это до **~4.0% на тике регистрации** против порога взвода трейла `min_trail_mfe_pct`
+    # 2.5, то есть трейл мог взводиться сразу.
+    #
+    # Проверка — общий контракт `price_in_entry_zone` по ТОЙ ЖЕ полосе, которая уйдёт в
+    # регистрацию. Соседняя ветка `_zone_candidate` эту дисциплину соблюдала всегда
+    # (`near = abs(price - catalyst)/catalyst <= _ENTRY_BAND_PCT`); кромочная — нет, хотя обе
+    # эмитируют один и тот же лимит от уровня.
+    #
+    # ⚠ Форма аргумента: контракт читает ключ `entry_zone`, а `_base_summary` кладёт
+    # `entry_lo`/`entry_hi`. Передать `summary` напрямую значило бы всегда получать False и
+    # тихо превратить кромочную ветку в вечный `near_entry` — отказ в другую сторону, но
+    # такой же молчаливый.
+    summary["activation"] = (
+        "in_entry_zone"
+        if price_in_entry_zone(
+            {"entry_zone": [summary["entry_lo"], summary["entry_hi"]]},
+            price=price, direction=direction,
+        )
+        else "near_entry"
+    )
     result = _apply_confluence(
         summary, ohlcv=ohlcv,
         cfg=cfg, htf_bias=htf_bias, struct_by_tier=struct_by_tier,
