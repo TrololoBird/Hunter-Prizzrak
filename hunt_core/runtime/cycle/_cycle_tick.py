@@ -368,8 +368,24 @@ async def run_tick(
         # Ticker safety net: symbols rotated out of this tick's batch still get SL/TP extremes from
         # the already-fetched 24h ticker (universe rotation gap — MEGA @ SL while last_checked froze).
         seen = set(symbols)
+        # ⚠ СЕТЬ СЧИТАЕТСЯ ОТ ПРОВЕРЕННЫХ, А НЕ ОТ ПЕРЕДАННЫХ. Тик обрабатывает только ПРОГРЕТЫЕ
+        # (`ordered` фильтрует по warm-set), а `seen` был всем переданным списком — поэтому символ,
+        # который есть в юниверсе, но не прогрет, выпадал из ОБЕИХ сетей сразу: тик его пропускал
+        # (нет во `warm`), а тикерная сеть — потому что он «уже виден» в `seen`.
+        #
+        # ЗАМЕР 2026-07-27 на живом состоянии: из 12 открытых сигналов только 2 (оба пиннед)
+        # проверялись; у остальных десяти `last_checked_at` отставал на 3.1–8.3 ч, причём у шести
+        # он в точности равен `opened_at` — то есть позицию проверили один раз при открытии и
+        # больше никогда. ENAUSDT при этом был в `watch_universe`, но не в warm-set из 7 символов.
+        # Прямой прогон `reconcile_active_from_ticker` по тому же состоянию обновил все 12 записей
+        # и выдал 2 события, одно из них `invalidate`, — то есть функция исправна, дыра была в
+        # гейте вызова. Открытая позиция, которую не мониторит ничто, — худшее, чем это могло
+        # кончиться, и молчаливо: ни ошибки, ни лога.
+        checked = {
+            s.upper() for s in ordered if settled.get(s, (None, None))[1] is not None
+        }
         active_syms = {sym for sym, _ in iter_active_tracker_symbols(tracker_state)}
-        missing_active = active_syms - seen
+        missing_active = active_syms - checked
         ticker_events: list[Any] = []
         if missing_active and ticker_by_sym:
             ticker_now = clock.now_utc()

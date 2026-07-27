@@ -341,15 +341,45 @@ def ema_series(df: pl.DataFrame, period: int) -> pl.Series:
 
 
 def rsi_series(df: pl.DataFrame, period: int = 14) -> pl.Series:
-    # clip to the oscillator's mathematical bound: a 1.0 backend value → 100.0 can
-    # carry float noise (100.0000001) that otherwise trips the [0,100] range-defect
-    # and rejects the whole symbol. Matches adx_from_polars_ta / mfi_from_polars_ta.
-    return _series_from_expr(
+    """RSI по Уайлдеру; на НЕПОДВИЖНОМ окне возвращает ``null``, а не 0.
+
+    ⚠ ГАРД НА ВЫРОЖДЕНИЕ. При нулевом среднем изменении RSI не определён — это 0/0, — а
+    `polars_ta` отдаёт на таком ряде **0.0** (замер 2026-07-27: сорок одинаковых закрытий →
+    сырое значение 0.0 у бэкенда, не у нашей обёртки). Ноль читается любым потребителем с
+    порогом перепроданности как «предельная перепроданность», то есть неподвижная цена
+    выглядит сильнейшим сигналом на покупку. Ровно тот класс, против которого стоит I-6:
+    отсутствие данных обязано выглядеть отсутствием, а не крайним значением шкалы.
+
+    Реалистичность: идеально плоское 14-баровое окно на ликвидном перпе редкость, но на
+    неликвиде и — что важнее — на ЗАМЕРШЕМ кадре оно штатно. Замерший кадр здесь самый
+    дорогой класс инцидентов, и «замер + предельная перепроданность» — худшее сочетание.
+
+    Эпсилон бэкенда НЕ трогаем: на монотонном росте он даёт 99.99999894 вместо ровно 100
+    (то же измерение). Величина косметическая, ни один порог в дереве её не различает, а
+    округление внесло бы собственную ошибку. Зафиксировано, чтобы не искали заново.
+    """
+    rsi = _series_from_expr(
         df,
         plta.RSI(pl.col("close"), timeperiod=int(period)),
         name=f"rsi{period}",
         percent=True,
         clip=(0.0, 100.0),
+    )
+    if df.is_empty() or "close" not in df.columns:
+        return rsi
+    moved = (
+        df.select(
+            pl.col("close").diff().abs().rolling_sum(int(period), min_samples=int(period))
+            .alias("m")
+        )["m"]
+    )
+    return pl.Series(
+        rsi.name,
+        [
+            None if (mv is not None and mv <= 0.0) else v
+            for v, mv in zip(rsi.to_list(), moved.to_list(), strict=False)
+        ],
+        dtype=pl.Float64,
     )
 
 
