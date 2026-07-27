@@ -96,7 +96,9 @@ def compute_opportunity_score(summary: dict[str, Any], *, activation_state: str 
     frag = float(summary.get("fragility") or 0)
     tq = str(summary.get("trade_quality") or "marginal")
     tq_score = {"favorable": 1.0, "marginal": 0.55, "poor": 0.25}.get(tq, 0.4)
-    # geometry_confidence ±0.03 nudge: strong geometry boosts, poor geometry penalises.
+    # geometry_confidence ±0.03 nudge. ⚠ Это ПРИОР по виду сетапа, а не замер геометрии —
+    # все его записи литеральные (см. orchestrator.py, где поле засевается). Как приор он
+    # осмыслен, но не наращивать на нём выводы так, будто под ним измерение.
     gc = float(summary.get("geometry_confidence") or 0)
     geo_adj = (gc - 0.5) * 0.06 if gc > 0 else 0.0
     score = strength * 0.45 + rr_norm * 0.22 + (1.0 - frag) * 0.18 + tq_score * 0.15 + geo_adj

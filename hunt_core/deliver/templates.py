@@ -194,25 +194,3 @@ def format_followup_telegram_message(followup: Any, row: dict[str, Any]) -> str:
     return _fmt(followup, row)
 
 
-def format_setup_lines_for_probe(
-    row: dict[str, Any],
-    setup: dict[str, Any],
-    *,
-    direction: str,
-    tf: dict[str, Any],
-    pos: dict[str, Any],
-    price: float,
-) -> list[str]:
-    """Re-export for /signal probe — canonical body in deliver.telegram."""
-    from hunt_core.deliver.telegram import format_setup_lines as _fmt
-
-    return _fmt(row, setup, direction=direction, tf=tf, pos=pos, price=price)
-
-
-__all__ = [
-    "format_advisory_early",
-    "format_followup_telegram_message",
-    "format_pinned_summary",
-    "format_setup_lines_for_probe",
-    "format_squeeze_telegram",
-]

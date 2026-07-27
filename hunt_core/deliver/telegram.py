@@ -922,56 +922,6 @@ def format_squeeze_telegram(row: dict[str, Any]) -> str:
     return _format_squeeze_telegram(row)
 
 
-def format_setup_lines(
-    row: dict[str, Any],
-    setup: dict[str, Any],
-    *,
-    direction: str,
-    tf: dict[str, Any],
-    pos: dict[str, Any],
-    price: float,
-) -> list[str]:
-    # Formatter now lives in deliver (was runtime/cycle/_cycle_format — a deliver→runtime
-    # inversion, and in fact a deliver→runtime→deliver cycle since it imports from here).
-    from hunt_core.deliver._setup_lines import _format_setup_lines
-
-    return _format_setup_lines(
-        row,
-        setup,
-        direction=direction,
-        tf=tf,
-        pos=pos,
-        price=price,
-    )
-
-
-from hunt_core.deliver._context_lines import (
-    structured_thesis_lines as _structured_thesis_lines,
-)
-
-
-
-def _format_structured_thesis(
-    setup: dict[str, Any],
-    *,
-    direction: str,
-    lc_phase: str,
-    confirm_reasons: list[str],
-    entry_mid: float,
-) -> tuple[list[str], str]:
-    return _structured_thesis_lines(
-        setup,
-        direction=direction,
-        lc_phase=lc_phase,
-        confirm_reasons=confirm_reasons,
-        entry_mid_px=entry_mid,
-    )
-
-
-
-
-
-
 def split_telegram(text: str, *, limit: int = 3900) -> list[str]:
     return _split_telegram_text(text, limit=limit)
 
@@ -1007,7 +957,6 @@ __all__ = (
     "build_message_broadcaster",
     "fmt_price",
     "format_followup_telegram",
-    "format_setup_lines",
     "format_squeeze_telegram",
     "format_symbol_telegram",
     "phase_badge",

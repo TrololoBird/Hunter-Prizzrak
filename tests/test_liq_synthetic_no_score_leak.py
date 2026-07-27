@@ -1,5 +1,10 @@
 """Synthetic liq magnets must not shift scores, votes, forecasts or targets.
 
+Два теста на ``deliver/_context_lines.py::format_liq_magnet_line`` удалены 2026-07-26 вместе с
+самим модулем: он оказался достижим ТОЛЬКО из этого файла — прод в него не заходил (осиротел
+после удаления мёртвой цепочки ``_setup_lines``). Правило, которое они пиннили, продолжают
+держать одиннадцать тестов ниже, на живых потребителях.
+
 ``heatmap_to_market_dict`` publishes ``liq_heatmap_nearest_long/short`` and
 ``liq_heatmap_clusters`` UNCONDITIONALLY — including the forward-only /
 entry-anchored leverage-tier ESTIMATE produced when there are no realized events.
@@ -16,7 +21,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from hunt_core.deliver._context_lines import format_liq_magnet_line
 from hunt_core.maps.liquidation import (
     liq_is_synthetic,
     realized_liq_clusters,
@@ -118,15 +122,3 @@ def test_fusion_short_liq_check_is_false_when_synthetic() -> None:
 
 
 # --- display-only consumer keeps showing the estimate, but LABELS it -------------
-
-def test_context_line_labels_synthetic_estimate() -> None:
-    row = {"price": _PRICE, "market": _market(synthetic=True)}
-    line = format_liq_magnet_line(row, direction="long", price=_PRICE)
-    assert "62" in line          # the estimate is still shown...
-    assert "оценка" in line      # ...but explicitly labelled as one
-
-
-def test_context_line_has_no_label_when_realized() -> None:
-    row = {"price": _PRICE, "market": _market(synthetic=False)}
-    line = format_liq_magnet_line(row, direction="long", price=_PRICE)
-    assert "оценка" not in line

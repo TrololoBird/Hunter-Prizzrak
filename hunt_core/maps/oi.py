@@ -176,24 +176,18 @@ def oi_regime_from_row(row: dict[str, Any]) -> OiRegime:
     """Resolve regime from materialized row market/session fields."""
     market_raw = row.get("market")
     market: dict[str, Any] = market_raw if isinstance(market_raw, dict) else {}
-    session_raw = row.get("session")
-    session: dict[str, Any] = session_raw if isinstance(session_raw, dict) else {}
-    # is-None fallthrough (NOT `or`): a legit 0.0 (OI/price flat) is a valid reading,
-    # not "missing". `or`-chaining skipped 0.0 to the next field — often a DIFFERENT
-    # window — so a flat-OI/flat-price bar (true "coiling") mislabeled as unknown or
-    # borrowed a 24h move it never had.
-    def _first_present(*vals: Any) -> Any:
-        for v in vals:
-            if v is not None:
-                return v
-        return None
-
-    oi_d = _first_present(
-        market.get("oi_change_pct"), market.get("oi_delta_pct"), session.get("oi_change_pct")
-    )
-    px_d = _first_present(
-        market.get("price_change_pct"), row.get("chg_24h_pct"), session.get("change_24h_pct")
-    )
+    # Чтение остаётся прямым (`.get`, не `or`): законный 0.0 — «OI/цена плоские» — это ИЗМЕРЕНИЕ,
+    # а не «нет данных». `or`-цепочка когда-то проскакивала такой ноль к следующему полю (часто с
+    # ДРУГИМ окном), из-за чего честно поджатый бар получал чужое суточное движение.
+    # Фантомные запасные ключи удалены 2026-07-26. `oi_delta_pct` и `chg_24h_pct` не пишет
+    # НИКТО во всём hunt_core; `session["oi_change_pct"]` и `session["change_24h_pct"]` не входят
+    # в восемь ключей, которые отдаёт единственный продюсер сессии
+    # (`runtime/native_producers.py::session_stats_native`: high_24h, low_24h, range_pct_24h,
+    # pos_in_range, bars_1m_used, as_of, tick_age_s, dom_age_s). Четыре запасных варианта из шести
+    # были декорацией: цепочка выглядела устойчивой, а держалась на одном источнике — который до
+    # 2026-07-26 тоже не заполнялся, из-за чего КАЖДЫЙ символ получал режим "unknown".
+    oi_d = market.get("oi_change_pct")
+    px_d = market.get("price_change_pct")
     try:
         oi_f = float(oi_d) if oi_d is not None else None
     except (TypeError, ValueError):
