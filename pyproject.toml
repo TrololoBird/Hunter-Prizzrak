@@ -16,15 +16,23 @@ authors = [{ name = "Crypto Signal Bot" }]
 dependencies = [
     "orjson>=3.10",
     "python-dotenv>=1.2.2",
-    # Polars-plugin floors = the exact versions the 500+-test suite (incl.
-    # tests/test_indicator_reference_values.py
-    # canaries) is validated against. These plugins drift APIs without semver
-    # discipline (precedent: polars_ols went to positional `features` args +
-    # mode="coefficients"; ccxt fstream split) — do NOT lower the floors, and
-    # re-run the canaries when bumping.
+    # Polars-plugin floors. These plugins drift APIs without semver discipline
+    # (precedent: polars_ols went to positional `features` args + mode="coefficients";
+    # ccxt fstream split) — do NOT lower the floors. Проверка после бампа —
+    # `scripts/verify_talib_parity.py` на ЖИВЫХ кадрах; прежняя редакция этого
+    # комментария ссылалась на tests/test_indicator_reference_values.py и «500+ тестов»,
+    # а каталог tests/ удалён 2026-07-27 (см. CLAUDE.md).
     "polars>=1.42.1",
     "polars-ols>=0.3.5",   # compute_(rolling_)least_squares positional exprs, mode=, RollingKwargs(null_policy=)
-    "polars_ta>=0.5.17",   # polars_ta.ta/.tdx/.wq surfaces used by features/polars_ta_bridge.py
+    "polars_ta>=0.5.17",   # ТОЛЬКО .tdx/.wq — сурфейсы без канонического аналога в TA-Lib (KDJ/PSY/BIAS/EMV/DPO/BOLL, ts_rank/ts_delta/ts_corr)
+    # polars-talib = ВЕНДОРЕННАЯ TA-Lib 0.4.0, битовая совместимость, внешняя C-библиотека
+    # НЕ нужна, зависит только от polars (ни pandas, ни numpy — проверено установкой).
+    # Причина появления: polars_ta НАМЕРЕННО переосмысляет TA-Lib, и каждая ручная заплатка
+    # в features/polars_ta_bridge.py компенсировала это расхождение. Замер 2026-07-27 на
+    # 27 живых кадрах: ADX расходился на 100% баров (max |Δ| 85.8), Aroon на 20-22%
+    # (инверсия до 100 пунктов), RSI до 28.3 пункта на дешёвых монетах.
+    # Разбор: docs/audit/talib-parity-2026-07-27.md
+    "polars-talib>=0.1.6",
     "polars-ds>=0.12.0",   # query_entropy / ks_2samp exprs used by features/research_plugins.py
     "numpy>=2.4.6,<2.5",  # ceiling: numba (transitive via polars-ta) requires numpy<2.5 on py3.14; 2.5 forces a numba/llvmlite downgrade that fails to build
     "aiohttp>=3.13.5,<4",

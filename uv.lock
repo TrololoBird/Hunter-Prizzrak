@@ -337,6 +337,7 @@ dependencies = [
     { name = "polars-ds" },
     { name = "polars-ols" },
     { name = "polars-ta" },
+    { name = "polars-talib" },
     { name = "prometheus-client" },
     { name = "pydantic" },
     { name = "python-dotenv" },
@@ -384,6 +385,7 @@ requires-dist = [
     { name = "polars-ds", specifier = ">=0.12.0" },
     { name = "polars-ols", specifier = ">=0.3.5" },
     { name = "polars-ta", specifier = ">=0.5.17" },
+    { name = "polars-talib", specifier = ">=0.1.6" },
     { name = "prometheus-async", marker = "extra == 'monitoring'", specifier = ">=26.0" },
     { name = "prometheus-client", specifier = ">=0.25.0" },
     { name = "prometheus-client", marker = "extra == 'monitoring'", specifier = ">=0.25" },
@@ -1005,6 +1007,22 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/f4/56/1ea48f0f06fbdd42ff1ac32369bcbb5c257875f00108b88eb56d4e35a992/polars_ta-0.5.17.tar.gz", hash = "sha256:f0dbb4a66949fecc7e92b6103adc0b0b18b9bb3d8aabaee87b7320e8872d2d08", size = 69749, upload-time = "2026-01-27T11:48:35.79Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/88/5b/e671b74d0b4dfcd74c5433ef3eb7e79ecf6651f24a0e56484b532f6a61d4/polars_ta-0.5.17-py3-none-any.whl", hash = "sha256:d73d21253c09422e3cb04ab1b96d5da0d0c52a6571a8d0a7e3cdecdb1d8271b8", size = 91409, upload-time = "2026-01-27T11:48:34.644Z" },
+]
+
+[[package]]
+name = "polars-talib"
+version = "0.1.6"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "polars" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e1/a6/c0fbf59ad74a2dfbbf61a6572d85a25bab904ee9a7513a341465177ae029/polars_talib-0.1.6-cp37-abi3-macosx_10_12_x86_64.whl", hash = "sha256:eaf46a637c0e303a3d34b8d4ac0c6a345bbe7f102ab62ae5777aa158b0f873d1", size = 3876398, upload-time = "2026-06-04T17:19:14.165Z" },
+    { url = "https://files.pythonhosted.org/packages/2d/15/ecd8b4668e0aaa492dc32828214c7c4555a5124982ea5618804432231f74/polars_talib-0.1.6-cp37-abi3-macosx_11_0_arm64.whl", hash = "sha256:d5a5d52a185b0ac79c7149edb469cac293de91d594f1b149ce9c4a9f48757ff4", size = 3639486, upload-time = "2026-06-04T17:19:15.554Z" },
+    { url = "https://files.pythonhosted.org/packages/78/62/9e3d3674c67180ca1a02c793ec750094987de489fecf12fb32063a16ebe9/polars_talib-0.1.6-cp37-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:f89c1b002637f4c4bb7a72a2886114ed6ec29f61d3db03209f49180e18add890", size = 4600821, upload-time = "2026-06-04T17:19:16.97Z" },
+    { url = "https://files.pythonhosted.org/packages/c0/48/6242fd7a1ca225c614bbe19e9636bc280798757319aee54193a2b98f0cbd/polars_talib-0.1.6-cp37-abi3-manylinux_2_34_aarch64.whl", hash = "sha256:206982668b13671f9122ed4c4f9fe513cc7a75245c021a7e143d0bc3bb9b7ba3", size = 4170174, upload-time = "2026-06-04T17:19:18.343Z" },
+    { url = "https://files.pythonhosted.org/packages/4d/75/2d72d3b9db8d8216bcf6aeb58f2b35ab4e495ed4c29741b9f227e4362294/polars_talib-0.1.6-cp37-abi3-win32.whl", hash = "sha256:79de9298c6597c947894fc3b71331b693fb6aaec5cec7de7b463336e20055d36", size = 3006192, upload-time = "2026-06-04T17:19:19.76Z" },
+    { url = "https://files.pythonhosted.org/packages/cb/5f/7ce7f57e5d2ad98ad3ef304d31942c86acd252d1ba8f76b882e71a15769d/polars_talib-0.1.6-cp37-abi3-win_amd64.whl", hash = "sha256:91dda59dbff6b73f9a5ce64c7f47d0a1ffad079e001a2f9c2b1fd40d3a6c6dd1", size = 3664412, upload-time = "2026-06-04T17:19:20.991Z" },
 ]
 
 [[package]]
