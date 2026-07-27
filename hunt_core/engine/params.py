@@ -77,7 +77,16 @@ FUTURES_DATA_SPACING_S: float = 1.2
 # --- Per-plane freshness bounds (Plane.read) ---
 FRESH_BBO_S: float = 5.0  # LIVE age 0.4s + DOC bookTicker real-time
 FRESH_DEPTH_S: float = 5.0  # LIVE age 0.4s, ttl_hint 5s
-FRESH_MARK_S: float = 15.0  # DOC markPrice 3s cadence × 5
+# DOC markPrice 3s cadence × 5.
+# ⚠ ЗАМЕР 2026-07-27 — та же пограничность, что у `_KLINE_EMISSION_LAG_S`, и по той же причине:
+# измеритель темпа даёт p90 интервала 16.0 с при бонде 15 с (32 точки), а ВОЗРАСТ плана — то,
+# что видят потребители — за бонд не выходил: 200 замеров, median 2.11 с, p95 5.68 с, max 13.17 с,
+# **0.0% за бондом**. Интервал ловит каждый разрыв, возраст сэмплируется тиком раз в ~30 с.
+# Разрывы объяснимы: подписка теперь посимвольная, и `watch_mark_prices` отдаёт ОДИН символ за
+# await, поэтому семь символов обновляются по кругу, а Polars-работа тика этот круг иногда
+# растягивает. Проверено, что это НЕ регрессия правки: до неё было median 1.76 с, max 17.62 с,
+# 0.1% за бондом — то есть хвост стал КОРОЧЕ, а не длиннее.
+FRESH_MARK_S: float = 15.0
 FRESH_TICKER_S: float = 10.0  # DOC miniTicker ~1s cadence × ~10 (24h rollup, not latency-critical)
 # ⚠ Это ПОЛ бонда планов позиционирования, а не сам бонд. Настоящий бонд считает
 # ``api.py::_poll_positioning`` от ИЗМЕРЕННОГО периода цикла (``max(POLL_S, время обхода)``
