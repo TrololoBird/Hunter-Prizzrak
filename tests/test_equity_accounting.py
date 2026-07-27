@@ -92,8 +92,8 @@ def test_cost_in_risk_units_grows_as_the_stop_tightens() -> None:
 
 def test_stop_market_exit_costs_more_than_a_limit_target() -> None:
     """Выход по рынку платит тейкера, лимитная цель — мейкера."""
-    stopped = cost_pct_of_notional(_row(reason="stop_hit"))
-    target = cost_pct_of_notional(_row(reason="tp2_hit"))
+    stopped, _ = cost_pct_of_notional(_row(reason="stop_hit"))
+    target, _ = cost_pct_of_notional(_row(reason="tp2_hit"))
     assert stopped > target
 
 
@@ -101,14 +101,42 @@ def test_partial_fix_splits_the_exit_fee() -> None:
     """Частичная фиксация на TP1 — ДВА выхода с разными тарифами, а не один."""
     plain = _row(reason="stop_hit")
     partial = _row(reason="stop_hit") | {"tp1_hit": True, "partial_fixed_pct": 80.0}
-    assert cost_pct_of_notional(partial) < cost_pct_of_notional(plain)
+    assert cost_pct_of_notional(partial)[0] < cost_pct_of_notional(plain)[0]
+
+
+def _with_funding(row: dict, rate: float = 0.0001) -> dict:
+    """Записать ИЗМЕРЕННУЮ ставку фандинга — иначе она и не должна начисляться."""
+    row["features_close"] = {"market": {"funding_rate": rate, "funding_interval_h": 8}}
+    return row
 
 
 def test_holding_longer_costs_funding() -> None:
     """Удержание не бесплатно: фандинг платится за каждый интервал."""
-    short_hold = cost_pct_of_notional(_row(hours=1.0))
-    long_hold = cost_pct_of_notional(_row(hours=72.0))
+    short_hold, _ = cost_pct_of_notional(_with_funding(_row(hours=1.0)))
+    long_hold, _ = cost_pct_of_notional(_with_funding(_row(hours=72.0)))
     assert long_hold > short_hold
+
+
+def test_unmeasured_funding_is_not_invented() -> None:
+    """Нет ставки — нет начисления, и издержка честно помечена НИЖНЕЙ ОЦЕНКОЙ.
+
+    Прежняя редакция подставляла медиану ненулевых ставок вместо любого нуля — то есть
+    выдумывала число поверх данных (I-6). Проверено: продюсер нулей не изобретает
+    (`_coerce_float(None)` → `None`), у всех 202 нулевых записей заполнены соседние
+    фандинг-поля, а на живой бирже ровно нулевую ставку имеют 29.6% символов.
+    """
+    cost, measured = cost_pct_of_notional(_row(hours=72.0))
+    assert measured is False, "отсутствие ставки выдано за измерение"
+    long_cost, _ = cost_pct_of_notional(_row(hours=1.0))
+    assert cost == long_cost, "неизмеренный фандинг всё же начислен за время удержания"
+
+
+def test_measured_zero_funding_stays_zero() -> None:
+    """Записанный НОЛЬ — это измерение, а не пропуск."""
+    cost_zero, measured = cost_pct_of_notional(_with_funding(_row(hours=72.0), rate=0.0))
+    assert measured is True, "настоящий нуль объявлен неизмеренным"
+    cost_real, _ = cost_pct_of_notional(_with_funding(_row(hours=72.0), rate=0.0001))
+    assert cost_real > cost_zero
 
 
 def test_unsizeable_stop_is_excluded_not_sized() -> None:

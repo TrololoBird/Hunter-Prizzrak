@@ -80,12 +80,21 @@ _TAKER_EXIT_REASONS = frozenset(
 # осторожности.
 _FALLBACK_SPREAD_BPS = 2.439
 
-# Медиана НЕНУЛЕВЫХ ставок фандинга — 0.005% за интервал (22 записи из 224).
-# ⚠ 90% строк несут ровно 0.0, и отличить «фандинг был нулевой» от «поле не заполнено»
-# по ним нельзя. Поэтому ноль трактуется как «не измерено» и заменяется этой медианой:
-# считать его настоящим нулём значило бы подарить портфелю бесплатное удержание (I-6 —
-# не выдумывать число, но и не выдавать пропуск за факт).
-_FALLBACK_FUNDING_PCT = 0.005
+# ⚠ ПОДСТАВНОЙ СТАВКИ ФАНДИНГА БОЛЬШЕ НЕТ — и это отмена моего же прежнего решения.
+#
+# Здесь стояла медиана ненулевых ставок (0.005% за интервал), которой заменялся ЛЮБОЙ ноль.
+# Обоснование было: «отличить настоящий нуль от незаполненного поля нельзя». Проверка это
+# опровергла:
+#   * `feature_engine._coerce_float(None)` возвращает `None`, а не `0.0` — продюсер нулей
+#     не изобретает, значит записанный `0.0` пришёл от движка;
+#   * у ВСЕХ 202 нулевых записей заполнены соседние фандинг-поля (`funding_zscore_48h`,
+#     `funding_interval_h`, `funding_trend`) — блок собирался целиком;
+#   * на живой бирже ровно нулевую ставку имеют 29.6% символов (252 из 851) — нуль штатен.
+# Записанный ноль — измерение. Заменять его медианой значило выдумывать число ПОВЕРХ данных.
+#
+# ⚠ Открытый вопрос, который правка НЕ закрывает: у нас нулей 90% против 29.6% на бирже —
+# втрое больше. Это подозрение на дефект продюсера, и мерить его надо отдельно. Подстановка
+# медианы как раз маскировала бы его.
 _DEFAULT_FUNDING_INTERVAL_H = 8.0
 
 # Ниже этого стоп неотличим от шума и означал бы фантастическое плечо: при 0.01% требуется
@@ -118,7 +127,9 @@ class CostModel(BaseModel):
     maker_fee_pct: float = Field(default=_MAKER_FEE_PCT, ge=0.0)
     taker_fee_pct: float = Field(default=_TAKER_FEE_PCT, ge=0.0)
     fallback_spread_bps: float = Field(default=_FALLBACK_SPREAD_BPS, ge=0.0)
-    fallback_funding_pct: float = Field(default=_FALLBACK_FUNDING_PCT, ge=0.0)
+    # ⚠ `fallback_funding_pct` УДАЛЁН, а не оставлен «на всякий случай». Он подставлял
+    # медиану вместо записанного нуля, то есть выдумывал число поверх измерения (I-6).
+    # Ручка без читателя — свой класс дефекта: она выглядит настройкой и ничего не меняет.
 
 
 class TradeAccounting(BaseModel):
@@ -200,25 +211,47 @@ def _exit_fee_pct(row: dict[str, Any], costs: CostModel) -> float:
     return final_fee
 
 
-def _funding_pct(row: dict[str, Any], costs: CostModel) -> float:
-    """Стоимость удержания за время жизни сделки, в процентах от номинала.
+def _funding_pct(row: dict[str, Any], costs: CostModel) -> tuple[float, bool]:
+    """Стоимость удержания в процентах от номинала и БЫЛА ЛИ ОНА ИЗМЕРЕНА.
 
-    Знак не учитывается: фандинг бывает и в пользу позиции, но направление ставки в момент
-    удержания у нас не измерено — записан лишь срез на закрытии. Брать его как доход значило
-    бы подарить портфелю то, чего не измеряли, поэтому удержание всегда считается РАСХОДОМ.
+    ⚠ ЗАПИСАННЫЙ НОЛЬ — ЭТО ИЗМЕРЕНИЕ, А НЕ ПРОПУСК. Прежняя редакция делала
+    `if rate_pct <= 0.0: rate_pct = fallback` и подменяла медианой И отсутствие поля, И
+    настоящий нуль — то есть выдумывала число поверх данных (I-6, в моём же коде).
+
+    Почему ноль здесь настоящий. Продюсер нулей не изобретает:
+    `feature_engine._coerce_float(None)` возвращает `None`, а не `0.0`, так что записанный
+    `0.0` пришёл от движка. Замер по 283 записям: 202 нуля, и у ВСЕХ 202 заполнены соседние
+    фандинг-поля (`funding_zscore_48h`, `funding_interval_h`, `funding_trend`) — блок
+    фандинга собирался целиком. На живой бирже ровно нулевую ставку имеют 29.6% символов
+    (252 из 851), то есть нуль — штатное значение, а не признак поломки.
+
+    ⚠ ОТКРЫТЫЙ ВОПРОС, НЕ ЗАКРЫТЫЙ ЭТОЙ ПРАВКОЙ: у нас нулей 90% (202 из 224 с полем)
+    против 29.6% на бирже — втрое больше. Это подозрение на дефект ПРОДЮСЕРА, и его надо
+    измерять отдельно. Подменять медианой значило бы замаскировать его: теперь заниженный
+    фандинг виден как «издержка ≈ 0», а не растворён в выдуманном числе.
+
+    Знак не учитывается: фандинг бывает и в пользу позиции, но направление ставки за время
+    удержания не измерено — записан лишь срез на закрытии. Брать его как доход значило бы
+    подарить портфелю то, чего не измеряли, поэтому удержание всегда считается РАСХОДОМ.
+
+    Returns:
+        ``(процент, измерено)``. При ``measured=False`` возвращается 0.0, и полная издержка
+        сделки становится НИЖНЕЙ ОЦЕНКОЙ — вызывающий обязан это показать, а не выдать за
+        точное значение.
     """
+    del costs  # ставка больше не подставляется — только измеренная либо никакой
     market = (row.get("features_close") or {}).get("market") or {}
     rate = market.get("funding_rate")
+    if rate is None:
+        return 0.0, False
     try:
-        rate_pct = abs(float(rate)) * 100.0 if rate is not None else 0.0
+        rate_pct = abs(float(rate)) * 100.0
     except (TypeError, ValueError):
-        rate_pct = 0.0
-    if rate_pct <= 0.0:
-        rate_pct = costs.fallback_funding_pct
+        return 0.0, False
     interval_h = _num(market.get("funding_interval_h")) or _DEFAULT_FUNDING_INTERVAL_H
     duration_min = float(row.get("duration_min") or 0.0)
     intervals = max(0.0, duration_min / (interval_h * 60.0))
-    return rate_pct * intervals
+    return rate_pct * intervals, True
 
 
 def _slippage_pct(row: dict[str, Any], costs: CostModel) -> float:
@@ -234,18 +267,26 @@ def _slippage_pct(row: dict[str, Any], costs: CostModel) -> float:
     return bps / 100.0  # полспреда × две стороны = целый спред; бп → проценты
 
 
-def cost_pct_of_notional(row: dict[str, Any], costs: CostModel | None = None) -> float:
-    """Полная круговая издержка сделки в процентах от НОМИНАЛА.
+def cost_pct_of_notional(
+    row: dict[str, Any], costs: CostModel | None = None
+) -> tuple[float, bool]:
+    """Полная круговая издержка сделки в процентах от НОМИНАЛА и полнота замера.
 
     Вход считается мейкерским: метод заходит лимитной лестницей в зону, а не по рынку.
+
+    Returns:
+        ``(процент, фандинг_измерен)``. При ``False`` фандинг в сумму не вошёл, и величина
+        является НИЖНЕЙ ОЦЕНКОЙ издержки, а не её значением.
     """
     model = costs or CostModel()
-    return (
+    funding, measured = _funding_pct(row, model)
+    total = (
         model.maker_fee_pct
         + _exit_fee_pct(row, model)
         + _slippage_pct(row, model)
-        + _funding_pct(row, model)
+        + funding
     )
+    return total, measured
 
 
 def build_trade_frame(
@@ -285,6 +326,7 @@ def build_trade_frame(
             continue
         if dist < _MIN_STOP_DIST_PCT:
             continue
+        cost, funding_measured = cost_pct_of_notional(row, model)
         prepared.append(
             {
                 "symbol": str(row.get("symbol") or "?"),
@@ -294,7 +336,10 @@ def build_trade_frame(
                 "close_reason": str(row.get("close_reason") or "?"),
                 "gross_pct": float(gross),
                 "stop_dist_pct": float(dist),
-                "cost_pct": cost_pct_of_notional(row, model),
+                "cost_pct": cost,
+                # Фандинг не измерен → издержка НИЖНЯЯ ОЦЕНКА, не значение. Флаг едет в
+                # кадр, чтобы отчёт мог показать покрытие, а не выдать оценку за факт.
+                "funding_measured": funding_measured,
             }
         )
     if not prepared:
@@ -305,6 +350,7 @@ def build_trade_frame(
                 "closed_at": pl.Datetime(time_zone="UTC"),
                 "close_reason": pl.Utf8, "gross_pct": pl.Float64,
                 "stop_dist_pct": pl.Float64, "cost_pct": pl.Float64,
+                "funding_measured": pl.Boolean,
             }
         )
     return (
