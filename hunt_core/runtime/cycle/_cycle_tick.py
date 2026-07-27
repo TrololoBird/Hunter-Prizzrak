@@ -24,6 +24,7 @@ from hunt_core.data.tick_jsonl import ensure_fusion_lifecycle_fields
 from hunt_core.data.universe import PINNED_SYMBOLS
 from hunt_core.deliver.digest import get_advisory_digest
 from hunt_core.deliver.telegram import TelegramBroadcaster
+from hunt_core.engine import metrics
 from hunt_core.errors import defensive_exc_types
 from hunt_core.features.feature_engine import (
     FeatureExtractError,
@@ -215,8 +216,16 @@ async def run_tick(
         settled = _settle_native_results(ordered, raw_results, now=now)
 
         snap_elapsed = round(time.monotonic() - tick_started, 2)
+        ready_n = sum(1 for s in ordered if settled.get(s, (None, None))[1] is not None)
+        # `HEALTHY_SYMBOLS` был единственной из четырёх метрик движка БЕЗ вызывающего: gauge
+        # объявлен, сеттер экспортирован, ни одной записи. Пишется ВНЕ ветки `len(ordered) > 1`:
+        # внутри неё тик с одним символом оставлял бы gauge замороженным на прошлом значении —
+        # серия, переставшая пополняться, в этом репозитории уже отдельный класс дефектов.
+        metrics.set_healthy_symbols(
+            str(getattr(getattr(rt.multi.primary, "exchange", None), "id", "binance")),
+            ready_n,
+        )
         if len(ordered) > 1:
-            ready_n = sum(1 for s in ordered if settled.get(s, (None, None))[1] is not None)
             LOG.info(
                 "watch_snapshot_batch",
                 symbols=len(ordered),

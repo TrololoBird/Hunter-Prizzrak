@@ -1,5 +1,5 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
   "permissions": {
     "allow": [
       "Bash(uv lock*)",
@@ -29,7 +29,20 @@
       "Bash(jq *)",
       "Bash(uv tree*)",
       "Bash(.venv/bin/python -m vulture*)",
-      "Bash(.venv/bin/pre-commit*)"
+      "Bash(.venv/bin/pre-commit*)",
+      "Bash(.venv/bin/python scripts/dead_symbol_sweep.py*)",
+      "Bash(.venv/bin/python scripts/check_prohibited_apis.py*)",
+      "Agent(phantom-key-auditor)",
+      "Agent(ccxt-safety-reviewer)",
+      "Agent(no-lookahead-reviewer)",
+      "Agent(config-drift-auditor)",
+      "Agent(Explore)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Edit(./.env)",
+      "Edit(./.env.*)"
     ]
   },
   "hooks": {
@@ -39,7 +52,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/Users/tonyaleksandrov/Documents/HUNTER/.venv/bin/python /Users/tonyaleksandrov/Documents/HUNTER/scripts/guard_edit.py",
+            "command": "${CLAUDE_PROJECT_DIR}/.venv/bin/python",
+            "args": ["${CLAUDE_PROJECT_DIR}/scripts/guard_edit.py"],
             "statusMessage": "guard: prohibited APIs"
           }
         ]
@@ -51,8 +65,30 @@
         "hooks": [
           {
             "type": "command",
-            "command": "jq -r '.tool_input.file_path // .tool_response.filePath // empty' | { read -r f; case \"$f\" in *.py) /Users/tonyaleksandrov/Documents/HUNTER/.venv/bin/ruff check --fix --unfixable F401 \"$f\";; esac; } 2>/dev/null || true",
+            "if": "Edit(**/*.py)",
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/hook_ruff_fix.sh",
             "statusMessage": "ruff --fix (F401 report-only: auto-removing unused imports races paired edits)"
+          },
+          {
+            "type": "command",
+            "if": "Edit(hunt_core/**/*.py)",
+            "command": "${CLAUDE_PROJECT_DIR}/.venv/bin/python",
+            "args": ["-m", "mypy", "--no-error-summary", "hunt_core"],
+            "asyncRewake": true,
+            "timeout": 180,
+            "statusMessage": "mypy (background)"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/scripts/hook_session_context.sh",
+            "timeout": 15,
+            "statusMessage": "session: live-run state"
           }
         ]
       }

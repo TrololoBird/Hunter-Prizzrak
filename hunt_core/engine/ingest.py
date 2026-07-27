@@ -52,6 +52,10 @@ class Ingest:
         self._symbols: list[str] = []
         self._symbol_set: set[str] = set()  # live membership — the universe-wide streams filter on THIS
         self._timeframes: tuple[str, ...] = ()
+        # Последний список символов, отданный каждому мульти-символьному `watch_*`. Нужен, чтобы
+        # отписаться от прежней подписки при росте набора: список входит в ключ потока ccxt, и без
+        # отписки каждый `add_symbol` оставляет за собой ЖИВОЕ соединение (см. `_watch_symbols`).
+        self._subscribed: dict[str, list[str]] = {}
         # Serializes reconnect against add_symbol: a spawn landing inside reconnect's
         # gather()→clear() window would orphan the new symbol's tasks (untracked + uncancellable).
         self._mutation_lock = asyncio.Lock()
@@ -82,11 +86,20 @@ class Ingest:
         # Universe-wide native streams (one subscription each), capability-gated on `has`. Each filters
         # against the LIVE `self._symbol_set`, so a symbol added later via `add_symbol` is picked up on
         # the next frame with no re-subscribe.
-        self._spawn("*:marks", self._step_marks())
-        if self._ex.has.get("watchBidsAsks"):
-            self._spawn("*:bidsasks", self._step_bidsasks())
-        if self._ex.has.get("watchTickers"):
-            self._spawn("*:tickers", self._step_tickers())
+        # ⚠ Мульти-символьные подписки гейтятся НА НЕПУСТОЙ набор. С пустым списком ccxt падает
+        # в `IndexError: list index out of range` (`firstMarket = self.market(symbols[0])` при
+        # `symbolsDefined = ([] is not None)` → True) — проверено на 4.5.68 для всех трёх методов.
+        # Это не крэш: `_stream_loop` ловит его в общий обработчик и уходит в вечный бэк-офф
+        # `engine_ws_unknown_error`, то есть поток мёртв, а лог утверждает «пробуем ещё».
+        # `spot.py::start` такой гейт уже имеет; здесь его не было, потому что раньше эти вызовы
+        # шли БЕЗ аргумента и пустой набор их не трогал.
+        if self._symbols:
+            self._spawn("*:marks", self._step_marks())
+            if self._ex.has.get("watchBidsAsks"):
+                self._spawn("*:bidsasks", self._step_bidsasks())
+            if self._ex.has.get("watchTickers"):
+                self._spawn("*:tickers", self._step_tickers())
+        # Ликвидации подписываются на ВСЮ вселенную (пустой список) и от набора не зависят.
         if self._ex.has.get("watchLiquidationsForSymbols"):
             self._spawn("*:liquidations", self._step_liquidations())
 
@@ -127,6 +140,10 @@ class Ingest:
             with contextlib.suppress(Exception):
                 await self._ex.close()
             self.last_frame_ms.clear()
+            # Новый клиент — ни одной подписки. Не обнулить здесь значит при первом же
+            # `add_symbol` после реконнекта попытаться отписаться от списка, которого на этом
+            # соединении никогда не было.
+            self._subscribed.clear()
             self._ex = self._make_exchange()
             self.start(self._symbols, self._timeframes)
 
@@ -232,6 +249,46 @@ class Ingest:
 
         return step
 
+    async def _watch_symbols(self, method: str, un_watch: str | None = None) -> Any:
+        """Вызвать ``ex.<method>(отсортированный список символов)``, погасив старую подписку.
+
+        ⚠ **Список символов входит в КЛЮЧ потока ccxt.** ``watch_multi_ticker_helper`` строит
+        ``streamHash = channel + '::' + ','.join(symbols)`` и на невиданный хеш выделяет НОВЫЙ
+        индекс потока — то есть новый URL и новое WS-соединение с полной переподпиской.
+        Замерено на ccxt 4.5.68: 2 символа → `/ws/0`, те же 2 → `/ws/0` (переиспользование),
+        3 → `/ws/1`, 4 → `/ws/2`. Старое соединение при этом НЕ закрывается: оно продолжает
+        качать прежнее подмножество, и ccxt продолжает его парсить в том же event loop —
+        съедая ровно тот выигрыш по CPU, ради которого список и передаётся.
+
+        Хуже того, ``streamIndex`` берётся по модулю 50, поэтому индекс переиспользуется — а
+        переиспользование шлёт ВТОРУЮ полную пачку SUBSCRIBE в сокет, где уже N потоков, при
+        лимите Binance 200 на соединение. Сам ccxt это не поймает: он считает подписки как 1
+        на вызов, отправляя N имён.
+
+        Отсюда две вещи:
+        * **сортировка** — множество символов итерируется в произвольном порядке, и без неё
+          хеш менялся бы даже при НЕИЗМЕННОМ составе, порождая соединение на каждом кадре;
+        * **``un_watch``** предыдущего списка — единственный способ не накапливать соединения
+          при ``add_symbol``. Для ликвидаций такого метода в ccxt нет, поэтому там взята
+          подписка на всю вселенную (её список пуст и неизменен).
+
+        Args:
+            method: Имя метода ccxt (``"watch_bids_asks"``, ...).
+            un_watch: Парный метод отписки, если он есть у ccxt.
+
+        Returns:
+            То же, что вернул бы прямой вызов метода.
+        """
+        symbols = sorted(self._symbols)
+        prev = self._subscribed.get(method)
+        if prev is not None and prev != symbols and un_watch is not None:
+            try:
+                await getattr(self._ex, un_watch)(prev)
+            except Exception as exc:  # noqa: BLE001 — отписка не критична, накопление соединений да
+                LOG.warning("engine_un_watch_failed", method=un_watch, error=repr(exc))
+        self._subscribed[method] = symbols
+        return await getattr(self._ex, method)(symbols)
+
     def _step_marks(self) -> Callable[[], Awaitable[None]]:
         bound_ms = int(params.FRESH_MARK_S * 1000.0)
         fund_bound_ms = int(params.FRESH_FUNDING_S * 1000.0)
@@ -239,7 +296,14 @@ class Ingest:
         async def step() -> None:
             # One universe-wide subscription; `r` = funding rate → funding from WS, never REST-polled.
             # mark/funding are small scalars ccxt doesn't cache per-symbol usefully, so value-backed.
-            marks = await self._ex.watch_mark_prices()
+            # Список символов — по той же причине, что и у bids/asks ниже, но здесь цена не
+            # свежесть, а CPU: `!markPrice@arr` шлёт МАССИВ по всей бирже, и ccxt парсит каждый
+            # элемент. ЗАМЕР 2026-07-26, 30 с: без списка — 58 кадров по медиане 441 символ,
+            # 25 578 распаршенных тикеров, из них наших 203 (**0.79% полезных**); со списком —
+            # 158 кадров, 158 парсов, 100% полезных. То есть впустую сжигалось ~850 парсов/с
+            # в ТОМ ЖЕ event loop, где считаются Polars-фичи тика; и кадров со списком приходит
+            # БОЛЬШЕ (158 против 58) — то есть это дешевле и одновременно свежее.
+            marks = await self._watch_symbols("watch_mark_prices", "un_watch_mark_prices")
             now = _now_ms()
             for sym, mk in marks.items():
                 if sym not in self._symbol_set:  # live set — picks up add_symbol on the next frame
@@ -261,8 +325,23 @@ class Ingest:
         bound_ms = int(params.FRESH_BBO_S * 1000.0)
 
         async def step() -> None:
-            # Universe-wide !bookTicker@arr — the native best bid/ask stream (lighter than the book).
-            bbos = await self._ex.watch_bids_asks()
+            # ⚠ СПИСОК СИМВОЛОВ ОБЯЗАТЕЛЕН. Без аргумента ccxt подписывается на `!bookTicker` ВСЕЙ
+            # вселенной Binance USDⓈ-M, а этот поток шлёт ОДНО СООБЩЕНИЕ НА ОДИН СИМВОЛ (в отличие
+            # от `!markPrice@arr` / `!ticker@arr`, где кадр — массив по всем сразу). Наш цикл
+            # забирает по одному сообщению за итерацию, поэтому на наши символы приходилась доля
+            # 7/N_вселенной, а остальное — чужой трафик, распаршенный впустую.
+            #
+            # ЗАМЕР 2026-07-26, обе подписки по 45 с на одном наборе из 7 символов:
+            #   symbols=None  3307 кадров, наши символы в  45 (1.4% полезных), медиана 5.0 с
+            #   symbols=[…]   6739 кадров, наши символы в 6739 (100%),        медиана 0.005 с
+            # BTCUSDT: 5.038 с → 0.005 с, PAXGUSDT: 5.142 с → 0.076 с. Это ×1000 по свежести.
+            # Отсюда и 47.2% строк тика за бондом 5 с — не «неликвид не двигается», а мы просто
+            # не читали его котировки. Порядок по ликвидности (BTC 20% → PAXG 71%) сбивал с толку:
+            # он объясним и через шланг — у редкого символа меньше шансов попасть в тот 1.4%.
+            #
+            # `add_symbol` покрыт: список пересобирается каждый вызов, ccxt досубscribe'ит новый
+            # поток — ровно так же, как уже работает `watch_liquidations_for_symbols` ниже.
+            bbos = await self._watch_symbols("watch_bids_asks", "un_watch_bids_asks")
             now = _now_ms()
             for sym, ba in bbos.items():
                 if sym in self._symbol_set:  # live set — add_symbol members stamp on the next frame
@@ -276,8 +355,11 @@ class Ingest:
         bound_ms = int(params.FRESH_TICKER_S * 1000.0)
 
         async def step() -> None:
-            # Universe-wide !miniTicker@arr; value-backed (small dict, carries 24h volume/quoteVolume).
-            tickers = await self._ex.watch_tickers()
+            # Value-backed (small dict, carries 24h volume/quoteVolume). Список символов — та же
+            # причина, что у марок: ЗАМЕР 2026-07-26, 30 с — без списка 30 кадров по медиане 139
+            # символов, 4529 парсов, наших 157 (**3.47% полезных**); со списком 82 кадра, 82 парса,
+            # 100%. Опять и дешевле, и чаще (82 кадра против 30).
+            tickers = await self._watch_symbols("watch_tickers", "un_watch_tickers")
             now = _now_ms()
             for sym, tk in tickers.items():
                 if sym in self._symbol_set:  # live set — add_symbol members stamp on the next frame
@@ -293,10 +375,33 @@ class Ingest:
         bound_ms = int(params.NO_MESSAGE_WATCHDOG_S * 1000.0)
 
         async def step() -> None:
-            # `watch_liquidations_for_symbols` subscribes universe-wide (!forceOrder@arr) — the arg only
-            # scopes the initial subscription, so passing the live list keeps late-added symbols covered.
-            liqs = await self._ex.watch_liquidations_for_symbols(list(self._symbols))
+            # ⚠ ПУСТОЙ СПИСОК — ЭТО И ЕСТЬ универсальная подписка, и здесь она обязательна.
+            # Прежний комментарий утверждал, что «arg only scopes the initial subscription», то
+            # есть что со списком подписка всё равно универсальная. Это НЕВЕРНО: в ccxt 4.5.68
+            # `watch_liquidations_for_symbols` берёт ветку `!forceOrder@arr` **только** при
+            # `is_empty(symbols)`, иначе подписывается по `<sym>@forceOrder` на каждый символ
+            # (проверено чтением исходника + сборкой каналов).
+            #
+            # Цена ошибки была бы не косметической: `touch_liveness` ниже освежает liveness ВСЕМ
+            # отслеживаемым символам, и это законно ровно потому, что подписка одна на всех.
+            # При посимвольной подписке кадр доказывал бы жизнь ОДНОГО символа, а символ, чья
+            # подписка не установилась, читался бы «свежим» бесконечно — та самая подмена,
+            # против которой `touch_liveness` и написан.
+            #
+            # Побочно это убирает ликвидации из churn'а `add_symbol`: список входит в ключ потока
+            # ccxt, поэтому каждый рост списка = НОВОЕ соединение (см. `_watch_symbols` ниже).
+            # Пустой список неизменен, значит соединение одно на весь процесс.
+            liqs = await self._ex.watch_liquidations_for_symbols([])
             now = _now_ms()
+            # Тот же универсальный поток ⇒ кадр доказывает жизнь подписки для всех символов.
+            # Без этого «ликвидаций не было» было неотличимо от «фид умер»: 85.7% строк тика
+            # лежали в `not_ready` по `liq` на здоровом прогоне, вопреки намерению, записанному
+            # прямо над этой функцией. Символ, у которого ликвидаций не было НИ РАЗУ, остаётся
+            # `absent` — `touch_liveness` не создаёт штамп с нуля. Окно событий держит сам
+            # потребитель (`maps/liquidation.py`, `cutoff_ms`), поэтому старые события не
+            # «оживают»: они выпадают из окна карты, а не из свежести плана.
+            for tracked in self._symbol_set:
+                self.state_for(tracked).touch_liveness("liq", now)
             for liq in liqs if isinstance(liqs, list) else []:
                 sym = liq.get("symbol") if isinstance(liq, dict) else None
                 if sym in self._symbol_set:

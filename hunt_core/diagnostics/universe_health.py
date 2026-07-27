@@ -21,26 +21,18 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
-# A row is a data-plane FAILURE when its data could not be assembled/validated — NOT
-# merely when it produced no signal (a healthy "neutral" tick is fine). Detected from an
-# explicit data-shaped `error`, or from a KLINE plane in `data_violations`.
-_DATA_ERROR_RE = re.compile(r"^(klines?|book|ticker|funding|oi|data)\b|stale|fetch_failed|staleness")
+from hunt_core.view.build import plane_is_required
 
-# ⚠ ПОЧЕМУ ТОЛЬКО КЛАЙНЫ. `data_violations` теперь пишет `_cycle_tick::_serialize_native_scan_row`
-# из `view.not_ready` — а туда движок кладёт КАЖДЫЙ незакрытый план, включая заведомо
-# необязательные (`liq`, `trades`, `gls`, `basis`), которых у большинства альтов нет штатно.
-# Считать их отказом = объявить блэкаут на здоровой вселенной и, через
-# `should_self_restart_on_blackout`, загнать процесс в цикл перезапусков. Кадры же нужны КАЖДОМУ
-# детектору: замерший клайн — это и есть сигнатура 2026-07-11 и `stale-htf-cache-trap`.
+# ⚠ ГРАНИЦА «отказ vs штатная деградация» ЖИВЁТ НЕ ЗДЕСЬ. `data_violations` пишет
+# `_cycle_tick::_serialize_native_scan_row` из `view.not_ready`, куда движок кладёт КАЖДЫЙ
+# незакрытый план, включая заведомо необязательные (`liq`, `trades`, `basis`), которых у
+# большинства альтов нет штатно. Считать их отказом = объявить блэкаут на здоровой вселенной и,
+# через `should_self_restart_on_blackout`, загнать процесс в цикл перезапусков.
 #
-# ЗАМЕР на живом прогоне 2026-07-26 (7 символов, здоровая вселенная) — граница выбрана не на глаз:
-#   kline.*        в not_ready у   0% строк   ← отказ, и он честно не сработал
-#   basis / liq / global_ls_5m / top_ls_*     у 100%
-#   oi / taker_5m                             у  86%
-# То есть без фильтра `failure_frac` был бы 1.0 на полностью здоровом прогоне → `critical` →
-# самоперезапуск. И наоборот: на клайнах фильтр не даёт ложных срабатываний.
-# Расширять список планов — только повторив этот замер (I-7), не «на всякий случай».
-_FAILING_PLANE_PREFIXES = ("kline", "klines")
+# Решение принимает ПРОДЮСЕР списка — `view/build.py::plane_is_required`, рядом с самим списком
+# запрашиваемых планов. Здесь была своя копия этого знания в виде префиксного фильтра; копия
+# знания о границе — ровно тот механизм, которым эта граница уже дважды разъезжалась.
+# Замер, на котором граница построена, и обоснование — в докстроке `plane_is_required`.
 
 # Normalise a violation string to a stable KIND for bucketing. Обе формы:
 #   родная (`view.not_ready`):  "kline.4h: stale 40336224ms>36000000ms" -> "kline.4h.stale"
@@ -67,8 +59,22 @@ def _violation_kind(v: str) -> str:
     return _NUM_TAIL_RE.sub("", v.split(" ")[0])
 
 
+# Имя плана у движка — только буквы/цифры/подчёркивание (``kline.4h``, ``top_ls_pos_5m``).
+# Всё остальное планом НЕ является, и это не педантизм: ``engine/api.py::snapshot`` эмитит
+# ``f"{symbol}: not tracked"``, где symbol = ``BTC/USDT:USDT``. Обобщающая ветка `_violation_kind`
+# возвращала на этом ``"BTC/USDT:USDT:"``, а `plane_is_required` — fail-loud `True` на неизвестном
+# имени, то есть «символ не отслеживается» засчитывалось ОТКАЗОМ ДАННЫХ и на пачке нетреканных
+# символов дало бы ложный блэкаут с самоперезапуском. Поймано собственным тестом-гардом, а не
+# ревью: `data_plane_audit` свой такой фильтр имеет, а здесь его не было.
+_PLANE_TOKEN_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+
+
 def _is_failing_plane(kind: str) -> bool:
-    return kind.split(".", 1)[0] in _FAILING_PLANE_PREFIXES
+    """Отказ ли это данных. Легаси-форма пишет план как ``klines.4h``, родная — как ``kline.4h``."""
+    plane = kind.split(".", 1)[0]
+    if not _PLANE_TOKEN_RE.match(plane):
+        return False  # не имя плана (символ, свободный текст) — не наш вердикт
+    return plane_is_required("kline" if plane == "klines" else plane)
 
 
 def classify_row_health(row: Mapping[str, Any]) -> str | None:
@@ -100,9 +106,15 @@ def classify_row_health(row: Mapping[str, Any]) -> str | None:
     # `data/completeness.py::CompletenessReport`, шейп ЛЕГАСИ-пакета REST, который на родном пути
     # никто не собирает. Восстанавливать его значило бы возить второй, параллельный источник
     # истины о свежести; настоящий источник — `view.not_ready`, он и читается выше.
-    err = row.get("error")
-    if isinstance(err, str) and err and _DATA_ERROR_RE.search(err):
-        return _violation_kind(err)
+    #
+    # УДАЛЕНА и ветка по свободному тексту `error` через `_DATA_ERROR_RE`. Это была ВТОРАЯ,
+    # расходящаяся копия границы: регексп объявлял отказом `book|ticker|funding|oi` — все четыре
+    # значатся НЕОБЯЗАТЕЛЬНЫМИ в `view/build.py::OPTIONAL_PLANES` — и вдобавок любую строку со
+    # словом `stale`. Ветка была мертва (единственный продюсер `error` — строка с
+    # `tick_path == "rest_error"`, а она возвращается выше), но мёртвая расходящаяся копия
+    # границы — это ровно тот механизм, которым граница здесь уже дважды разъезжалась.
+    # Нашёл ревью-агент; тест `test_universe_health_has_no_private_copy_of_the_boundary`
+    # её не ловил, потому что проверял только имя `_FAILING_PLANE_PREFIXES`.
     return None
 
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import math
 import time
+from collections import deque
 from collections.abc import Sequence
 from typing import Any
 
@@ -19,7 +20,14 @@ from hunt_core.engine import exchanges, metrics, params, rest
 from hunt_core.engine.health import Watchdog
 from hunt_core.engine.ingest import Ingest
 from hunt_core.engine.liquidations import market_contract_size
-from hunt_core.engine.state import MarketSnapshot, Plane, PlaneStamp, Source, SymbolState
+from hunt_core.engine.state import (
+    MarketSnapshot,
+    Plane,
+    PlaneCadence,
+    PlaneStamp,
+    Source,
+    SymbolState,
+)
 from hunt_core.market.symbols import is_crypto_underlying
 
 LOG = structlog.get_logger(__name__)
@@ -42,6 +50,15 @@ def _last_float(rows: list[dict[str, object]] | None, key: str) -> float | None:
     except (TypeError, ValueError):
         return None
     return value if math.isfinite(value) else None
+
+
+def _worst_first(cad: PlaneCadence) -> float:
+    """Ключ сортировки «сначала худший бонд». ``None`` = бонда нет, а не «отношение ноль».
+
+    Явное сравнение с ``None`` вместо ``or``: у ``bound_ratio`` ноль — законное значение
+    (бонд 0 мс), и falsy-цепочка склеила бы «бонда нет» с «бонд нулевой» (I-6).
+    """
+    return 9e9 if cad.bound_ratio is None else cad.bound_ratio
 
 
 def _binance_id(ex: object, symbol: str) -> str | None:
@@ -96,6 +113,10 @@ class Engine:
         self._ingest = Ingest(exchanges.make_binance)
         self._watchdog: Watchdog | None = None
         self._bg: list[asyncio.Task[None]] = []
+        # Длительности последних обходов позиционирования — из них берётся период для бонда.
+        # 4 цикла = 20 минут истории: достаточно, чтобы пережить одиночный скачок ожидания в
+        # общих воротах `/futures/data`, и мало, чтобы бонд следовал за ростом юниверса.
+        self._walk_history: deque[float] = deque(maxlen=4)
 
     async def start(self) -> None:
         await self._ingest.exchange.load_markets()
@@ -109,7 +130,48 @@ class Engine:
         )
         self._bg.append(asyncio.create_task(self._watchdog.run(), name="engine_watchdog"))
         self._bg.append(asyncio.create_task(self._poll_positioning(), name="engine_positioning"))
+        self._bg.append(asyncio.create_task(self._publish_cadence(), name="engine_cadence"))
+        metrics.start_exporter(params.METRICS_PORT)
         LOG.info("engine_started", symbols=len(self._symbols), timeframes=self._timeframes)
+
+    async def _publish_cadence(self) -> None:
+        """Публиковать ИЗМЕРЕННЫЙ темп планов и громко ругаться на недостижимый бонд.
+
+        Отдельная фоновая полоса, а не расчёт в тике: величина медленная (её смысл — медиана по
+        десяткам обновлений), считать её каждые 30 с незачем, а тик и так самый нагруженный
+        участок event loop.
+
+        Почему WARNING, а не тихая метрика: недостижимый бонд не виден НИ ПО ЧЕМУ другому —
+        возраст выглядит правдоподобно, отказов «много, но ведь рынок», а потребитель просто
+        не получает измеренное число. Так `FRESH_FUTURES_DATA_S` и прожил 360 с при периоде
+        377.9 с, отправляя планы позиционирования в `not_ready` у 57% строк тика.
+        """
+        while True:
+            await asyncio.sleep(params.CADENCE_PUBLISH_S)
+            seen: dict[str, PlaneCadence] = {}
+            for st in self._ingest.states.values():
+                for plane, cad in st.cadences().items():
+                    prev = seen.get(plane)
+                    if prev is None or cad.median_s > prev.median_s:
+                        seen[plane] = cad  # худший (самый медленный) случай по вселенной
+            for plane, cad in seen.items():
+                metrics.set_plane_cadence(plane, cad.median_s, cad.bound_ratio)
+            # Ругаться только на ИЗМЕРЕННОЕ (`cad.measured`). Первый прогон без этого условия
+            # выдал `bound_unreachable` для `kline.5m` при samples=1, где «периодом» был
+            # промежуток «REST-сид → первый WS-бар», то есть артефакт старта, а не темп.
+            for cad in sorted(seen.values(), key=_worst_first):
+                if not cad.bound_too_tight:
+                    continue
+                LOG.warning(
+                    "engine_plane_bound_unreachable" if cad.bound_unreachable
+                    else "engine_plane_bound_tight",
+                    plane=cad.plane,
+                    measured_median_s=round(cad.median_s, 1),
+                    measured_p90_s=round(cad.p90_s, 1),
+                    bound_s=cad.bound_s,
+                    ratio=None if cad.bound_ratio is None else round(cad.bound_ratio, 2),
+                    samples=cad.samples,
+                )
 
     async def _seed(self) -> None:
         # Concurrent (bounded) seeding: 7 symbols × 7 TFs used to be ~49 SEQUENTIAL round-trips
@@ -188,9 +250,28 @@ class Engine:
 
         Every write is a real, fail-loud :class:`Plane`; a missing/unparseable datum is skipped
         (logged in ``rest``), never fabricated.
+
+        ⚠ Сон в конце — ДЕДЛАЙННЫЙ, а не фиксированный, и бонд считается от ИЗМЕРЕННОГО периода.
+        Прежняя редакция спала ``FUTURES_DATA_POLL_S`` ПОСЛЕ обхода, то есть реальный период был
+        ``300 с + время обхода``, а бонд стоял константой 360 с. Замер на живом прогоне 2026-07-26
+        (385 строк тика, 7 пиннед-символов, 47 минут): период между перезаписями — медиана
+        **377.9 с**, p90 379.7 с, и **17 сбросов из 17 превысили бонд**. То есть план объявлялся
+        `stale` не при сбое, а ВСЕГДА — планы позиционирования (`taker_5m`, `global_ls_5m`,
+        `top_ls_*`, `basis`, `oi_hist_5m`) лежали в `not_ready` у 57% строк на здоровом прогоне,
+        и `build_liquidation_map` получал `None` вместо измеренного перекоса больше чем в половине
+        случаев. Классический I-7: окно поставили «5 мин + запас», не замерив, из чего период
+        реально складывается.
+
+        Обход стоит ~11 с на символ (6 запросов × ``FUTURES_DATA_SPACING_S``  + RTT), поэтому на 7
+        символах он занимал 78 с — и рос ЛИНЕЙНО с юниверсом: 24 символа → 266 с, 30 → 333 с.
+        Дедлайнный сон держит период равным ``FUTURES_DATA_POLL_S``, пока обход в него влезает;
+        когда перестаёт — период честно растёт, бонд растёт вместе с ним, и это пишется в лог
+        WARNING'ом, потому что означает, что юниверс перерос бюджет запросов эндпоинта.
         """
+        # Первый цикл мерить ещё нечего — берём заявленную константу; далее бонд идёт от факта.
         bound = int(params.FRESH_FUTURES_DATA_S * 1000.0)
         while True:
+            cycle_started = time.monotonic()
             ex = self._ingest.exchange
             for symbol in list(self._symbols):  # snapshot — add_symbol may append mid-cycle
                 bsym = _binance_id(ex, symbol)
@@ -225,7 +306,27 @@ class Engine:
                     )
                     if basis is not None:
                         st.put_value("basis", basis, PlaneStamp(Source.REST_SEED, now, now, bound))
-            await asyncio.sleep(params.FUTURES_DATA_POLL_S)
+            walk_s = time.monotonic() - cycle_started
+            # ⚠ Скользящий МАКСИМУМ обхода, а не последнее значение. Бонд, посчитанный в конце
+            # цикла k, охраняет промежуток между k+1 и k+2 — то есть отстаёт на цикл. При запасе
+            # 1.25 одного скачка обхода больше чем на 25% достаточно, чтобы вернуть ложное
+            # «протухло». Скачок реален: `rest.py::_FD_GATE` делится с deep-полосой
+            # (`native_assembly.py`), поэтому ожидание в воротах пляшет от цикла к циклу
+            # независимо от размера юниверса. Максимум по последним циклам это гасит.
+            self._walk_history.append(walk_s)
+            period_s = max(params.FUTURES_DATA_POLL_S, *self._walk_history)
+            bound = int(period_s * params.POSITIONING_BOUND_MARGIN * 1000.0)
+            if walk_s > params.FUTURES_DATA_POLL_S:
+                # Не деградация данных, а исчерпание бюджета: обход одного круга уже не влезает
+                # в собственный такт, значит свежесть позиционирования падает пропорционально.
+                LOG.warning(
+                    "engine_positioning_walk_over_budget",
+                    walk_s=round(walk_s, 1),
+                    poll_s=params.FUTURES_DATA_POLL_S,
+                    symbols=len(self._symbols),
+                    new_bound_s=round(bound / 1000.0, 1),
+                )
+            await asyncio.sleep(max(0.0, params.FUTURES_DATA_POLL_S - walk_s))
 
     def snapshot(self, symbol: str, required: Sequence[str]) -> MarketSnapshot:
         """A consistent, freshness-checked view; ``not_ready`` names any absent/stale required plane.

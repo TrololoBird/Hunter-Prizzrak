@@ -32,6 +32,79 @@ _TF_FIELD: dict[str, str] = {"1m": "m1", "5m": "m5", "15m": "m15", "1h": "h1", "
 _SCALAR_PLANES = ("funding", "oi", "basis", "taker_5m", "global_ls_5m", "top_ls_acct_5m", "top_ls_pos_5m")
 _LIQ_WINDOW_MS = 300_000
 
+# ── Отказ данных vs штатная деградация — ДЕКЛАРАЦИЯ, а не эвристика у потребителя ──────────
+#
+# ``snapshot(symbol, required)`` складывает в ``not_ready`` КАЖДЫЙ незакрытый план из списка, а
+# список здесь — все планы разом. Поэтому `not_ready` — это ДИАГНОСТИКА («что сейчас не свежо»),
+# а НЕ вердикт «данные сломаны»: у здорового альта штатно нет ни ликвидаций, ни базиса.
+#
+# Раньше эту границу знал ровно один потребитель — `diagnostics/universe_health.py`, где она
+# жила эвристикой по префиксу имени. Цена такой границы уже заплачена дважды: сначала детектор
+# блэкаута ослеп на месяц, потом (при починке) чуть не объявил блэкаут на здоровой вселенной,
+# что через ``should_self_restart_on_blackout`` дало бы цикл перезапусков. Классика: «глубокая
+# проверка здоровья, роняющая сервис из-за необязательной зависимости».
+#
+# Теперь решение принимается ЗДЕСЬ, рядом со списком запрашиваемых планов, и новый план обязан
+# быть отнесён явно — иначе падает ``tests/test_plane_classification.py``.
+OPTIONAL_PLANES: frozenset[str] = frozenset(
+    {
+        # Ценовые: взаимозаменяемы — `resolve_price` перебирает ticker → bbo → book → mark, и
+        # отсутствие ВСЕХ сразу и так даёт `view is None`, то есть символ отсеивается раньше.
+        "book", "bbo", "mark", "ticker",
+        # Событийные: молчание — это ДАННЫЕ, а не поломка (сделок/ликвидаций не было).
+        "trades", "liq",
+        # Позиционирование: /futures/data отвечает не по всем инструментам (у токенизированных
+        # товаров базиса нет в принципе, -4104), плюс глобальный бан -1003 гасит их пачкой.
+        *_SCALAR_PLANES,
+        # Кросс-венью (`engine/multi.py::_poll_cross`): вторичные площадки опрашиваются ПО
+        # ВОЗМОЖНОСТЯМ (`fetchLongShortRatioHistory` есть не у всех — у Bybit нет 5m/15m,
+        # у Bitget нет 1d), поэтому отсутствие — свойство площадки, а не наш отказ.
+        "lsr",
+    }
+)
+
+# Корни имён, чей незакрытый план ЯВЛЯЕТСЯ отказом данных. Ровно один: кадры.
+REQUIRED_PLANE_ROOTS: frozenset[str] = frozenset({"kline"})
+
+
+def requested_planes(timeframes: Sequence[str] = _DEFAULT_TFS) -> list[str]:
+    """Полный список планов, которые тик запрашивает у движка на один символ.
+
+    Вынесено из тела ``build_market_view``, чтобы список был ОДИН и его можно было
+    проверить тестом на полноту классификации (см. ``plane_is_required``).
+    """
+    return [f"kline.{tf}" for tf in timeframes] + [
+        "book", "bbo", "mark", "ticker", *_SCALAR_PLANES, "trades", "liq"
+    ]
+
+
+def plane_is_required(plane: str) -> bool:
+    """Является ли незакрытый ``plane`` ОТКАЗОМ данных (а не штатной деградацией).
+
+    Требуются только кадры: их читает каждый детектор обеих полос, и замерший клайн — это
+    сигнатура инцидента 2026-07-11 и ловушки ``stale-htf-cache-trap``. Замер 2026-07-26 на
+    здоровой вселенной: `kline.*` в ``not_ready`` у 0% строк, `basis`/`liq` — у 100%.
+
+    ⚠ Неизвестное имя — НЕ отказ, и это осознанный выбор ПРОТИВ интуиции «fail-loud везде».
+    Строка нарушения приходит не только из нашего списка планов: ``engine/api.py::snapshot``
+    эмитит ещё ``f"{symbol}: not tracked"``, где symbol = ``BTC/USDT:USDT``. Объявлять отказом
+    всё незнакомое — значит воспроизвести перекос, который здесь уже чуть не случился:
+    `failure_frac` → 1.0 → `critical` → ``should_self_restart_on_blackout`` → цикл
+    перезапусков. Это named anti-pattern: глубокая проверка здоровья, роняющая сервис из-за
+    необязательной зависимости.
+
+    Fail-loud перенесён туда, где он ничего не роняет в проде, — в
+    ``tests/test_plane_classification.py``: план, не отнесённый ни к одной категории, валит
+    тест на этапе правки. Рантайм при этом консервативен.
+
+    Args:
+        plane: Имя плана как его называет движок (``"kline.4h"``, ``"liq"``, ...).
+
+    Returns:
+        ``True``, только если корень имени объявлен в ``REQUIRED_PLANE_ROOTS``.
+    """
+    return plane.split(".", 1)[0] in REQUIRED_PLANE_ROOTS
+
 
 def _num(x: Any) -> float | None:
     return float(x) if isinstance(x, (int, float)) else None
@@ -158,11 +231,7 @@ def build_market_view(
     """
     now = now_ms if now_ms is not None else int(time.time() * 1000)
     engine = multi.primary
-    required = (
-        [f"kline.{tf}" for tf in timeframes]
-        + ["book", "bbo", "mark", "ticker", *_SCALAR_PLANES, "trades", "liq"]
-    )
-    snap = multi.snapshot(symbol, required)
+    snap = multi.snapshot(symbol, requested_planes(timeframes))
     mark = snap.optional("mark")
     mark = mark if isinstance(mark, dict) else None
 

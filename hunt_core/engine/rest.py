@@ -339,11 +339,27 @@ async def poll_futures_data(
         if match or "-1003" in msg:
             until = float(match.group(1)) if match else now_ms + _DEFAULT_BAN_MS
             _BAN_UNTIL_MS = max(_BAN_UNTIL_MS, until)
+            # ⚠ СЫРОЕ СООБЩЕНИЕ ОБЯЗАТЕЛЬНО. Прежняя редакция логировала только паузу и метод —
+            # и тем выбрасывала единственную улику о том, КАКОЙ бюджет исчерпан. У Binance это
+            # два РАЗНЫХ счётчика с разными сообщениями:
+            #   «Way too much request weight used…»  → общий вес fapi (2400/мин на IP)
+            #   «Too many requests; current limit is %s requests per minute» → счётчик запросов
+            # У `/futures/data/*` документированный вес РАВЕН НУЛЮ и лимит отдельный —
+            # 1000 запросов / 5 мин / IP (changelog Binance 2023-10-19), причём заголовков
+            # `X-MBX-USED-WEIGHT-*` эти эндпоинты не возвращают ВООБЩЕ (замерено 2026-07-27 на
+            # всех шести: HTTP 200, ноль x-mbx-заголовков, при том что /fapi/v1/klines отдаёт
+            # used-weight 60). То есть телеметрии нет, и сообщение бана — единственный сигнал.
+            #
+            # Почему это не косметика: наш собственный темп — 42 запроса за 300 с, это ~4% от
+            # 1000/5мин. Если бан всё равно приходит, объяснений ровно два — либо мы жжём ОБЩИЙ
+            # вес другими вызовами, либо IP делится с чужим трафиком (лимиты у Binance на IP, а
+            # не на ключ). Различает их именно текст сообщения. Гадать по `pause_s` нельзя.
             LOG.warning(
                 "engine_futures_data_banned",
                 method=method,
                 banned_until_ms=int(until),
                 pause_s=round(max(0.0, until - now_ms) / 1000.0, 1),
+                exchange_msg=msg[:300],
             )
         else:
             LOG.warning("engine_futures_data_failed", method=method, params=req_params, err=msg)
