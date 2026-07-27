@@ -4,6 +4,7 @@ from __future__ import annotations
 
 
 from hunt_core import clock, serde
+from hunt_core.contract import price_in_entry_zone
 import structlog
 import os
 from dataclasses import dataclass
@@ -516,7 +517,6 @@ def register_signal_open(
     ez = setup.get("entry_zone") or _entry_zone_from_plan(setup) or [price, price]
     entry_lo = float(ez[0] if len(ez) > 0 else price)
     entry_hi = float(ez[1] if len(ez) > 1 else price)
-    initial_phase = _initial_signal_phase(setup)
     # Snap geometry onto the exchange price grid at the single registration
     # point (all producers — prizrak, manipulation, main lane — emit raw
     # floats). Entries: nearest tick; stop/TPs: conservative side (stop lands
@@ -534,6 +534,47 @@ def register_signal_open(
         "tp3": quantize_conservative(_float_or_none(setup.get("tp3")), symbol, direction=dir_l),
     }
     orig_sl = setup.get("stop_loss")
+    # ⚠ ТИР ПРОВЕРЯЕТСЯ, А НЕ ПРИНИМАЕТСЯ НА ВЕРУ.
+    #
+    # `delivery_tier == "triggered"` означает «лимитка уже исполнена». Продюсер заявлял это
+    # СЛОВОМ, а трекер верил: раньше здесь стояло `setup.get("delivery_tier") or "triggered"`,
+    # то есть ОТСУТСТВИЕ ключа тоже читалось как «исполнено» — fail-open в самую опасную
+    # сторону (I-6).
+    #
+    # Чем это оборачивается. Ниже `extreme_hi`/`extreme_lo` засеваются ТЕКУЩЕЙ ЦЕНОЙ, а PnL
+    # считается от кромки ЗОНЫ. Если рынок далеко от зоны, вся эта дистанция мгновенно
+    # становится MFE: трейл взводится, `auto_resolve` книжит победу по ордеру, которого не
+    # было. ЗАМЕР на живых свечах (`scripts/verify_entry_fill.py`, 283 записи): **64 записи
+    # (22.6%) имеют вход, по которому рынок не торговал**, и они несут +1589.9% записанного
+    # pnl — больше, чем весь плюс леджера.
+    #
+    # Проверка — общий контракт `price_in_entry_zone`, тот же, которым уже пользуется
+    # `_followups.py::_maybe_armed_to_triggered` для обратного перехода. Здесь она закрывает
+    # класс для ЛЮБОГО продюсера сразу, не трогая логику ни одной из полос: заявленный
+    # `triggered` при цене вне зоны понижается до `armed`, а `_maybe_armed_to_triggered`
+    # доведёт позицию до `triggered`, когда цена действительно войдёт в зону, и переставит
+    # экстремумы по цене фила.
+    #
+    # Понижение ГРОМКОЕ: тихое исправление сделало бы дефект неотличимым от штатной работы —
+    # ровно то свойство, из-за которого он прожил незамеченным.
+    claimed_tier = str(setup.get("delivery_tier") or "").lower()
+    filled = price > 0 and price_in_entry_zone(
+        {"entry_zone": [entry_lo, entry_hi]}, price=price, direction=dir_l
+    )
+    tier = "triggered" if filled else "armed"
+    if claimed_tier == "triggered" and not filled:
+        _LOG.warning(
+            "register_tier_downgraded_not_filled",
+            symbol=symbol,
+            direction=dir_l,
+            price=price,
+            entry_lo=entry_lo,
+            entry_hi=entry_hi,
+            setup_phase=setup.get("phase"),
+        )
+    # Фаза выводится из ПРОВЕРЕННОГО тира, иначе FSM стартовала бы в TRIGGERED при
+    # `delivery_tier == "armed"` — два разных утверждения об одной сделке в одной записи.
+    initial_phase = _initial_signal_phase({**setup, "delivery_tier": tier})
     signal: dict[str, Any] = {
         "status": "active",
         "phase": initial_phase.value,
@@ -568,7 +609,7 @@ def register_signal_open(
         "lifecycle_bias": (lifecycle or {}).get("recommended_bias"),
         "score": setup.get(score_key),
         "fuel": setup.get(fuel_key),
-        "delivery_tier": setup.get("delivery_tier") or "triggered",
+        "delivery_tier": tier,
         "support_break_level": setup.get("support_break_level"),
         "invalidation_above": setup.get("invalidation_above"),
         "resistance_break_level": setup.get("resistance_break_level"),

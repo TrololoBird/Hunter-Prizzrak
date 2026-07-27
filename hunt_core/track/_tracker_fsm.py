@@ -142,7 +142,15 @@ def transition(
 
 
 def initial_signal_phase(setup: dict[str, Any]) -> SignalPhase:
-    tier = str(setup.get("delivery_tier") or "triggered").lower()
+    """Стартовая фаза по тиру доставки.
+
+    ⚠ ОТСУТСТВИЕ ТИРА — ЭТО «НЕ ИСПОЛНЕНО», А НЕ «ИСПОЛНЕНО». Раньше дефолт был
+    ``or "triggered"``: продюсер, забывший ключ, получал позицию, объявленную открытой, — то
+    есть неизвестность трактовалась как самый выгодный исход (I-6). Сегодня
+    ``tracker.register_signal_open`` всегда передаёт ПРОВЕРЕННЫЙ тир, так что ветка
+    недостижима с его стороны, но дефолт остаётся ловушкой для будущего вызывающего.
+    """
+    tier = str(setup.get("delivery_tier") or "armed").lower()
     if tier == "armed":
         return SignalPhase.ARMED
     if tier == "triggered":
