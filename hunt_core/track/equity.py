@@ -158,7 +158,19 @@ class EquityResult(BaseModel):
     start_equity: float
     final_equity: float
     total_return_pct: float
-    max_drawdown_pct: float
+    # ⚠ ИМЯ НАЗЫВАЕТ РОВНО ТО, ЧТО ИЗМЕРЕНО. Раньше поле звалось `max_drawdown_pct` и
+    # читалось как просадка портфеля, хотя `_settle_until` двигает пик и минимум ТОЛЬКО при
+    # ЗАКРЫТИИ сделки. Портфель из 32 одновременных позиций может быть глубоко в минусе без
+    # единого закрытия, и это число ничего не заметит: проверено — оно побитово одинаково
+    # при 13 и при 32 одновременных позициях.
+    #
+    # Настоящую нереализованную просадку посчитать НЕЧЕМ: в кадре нет ценового пути внутри
+    # сделки, только цена выхода. Выдумать её было бы хуже, чем назвать вещи своими именами,
+    # поэтому рядом печатается ВТОРАЯ величина — пик одновременно развёрнутого риска. Она
+    # ограничивает нереализованную просадку сверху: если бы все открытые позиции разом
+    # дошли до стопа, счёт потерял бы ровно её.
+    realized_drawdown_pct: float
+    max_open_risk_pct: float
     trades_taken: int
     trades_skipped_no_capital: int
     trades_unsizeable: int
@@ -289,10 +301,21 @@ def cost_pct_of_notional(
     return total, measured
 
 
+def leg_verdict_key(row: dict[str, Any]) -> str:
+    """Ключ вердикта достижимости — символ + момент открытия.
+
+    Тот же ключ пишет `scripts/verify_trade_legs.py`. Держать его здесь, а не в скрипте,
+    обязательно: разъехавшиеся ключи дали бы пустое пересечение, и «чистая подвыборка» тихо
+    оказалась бы пустой вместо ошибки.
+    """
+    return f"{str(row.get('symbol') or '').upper()}|{row.get('opened_at')}"
+
+
 def build_trade_frame(
     rows: list[dict[str, Any]],
     *,
     costs: CostModel | None = None,
+    leg_verdicts: dict[str, dict[str, Any]] | None = None,
 ) -> pl.DataFrame:
     """Поколоночный расчёт по сделкам: ход, риск, издержки, R.
 
@@ -327,6 +350,7 @@ def build_trade_frame(
         if dist < _MIN_STOP_DIST_PCT:
             continue
         cost, funding_measured = cost_pct_of_notional(row, model)
+        verdict = (leg_verdicts or {}).get(leg_verdict_key(row))
         prepared.append(
             {
                 "symbol": str(row.get("symbol") or "?"),
@@ -340,6 +364,18 @@ def build_trade_frame(
                 # Фандинг не измерен → издержка НИЖНЯЯ ОЦЕНКА, не значение. Флаг едет в
                 # кадр, чтобы отчёт мог показать покрытие, а не выдать оценку за факт.
                 "funding_measured": funding_measured,
+                # ⚠ ОПИРАЕТСЯ ЛИ СДЕЛКА НА ЦЕНУ, КОТОРОЙ НЕ БЫЛО.
+                #
+                # `None` — «не проверено» (вердиктов не передали), и это НЕ «чисто»: смешать
+                # два значения значило бы выдать непроверенное за проверенное (I-6).
+                #
+                # ЗАМЕР `scripts/verify_trade_legs.py` по 283 записям: у **89** хотя бы одна
+                # нога недостижима. На подвыборке, где обе ноги реальны, среднее уходит в
+                # минус с интервалом, накрывающим ноль, — то есть весь плюс результата
+                # держится на сделках, которых рынок не подтверждает.
+                "legs_reachable": (
+                    None if verdict is None else bool(verdict.get("both_reachable"))
+                ),
             }
         )
     if not prepared:
@@ -350,7 +386,7 @@ def build_trade_frame(
                 "closed_at": pl.Datetime(time_zone="UTC"),
                 "close_reason": pl.Utf8, "gross_pct": pl.Float64,
                 "stop_dist_pct": pl.Float64, "cost_pct": pl.Float64,
-                "funding_measured": pl.Boolean,
+                "funding_measured": pl.Boolean, "legs_reachable": pl.Boolean,
             }
         )
     return (
@@ -403,7 +439,8 @@ def simulate_equity(
         start_equity=pol.start_equity,
         final_equity=pol.start_equity,
         total_return_pct=0.0,
-        max_drawdown_pct=0.0,
+        realized_drawdown_pct=0.0,
+        max_open_risk_pct=0.0,
         trades_taken=0,
         trades_skipped_no_capital=0,
         trades_unsizeable=unsizeable_count(rows),
@@ -423,6 +460,7 @@ def simulate_equity(
     open_positions: list[tuple[dt.datetime, float, float]] = []  # (closed_at, risk_usd, pnl)
     taken = skipped = 0
     max_conc = 0
+    max_open_risk = 0.0  # пик одновременно развёрнутого риска, в % капитала
     r_net_sum = r_gross_sum = r_cost_sum = 0.0
     fees_paid = 0.0
 
@@ -457,6 +495,11 @@ def simulate_equity(
         r_cost_sum += trade["r_cost"] * scale
         open_positions.append((trade["closed_at"], risk_usd, pnl_usd))
         max_conc = max(max_conc, len(open_positions))
+        # Пик развёрнутого риска — верхняя граница нереализованной просадки. Считается ПОСЛЕ
+        # добавления позиции: именно в этот момент экспозиция максимальна.
+        if equity > 0:
+            open_risk = sum(p[1] for p in open_positions) / equity * 100.0
+            max_open_risk = max(max_open_risk, open_risk)
         taken += 1
 
     _settle_until(dt.datetime.max.replace(tzinfo=dt.UTC))
@@ -464,7 +507,8 @@ def simulate_equity(
         update={
             "final_equity": equity,
             "total_return_pct": (equity / pol.start_equity - 1.0) * 100.0,
-            "max_drawdown_pct": max_dd,
+            "realized_drawdown_pct": max_dd,
+            "max_open_risk_pct": max_open_risk,
             "trades_taken": taken,
             "trades_skipped_no_capital": skipped,
             "r_net_sum": r_net_sum,

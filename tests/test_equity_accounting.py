@@ -201,7 +201,7 @@ def test_losses_reduce_equity_and_show_up_as_drawdown() -> None:
     ]
     res = simulate_equity(rows)
     assert res.final_equity < res.start_equity
-    assert res.max_drawdown_pct > 0.0
+    assert res.realized_drawdown_pct > 0.0
 
 
 def test_costs_never_flatter_the_result() -> None:

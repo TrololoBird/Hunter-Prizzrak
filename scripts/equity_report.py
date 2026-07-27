@@ -127,7 +127,9 @@ def main() -> None:
         f"{base.trades_skipped_no_capital} · неоценимо {base.trades_unsizeable}"
     )
     say(
-        f"итог {base.total_return_pct:+.1f}% · просадка {base.max_drawdown_pct:.1f}% · "
+        f"итог {base.total_return_pct:+.1f}% · реализ. просадка "
+        f"{base.realized_drawdown_pct:.1f}% · пик развёрнутого риска "
+        f"{base.max_open_risk_pct:.1f}% · "
         f"чистый R {base.r_net_sum:+.1f} · комиссий {base.fees_paid:,.0f} "
         f"из {base.start_equity:,.0f}"
     )
@@ -151,7 +153,7 @@ def main() -> None:
                 )
                 say(
                     f"| {risk:.1f}% | {cap:.0f}% | {lev:.0f}× | "
-                    f"{res.total_return_pct:+.1f}% | {res.max_drawdown_pct:.1f}% | "
+                    f"{res.total_return_pct:+.1f}% | {res.realized_drawdown_pct:.1f}% | "
                     f"{res.trades_taken} | {res.trades_skipped_no_capital} |"
                 )
     say()

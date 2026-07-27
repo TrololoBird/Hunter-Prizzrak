@@ -44,6 +44,14 @@ from hunt_core.track.outcomes import UNRESOLVED_REASONS, is_polluted, outcome_ki
 from hunt_core.track.pnl import realized_pct
 
 HISTORY = pathlib.Path("data/signal_history.jsonl")
+# Вердикты достижимости ног, посчитанные `scripts/verify_trade_legs.py` на живых свечах.
+# Файл ОТДЕЛЬНЫЙ от леджера намеренно: данные — наблюдения биржи, вердикт — производная.
+# В самом леджере уже лежат осиротевшие `market_confirmed`/`recheck_ts` (65 строк без единого
+# читателя во всём дереве) — ровно результат того, что вердикт записали внутрь и не подключили.
+_VERDICT_FILE = pathlib.Path("data/leg_reachability.json")
+_VERDICTS: dict = (
+    json.loads(_VERDICT_FILE.read_text(encoding="utf-8")) if _VERDICT_FILE.exists() else {}
+)
 REPORT = pathlib.Path("docs/audit/ledger-metrics-2026-07-27.md")
 _BOOTSTRAP = 20_000
 _SEED = 20260727
@@ -133,7 +141,7 @@ def main() -> None:
     say()
 
     # ---------------- 2. Величина в R ----------------
-    frame = build_trade_frame(rows)
+    frame = build_trade_frame(rows, leg_verdicts=_VERDICTS)
     say("## 2. Величина результата (R)")
     say()
     say(f"поддаются сайзингу: **{frame.height}** из {len(rows)} "
@@ -174,6 +182,44 @@ def main() -> None:
             f"матожидание {float(np.mean(rnet)):+.3f}R, "
             f"бутстрэп [{rb_lo:+.3f} … {rb_hi:+.3f}]R, "
             f"чистый {float(rframe['r_net'].sum()):+.1f}R")
+        say()
+
+    # ---------------- 2b. Подвыборка, которую рынок подтверждает ----------------
+    if _VERDICTS:
+        clean = frame.filter(pl.col("legs_reachable"))
+        dirty = frame.filter(~pl.col("legs_reachable").fill_null(True))
+        say("### Сделки, обе ноги которых рынок печатал")
+        say()
+        say("⚠ Главная проверка отчёта. Сделка, опирающаяся на цену, по которой рынок не "
+            "торговал, — не результат метода, а артефакт учёта.")
+        say()
+        if clean.height:
+            cnet = clean["r_net"].to_list()
+            cb_lo, cb_hi = bootstrap_mean(cnet)
+            say("| подвыборка | сделок | чистый R | среднее | бутстрэп 95% |")
+            say("|---|---|---|---|---|")
+            say(f"| **обе ноги реальны** | {clean.height} | "
+                f"{float(clean['r_net'].sum()):+.1f} | {float(np.mean(cnet)):+.3f}R | "
+                f"[{cb_lo:+.3f} … {cb_hi:+.3f}]R |")
+            if dirty.height:
+                say(f"| нога недостижима | {dirty.height} | "
+                    f"{float(dirty['r_net'].sum()):+.1f} | "
+                    f"{float(dirty['r_net'].mean()):+.3f}R | — |")
+            say()
+            share = float(dirty["r_net"].sum()) / net_sum * 100.0 if net_sum else 0.0
+            say(f"Недостижимые несут **{share:.1f}%** чистого R при доле "
+                f"{dirty.height / frame.height * 100:.0f}% сделок.")
+            say()
+            if cb_lo <= 0.0 <= cb_hi:
+                say("**Интервал накрывает ноль — знак матожидания на подтверждённых сделках "
+                    "НЕ УСТАНОВЛЕН.**")
+            say()
+    else:
+        say("### Достижимость ног — НЕ ПРОВЕРЕНА")
+        say()
+        say(f"Артефакта `{_VERDICT_FILE}` нет. Прогони "
+            "`uv run python scripts/verify_trade_legs.py`. Отсутствие проверки — это "
+            "«не знаем», а не «чисто».")
         say()
 
     # ---------------- 3. Концентрация ----------------
@@ -261,7 +307,9 @@ def main() -> None:
     say(f"взято **{sim.trades_taken}**, пропущено без лимита **{sim.trades_skipped_no_capital}**, "
         f"неоценимо {sim.trades_unsizeable}")
     say(f"итог **{sim.total_return_pct:+.1f}%**, максимальная просадка "
-        f"**{sim.max_drawdown_pct:.1f}%**, максимум одновременно открытых {sim.max_concurrent}")
+        f"**{sim.realized_drawdown_pct:.1f}%** (только по закрытым; пик развёрнутого риска "
+        f"**{sim.max_open_risk_pct:.1f}%** — верхняя граница нереализованной), "
+        f"максимум одновременно открытых {sim.max_concurrent}")
     say()
 
     # ---------------- 6. Что эти числа не значат ----------------
