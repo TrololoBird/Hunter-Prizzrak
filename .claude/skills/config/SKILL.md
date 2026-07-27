@@ -1,1 +1,0 @@
-../../../.opencode/skills/config/SKILL.md

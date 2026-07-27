@@ -22,6 +22,7 @@ Crypto-futures **signal-analytics**. Reads public Binance USDⓈ-M via CCXT, Pol
 | Истина | PDF «Мини Курс по трейдингу от PrizrakTrade» (69 стр.) — первичен; `research/prizrak_corpus/` разборы вторичны, до перепроверки не переопределяют PDF | `.txt` транскрипты + `research/manipulations_corpus/` |
 | Игра | уровни/накопление/ПОК, непрерывно, RR 1к3 | редкий ММ памп/дамп 20–180%, ~5–6/мес |
 | Стоп | за структуру с запасом 1–3% (стр.33) | ШИРОКИЙ: за экстремум ВСЕЙ манипуляции + 0.3×ATR clamp [3%,5%]; добор/пересиживание ⚠️ **см. ниже — не решено** (`patterns.py`, `manipulation_delivery.py::_stop_buffer`) |
+| Гейт эмиссии | **бэктеста НЕТ** — мерить на живых данных | `research/backtest_*.py` (скилл `/backtest-gate`) |
 
 ⚠️ **«Добор/пересиживание» — НЕ установленный факт, а одно из двух прочтений.** Транскрипты
 (слова автора) описывают широкий стоп с добором и пересиживанием. Заземлённые разборы в
@@ -33,7 +34,6 @@ Crypto-futures **signal-analytics**. Reads public Binance USDⓈ-M via CCXT, Pol
 против позиции**. Под узким стопом это стоп-аут, под широким с добором — переживаемо.
 Что решит: прогнать обе риск-модели по одним событиям и сравнить исход. Пока не сделано —
 не цитировать ни одну сторону как установленную. (зафиксировано 2026-07-26)
-| Гейт эмиссии | **бэктеста НЕТ** — мерить на живых данных | `research/backtest_*.py` (скилл `/backtest-gate`) |
 
 **Бэктест покрывает ТОЛЬКО манипуляции.** Все 6 `research/backtest_*.py` импортируют
 `advance_manipulation_scales`; `hunt_core/prizrak/` не импортирует **ни один**. Прогон после
@@ -128,21 +128,13 @@ _cli.py::main  (watch; pid-lock data/watch.pid)
   (массовый блэкаут → громкий сигнал вместо тихой смерти), `tick_diagnostics`, `universe_audit`.
 - **`deliver/`** — форматтеры и доставка обеих полос + `telegram.py` (broadcaster, dedup, rate-limit).
 
-## Stack
-Python 3.14, uv, CCXT async+WS (ccxt.pro), Polars, aiogram, Pydantic, Structlog, aiohttp
-
 ## Commands
+Стандартное для стека (`uv sync`, `ruff check`, `mypy`, `pytest`) — из `pyproject.toml`.
+Неочевидное, что оттуда не выводится:
 ```bash
-uv sync --all-extras          # install
-uv run python -m hunt_core watch --once --no-telegram  # smoke (см. ⚠️ ниже)
-uv run python -m hunt_core watch --interval 60         # production loop
-uv run ruff check .           # lint
-uv run mypy hunt_core         # type-check
-uv run pytest                 # tests
-uv run pytest tests/test_module_boundary.py -k name    # single test
-uv run pytest --testmon       # fast loop: only tests affected by the change (91s→<1s)
-uv run vulture                # dead-code guard
-uv run python -m hunt_core.engine BTC/USDT:USDT   # движок end-to-end (см. ниже)
+uv run python -m hunt_core watch --once --no-telegram   # smoke — см. ⚠️ ниже, сканер НЕ проверяет
+uv run pytest --testmon                                 # только затронутые тесты (91s→<1s)
+uv run python -m hunt_core.engine BTC/USDT:USDT         # вторая точка входа — см. ниже
 ```
 `python -m hunt_core.engine` — **вторая точка входа**, отдельная от `watch`. Отвечает на вопрос,
 которого не покрывает ни один тест и ни один `verify_*`-скрипт: **двигает ли WS кадр или мы
@@ -291,10 +283,10 @@ CI (`.github/workflows/ci.yml`) добавляет к этому mypy, `pip-audi
 TOML edit "doesn't take effect").
 
 ## Skills
-Project skills at `.claude/skills/<topic>/SKILL.md` (17: architecture, backtest-gate, ccxt,
-config, deep-analysis, documentation, ingest-manipulation-video, logging, performance,
-phantom-key-scan, polars, prohibited-api-scan, razbor-video, scanner, smoke, telegram, testing).
-⚠️ Все написаны 2026-07-12/07-15 и **не пережили переписывание движка** — к их путям и символам
-применяй то же правило, что к `docs/`. Before committing hunt_core changes: `/phantom-key-scan`;
-scanner emission changes: `/backtest-gate`. CCXT Python skill at `~/.claude/skills/ccxt-python/SKILL.md`.
+Список — `ls .claude/skills/`. ⚠️ Написаны 2026-07-12/07-15 и **не пережили переписывание
+движка** — к их путям и символам применяй то же правило, что к `docs/`. Ещё 11 каталогов здесь
+были битыми симлинками на снесённый `.opencode/` и удалены 2026-07-26: скилл, который не
+загружается, неотличим от скилла, которого нет.
+Перед коммитом в hunt_core: `/phantom-key-scan`; правки эмиссии сканера: `/backtest-gate`.
+CCXT Python — `~/.claude/skills/ccxt-python/SKILL.md`.
 Full project context in `AGENTS.md` (последняя правка 2026-07-12 — тоже проверять).

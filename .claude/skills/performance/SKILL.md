@@ -1,1 +1,0 @@
-../../../.opencode/skills/performance/SKILL.md

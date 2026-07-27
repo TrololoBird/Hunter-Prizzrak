@@ -1,1 +1,0 @@
-../../../.opencode/skills/scanner/SKILL.md
