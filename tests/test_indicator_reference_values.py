@@ -133,9 +133,17 @@ def test_zscore30_reference(df: pl.DataFrame) -> None:
 
 
 def test_robust_z_reference(df: pl.DataFrame) -> None:
-    # (last - median) / max(1.4826 * MAD, eps), clipped to +/-12
+    # (last - median) / max(C_n * MAD, eps), clipped to +/-12.
+    #
+    # ⚠ ЭТАЛОН ПЕРЕСЧИТАН 2026-07-27 — это НЕ дрейф, а исправление. Множитель MAD→σ теперь
+    # зависит от длины выборки (`toolkit.robust_stats.mad_to_sigma`): при n=64 он равен
+    # 1.500791 вместо асимптотических 1.4826. Асимптотическая константа на конечной выборке
+    # ЗАНИЖАЕТ σ, а значит ЗАВЫШАЕТ каждый z-скор — систематическое смещение к ложным
+    # срабатываниям (при n=30 σ была меньше верной на 2.63%, при n=10 — на 8.49%).
+    # Здесь эффект: 1.26514395 → 1.24980948, то есть −1.21%.
+    # Канарейка сработала как задумано и пересчитана осознанно, а не подогнана.
     value = robust_z(df["close"], min_n=30)
-    assert value == pytest.approx(1.26514395, rel=1e-8)
+    assert value == pytest.approx(1.24980948, rel=1e-8)
 
 
 def test_series_z_strict_reference() -> None:
@@ -145,9 +153,12 @@ def test_series_z_strict_reference() -> None:
 
 def test_ols_slope_reference(df: pl.DataFrame) -> None:
     raw = ols_slope(df["close"], min_n=30, normalize=False)
-    assert raw == pytest.approx(0.2369980037, rel=1e-9)
+    assert raw == pytest.approx(0.2369980037, rel=1e-9)  # ненормированный НЕ изменился
+    # Нормированный делится на ту же робастную σ — эталон пересчитан вместе с ней,
+    # обоснование в `test_robust_z_reference` выше. 0.0551084095 → 0.0544404554 (−1.21%,
+    # ровно та же доля, что и у z-скора: делитель один).
     norm = ols_slope(df["close"], min_n=30, normalize=True)
-    assert norm == pytest.approx(0.0551084095, rel=1e-8)
+    assert norm == pytest.approx(0.0544404554, rel=1e-8)
 
 
 def test_btc_corr_beta_reference(df: pl.DataFrame) -> None:

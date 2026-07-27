@@ -32,7 +32,16 @@ def test_higher_volume_fewer_touches_zone_wins() -> None:
     base_a = _box(100.0, 98.0, 12, 0, vol=10.0)      # 48 bars, ~24 touches, vol 10/bar
     # Base B: fewer touches, heavy volume, higher price band.
     base_b = _box(120.0, 118.0, 6, 48 * 60 * 60_000, vol=500.0)  # 24 bars, ~12 touches, vol 500/bar
-    bars = bars_from_ohlcv(base_a + base_b)
+    # ⚠ Выход ИЗ бокса в конце обязателен. С 2026-07-27 обнаружение зоны ЗАМОРАЖИВАЕТСЯ, пока
+    # цена внутри зоны (I-5, Chung & Bellotti: иначе новый экстремум переопределяет границу и
+    # пробой становится невозможен по построению). Фикстура, кончающаяся ВНУТРИ бокса, попадает
+    # ровно в этот режим: пивоты после входа отбрасываются, и вторая база не набирается.
+    # Это не обход правки, а исправление фикстуры: она проверяет РАНЖИРОВАНИЕ по объёму, и для
+    # этого цена не обязана застыть внутри зоны.
+    step = 60 * 60_000
+    exit_ts = (48 + 24) * step
+    exit_bars = [[exit_ts + i * step, 125.0, 125.1, 124.9, 125.0, 1.0] for i in range(6)]
+    bars = bars_from_ohlcv(base_a + base_b + exit_bars)
     zones = find_accumulation_zones(bars, tf="1h", cfg=CFG, max_zones=8)
     assert len(zones) >= 2
     # Every zone must carry a volume figure.

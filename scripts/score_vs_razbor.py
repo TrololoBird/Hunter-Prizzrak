@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import argparse
+import random
 import asyncio
 from datetime import UTC, datetime
 from typing import Any
@@ -209,6 +210,46 @@ def _match(level: float, zones: list[tuple[float, float, float | None, str]], to
     return best
 
 
+_CONTROL_DRAWS = 200  # наборов случайных карт на кейс
+_CONTROL_SEED = 20260727  # фиксирован: замер обязан воспроизводиться
+
+# Доля попаданий случайной карты по каждому кейсу — заполняется в `main`.
+CONTROL: list[float] = []
+
+
+def _control_recall(
+    zones: list[tuple[float, float, float | None, str]],
+    levels: list[tuple[float, str]],
+    tol: float,
+    price: float,
+) -> float:
+    """Средняя доля попаданий СЛУЧАЙНОЙ карты той же геометрии — нулевая гипотеза.
+
+    Сохраняются число зон и ширина каждой; центры разбрасываются равномерно по тому же
+    ценовому диапазону, что покрывает настоящая карта. Так контроль отвечает на вопрос
+    «сколько мы поймали бы, ставя зоны наугад той же общей площадью», а не «сколько поймала
+    бы пустая карта».
+    """
+    bands = [(lo, hi) for lo, hi, _p, t in zones if "линия" not in t and hi > lo > 0]
+    if not bands or not levels:
+        return 0.0
+    span_lo = min(lo for lo, _ in bands)
+    span_hi = max(hi for _, hi in bands)
+    if span_hi <= span_lo:
+        return 0.0
+    rng = random.Random(_CONTROL_SEED + int(price * 1000) % 100_000)
+    total = 0.0
+    for _ in range(_CONTROL_DRAWS):
+        fake: list[tuple[float, float, float | None, str]] = []
+        for lo, hi in bands:
+            width = hi - lo
+            centre = rng.uniform(span_lo + width / 2, span_hi - width / 2)
+            fake.append((centre - width / 2, centre + width / 2, None, "контроль"))
+        hit = sum(1 for lvl, _n in levels if _match(float(lvl), fake, tol)[0])
+        total += hit / len(levels)
+    return total / _CONTROL_DRAWS
+
+
 async def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--tol", type=float, default=1.0, help="допуск совпадения, %% (по умолчанию 1.0)")
@@ -254,6 +295,20 @@ async def main() -> None:
             # RR. Измерено на правке value area — 35% боксов сузились на медианные 31%, recall 54→54.
             widths.extend((hi / lo - 1.0) * 100.0 for lo, hi, _p, _t in bands if hi > lo > 0)
 
+            # ⚠ КОНТРОЛЬ СЛУЧАЙНЫМИ УРОВНЯМИ. Без него recall не значит НИЧЕГО.
+            # Osler (ФРБ Нью-Йорка, 2000, EPR 6(2)) прогнала 10 000 наборов СЛУЧАЙНЫХ уровней
+            # в день против 28 месяцев минутных котировок: случайные уровни отрабатывали
+            # **56.2%**, опубликованные профессиональные — **60.8%**. Весь эффект — 4.6 п.п.
+            # То есть «наши уровни совпадают с его на 60%» — это ровно случайный базлайн.
+            # Значение имеет только ПРЕВЫШЕНИЕ над контролем на тех же данных.
+            #
+            # Контроль строится из НАШИХ зон с сохранением их числа и ширины, но со случайно
+            # переставленными центрами внутри того же ценового диапазона: структура разрушена,
+            # «сколько площади мы покрываем» — сохранено. Иначе широкая карта набирает recall
+            # просто размером.
+            ctrl_hits = _control_recall(zones, case["levels"], args.tol, price)
+            CONTROL.append(ctrl_hits)
+
             hits = 0
             misses: list[str] = []
             for lvl, name in case["levels"]:
@@ -275,6 +330,16 @@ async def main() -> None:
         await ex.close()
         await spot_eng.close()
     if tot_lvl:
+        real = tot_hit / tot_lvl * 100.0
+        if CONTROL:
+            ctrl = sum(CONTROL) / len(CONTROL) * 100.0
+            print(f"\n{'=' * 62}")
+            print(f"RECALL {real:.1f}%   СЛУЧАЙНЫЙ КОНТРОЛЬ {ctrl:.1f}%   "
+                  f"ПРЕВЫШЕНИЕ {real - ctrl:+.1f} п.п.")
+            print("Значение имеет только превышение. Для ориентира: Osler (2000) намерила у "
+                  "профессиональных\nуровней превышение над случайными 4.6 п.п. "
+                  f"(60.8% против 56.2%). Контроль: {_CONTROL_DRAWS} наборов/кейс.")
+            print("=" * 62)
         up = [s for _, s in SIGNS if s > 0]
         dn = [s for _, s in SIGNS if s < 0]
         print(f"\nЗНАК смещения промахов: выше его уровня {len(up)}, ниже {len(dn)}")

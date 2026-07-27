@@ -18,6 +18,7 @@ has accumulated the most historical touches regardless of how long ago that was.
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 from hunt_core.prizrak.config import PrizrakConfig
@@ -55,6 +56,22 @@ def _cluster(points: list[tuple[int, float]], *, tol: float) -> list[dict[str, A
         }
         for c in clusters
     ]
+
+
+def _open_test_start_idx(bars: list[dict[str, float]], lo: float, hi: float) -> int | None:
+    """Индекс начала ТЕКУЩЕЙ, ещё не закрытой серии баров «цена внутри зоны», либо ``None``.
+
+    Только трейлинг-серия: закрытые в прошлом заходы в зону — это законные касания, и именно
+    их считает ``touches`` (рост вероятности отскока с числом касаний — единственное, что в
+    литературе по уровням измерено дважды независимо). Замораживать надо ровно тот заход,
+    который идёт ПРЯМО СЕЙЧАС.
+    """
+    i = len(bars) - 1
+    if i < 0 or not (lo <= bars[i]["close"] <= hi):
+        return None
+    while i > 0 and lo <= bars[i - 1]["close"] <= hi:
+        i -= 1
+    return i
 
 
 def _zone_from_clusters(hi: dict[str, Any], lo: dict[str, Any], *, tf: str, bar_count: int) -> dict[str, Any]:
@@ -122,7 +139,57 @@ def find_accumulation_zones(
     pivots = _pivots(bars)
     if len(pivots) < cfg.accumulation_min_touches:
         return []
+    zones = _zones_from_pivots(pivots, bars, tf=tf, cfg=cfg, max_zones=max_zones)
+    if not zones:
+        return zones
 
+    # ⚠ ЗАМОРОЗКА ГРАНИЦЫ НА ВРЕМЯ ТЕКУЩЕГО ЗАХОДА В ЗОНУ (I-5).
+    #
+    # `_cluster` берёт СРЕДНЕЕ пивотов кластера, поэтому каждый новый пивот сдвигает границу.
+    # Пока цена тестирует зону, её собственные экстремумы становятся пивотами и утаскивают
+    # границу за собой. Chung & Bellotti (arXiv:2101.07410) описывают этот дефект прямо:
+    # «If the discovery procedure continues operating, a new minimum (maximum) would create a
+    # new lower (upper) boundary … thus **erroneously reducing the probability of penetration**».
+    # Пробой становится невозможен по построению, а «отскок от зоны» — тавтологией.
+    #
+    # ЗАМЕР до правки (`scripts/verify_zone_freeze.py`, 4 символа × 3 ТФ, продление окна на 40
+    # баров): граница сдвигалась, пока цена внутри, на ВСЕХ 12 сочетаниях; медиана сдвига
+    # 0.02–3.14%, максимум **7.34%** (XRP 4h). Для сравнения: весь буфер стопа — 2%.
+    #
+    # Замораживается ТОЛЬКО текущий, ещё не закрытый заход. Прошлые заходы — это законные
+    # касания, и их считает `touches`: рост вероятности отскока с числом касаний — единственное
+    # свойство уровней, измеренное в литературе дважды независимо (Garzarelli 2014,
+    # Chung & Bellotti 2021). Их выбрасывать нельзя.
+    # Точка заморозки считается по границам зоны, а сама зона — по точке заморозки, поэтому
+    # берётся НЕПОДВИЖНАЯ ТОЧКА. Без итерации остаётся остаточный дрейф: первый проход даёт
+    # `start` по ещё не замороженной (плывущей) зоне, и на следующем баре он прыгает вместе с
+    # ней. Замер это и показал — 12 сносов вместо 39, но не ноль. Итераций максимум три:
+    # отображение монотонно (уже пивотов ⇒ уже зона ⇒ не позже вход), цикла быть не может,
+    # а потолок гарантирует детерминизм и отсутствие зависания.
+    prev_start: int | None = None
+    for _ in range(3):
+        start = _open_test_start_idx(bars, float(zones[0]["lo"]), float(zones[0]["hi"]))
+        if start is None or start == prev_start:
+            break
+        frozen = [p for p in pivots if p[0] < start]
+        if len(frozen) < cfg.accumulation_min_touches:
+            break  # до захода структуры не было — замораживать нечего
+        rebuilt = _zones_from_pivots(frozen, bars, tf=tf, cfg=cfg, max_zones=max_zones)
+        if not rebuilt:
+            break
+        zones, prev_start = rebuilt, start
+    return zones
+
+
+def _zones_from_pivots(
+    pivots: Sequence[tuple[int, str, float]],
+    bars: list[dict[str, float]],
+    *,
+    tf: str,
+    cfg: PrizrakConfig,
+    max_zones: int,
+) -> list[dict[str, Any]]:
+    """Ядро построения зон из готового набора пивотов (вынесено ради заморозки — см. выше)."""
     highs = [(idx, price) for idx, kind, price in pivots if kind == "high"]
     lows = [(idx, price) for idx, kind, price in pivots if kind == "low"]
     high_clusters = _cluster(highs, tol=_CLUSTER_TOL)

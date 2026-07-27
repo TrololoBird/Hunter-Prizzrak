@@ -13,9 +13,43 @@ from typing import cast
 import polars as pl
 
 MIN_N_DEFAULT = 30
-_MAD_TO_SIGMA = 1.4826
+# Асимптотический множитель MAD→σ: 1/Φ⁻¹(3/4). Точное значение 1.4826022185056020.
+_MAD_TO_SIGMA_ASYMPTOTIC = 1.4826022185056020
 _DEFAULT_MAD_EPSILON = 1e-6
 _DEFAULT_ROBUST_Z_CLIP = 12.0
+
+
+def mad_to_sigma(n: int) -> float:
+    """Множитель MAD→σ, поправленный на КОНЕЧНУЮ выборку.
+
+    ⚠ Асимптотическая константа 1.4826 на коротком окне **занижает σ**, а значит
+    **завышает каждый z-скор** — систематическое смещение в сторону ложных срабатываний,
+    а не шум. Замер по формуле ниже (доля, на которую прежняя оценка σ была меньше верной):
+
+        n=10  → C_n=1.6201, прежняя σ была меньше верной на **8.49%**
+        n=20  → C_n=1.5448, на 4.03%
+        n=30  → C_n=1.5227, на **2.63%**   ← это наш ``MIN_N_DEFAULT``
+        n=100 → C_n=1.4941, на 0.77%
+        n=500 → C_n=1.4849, на 0.15%
+
+    То есть порог, откалиброванный на длинном окне, на окне длиной 30 срабатывал так,
+    как будто он на 2.6% ниже. Раньше здесь стояла одна константа на любое n.
+
+    Формула — предсказание Акиншина для несмещённого множителя:
+    ``C_n = 1 / (Φ⁻¹(3/4) · (1 + A_n))``, ``A_n = −0.76213/n − 0.86413/n²``.
+    На малых n она отходит от табличных значений симуляции Park–Kim–Wang не более чем на
+    0.3% (n=10: 1.6201 против 1.6247), что на порядок меньше исправляемого смещения.
+
+    Args:
+        n: Число наблюдений в выборке.
+
+    Returns:
+        Множитель, на который надо умножить MAD, чтобы получить оценку σ.
+    """
+    if n < 2:
+        return _MAD_TO_SIGMA_ASYMPTOTIC
+    a_n = -0.76213 / n - 0.86413 / (n * n)
+    return 1.0 / (0.6744897501960817 * (1.0 + a_n))
 
 # Polars types the aggregate return as a wide union covering temporal series
 # (``Decimal | date | time | timedelta | ...``). Every caller here passes a NUMERIC series —
@@ -40,9 +74,20 @@ def _mad(s: pl.Series, median: float) -> float:
 
 
 def _robust_scale(arr: pl.Series, *, mad_epsilon: float) -> float:
+    """Робастная оценка σ. Множитель берётся ПО ДЛИНЕ выборки (см. ``mad_to_sigma``).
+
+    ⚠ Ветка отката на ``std`` меняет КЛАСС оценки: у медианы и MAD точка слома 50%, у
+    среднего и std — 0%, то есть одно значение способно увести оценку куда угодно. Откат
+    случается, когда MAD = 0, а это не экзотика: MAD обращается в ноль, когда **больше
+    половины наблюдений совпадают с медианой**, — штатное состояние для кванованной тиком
+    цены на неликвиде и для разреженных счётчиков (касания, события ликвидаций).
+    Откат оставлен (он всё же не фабрикует число, а даёт какой-то разброс), но помечен:
+    правильная замена — Qn Руссо-Кру (эффективность 82% против 37% у MAD, точка слома та же
+    50%, и он настраивается против вырождения на связках). Отдельной задачей.
+    """
     median = _median(arr)
     mad = _mad(arr, median)
-    scale = max(_MAD_TO_SIGMA * mad, mad_epsilon)
+    scale = max(mad_to_sigma(arr.len()) * mad, mad_epsilon)
     if scale <= mad_epsilon:
         std = _std_pop(arr)
         if std <= mad_epsilon:
@@ -112,7 +157,7 @@ def ols_slope(
         return slope
     median = _median(arr)
     mad = _mad(arr, median)
-    scale = _MAD_TO_SIGMA * mad
+    scale = mad_to_sigma(n) * mad  # поправка на конечную выборку — та же, что в `_robust_scale`
     if scale <= 0.0:
         scale = _std_pop(arr)
     if scale <= 0.0:
@@ -120,4 +165,4 @@ def ols_slope(
     return slope / scale
 
 
-__all__ = ["MIN_N_DEFAULT", "ols_slope", "quantile", "robust_z"]
+__all__ = ["MIN_N_DEFAULT", "mad_to_sigma", "ols_slope", "quantile", "robust_z"]
