@@ -42,16 +42,6 @@ UNIVERSAL_DEFAULTS: dict[str, Any] = {
         "forming_min_score": 45.0,
         "min_risk_reward": 1.15,
     },
-    "levels": {
-        "sl_max_pct_normal": 8.0,
-        "sl_max_pct_hot": 11.0,
-        "sl_max_pct_parabolic": 14.0,
-        "hot_range_pct": 60.0,
-        "parabolic_range_pct": 120.0,
-        "parabolic_leg_gain_pct": 80.0,
-        "sl_min_atr": 0.6,
-        "min_rr": 1.0,
-    },
     "hunter": {
         "pump_extreme_pct": 15.0,
     },
@@ -253,13 +243,6 @@ def effective_hunt_params(symbol: str = "") -> HuntCalibratedParams:
 # collect_thresholds / scoring_thresholds / delivery_thresholds were deleted —
 # zero call-sites repo-wide; their TOML sections are annotated DOC-ONLY in
 # config.defaults.toml. Re-wiring is a tuning change (backtest gate).
-
-
-def levels_thresholds(symbol: str = "") -> dict[str, float]:
-    lv = universal_section("levels")
-    per = symbol_section(symbol.upper(), "levels") if symbol else {}
-    merged = _deep_merge(lv, per)
-    return {k: float(v) for k, v in merged.items() if isinstance(v, (int, float))}
 
 
 def tracker_thresholds(symbol: str = "") -> dict[str, float]:

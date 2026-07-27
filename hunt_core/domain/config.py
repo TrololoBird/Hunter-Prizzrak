@@ -340,20 +340,10 @@ def load_config_defaults_toml() -> dict[str, Any]:
         if gates:
             out["gates"] = gates
 
-    levels = raw.get("levels", {}).get("adaptive") if isinstance(raw.get("levels"), dict) else None
-    if isinstance(levels, dict):
-        out["levels"] = {
-            k: v
-            for k, v in {
-                "sl_max_pct_normal": levels.get("sl_max_pct_normal"),
-                "sl_max_pct_hot": levels.get("sl_max_pct_hot"),
-                "sl_max_pct_parabolic": levels.get("sl_max_pct_parabolic"),
-                "hot_range_pct": levels.get("hot_range_pct"),
-                "parabolic_range_pct": levels.get("parabolic_range_pct"),
-                "parabolic_leg_gain_pct": levels.get("parabolic_leg_gain_pct"),
-            }.items()
-            if v is not None
-        }
+    # [levels.adaptive] удалён 2026-07-26 вместе со своим единственным потребителем:
+    # `params/store.py::levels_thresholds` читала его только для `adaptive_level_params`, а тот
+    # снесён как никогда не исполнявшийся (95e1ead). Секция осталась бы шестью ключами, которые
+    # выглядят настройкой стопа и не влияют ни на что.
 
     # NB (audit R2 chunk 7): forwarding for [lifecycle].squeeze, [collect], [scoring],
     # [delivery], [intra_bar] and [fusion] was deleted — every reader of those sections
