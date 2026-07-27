@@ -41,6 +41,7 @@ import polars as pl
 
 from hunt_core.track.equity import build_trade_frame, simulate_equity
 from hunt_core.track.outcomes import UNRESOLVED_REASONS, is_polluted, outcome_kind
+from hunt_core.track.pnl import realized_pct
 
 HISTORY = pathlib.Path("data/signal_history.jsonl")
 REPORT = pathlib.Path("docs/audit/ledger-metrics-2026-07-27.md")
@@ -83,9 +84,16 @@ def load() -> list[dict]:
 
 
 def _kind(row: dict) -> str:
+    """Категория исхода по ПЕРЕСЧИТАННОМУ результату, а не по хранимому.
+
+    Хранимый `pnl_pct` смешивает три поколения формулы, а `outcome_kind` решает win/loss по
+    величине. Классифицировать одним числом, а мерить другим — значит получить отчёт, в
+    котором винрейт и R описывают разные сделки.
+    """
+    realized = realized_pct(row)
     return outcome_kind(
         str(row.get("close_reason") or ""),
-        pnl_pct=float(row["pnl_pct"]) if row.get("pnl_pct") is not None else None,
+        pnl_pct=realized[0] if realized is not None else None,
     )
 
 
@@ -171,7 +179,15 @@ def main() -> None:
     # ---------------- 3. Концентрация ----------------
     say("## 3. Концентрация — чем держится результат")
     say()
-    top = frame.select(pl.col("r_net").top_k(10)).to_series().to_list()
+    # ⚠ Сортировка ЯВНАЯ. Порядок выдачи `top_k` документацией polars не гарантирован, а ниже
+    # берутся срезы `top[:1]`, `top[:3]`, `top[:5]` — они осмысленны только на убывающем ряду.
+    #
+    # Аудит утверждал, что порядок УЖЕ ломается и «каждая строка занижает концентрацию».
+    # Проверено на этих же данных (polars 1.42.1): выдача совпала с отсортированной, доля
+    # топ-3 не изменилась — то есть утверждение НЕ подтвердилось. Сортировка добавлена не по
+    # его следам, а потому что код опирался на негарантированное свойство: сегодня совпадает,
+    # завтра может не совпасть, и молча.
+    top = frame.select(pl.col("r_net").top_k(10).sort(descending=True)).to_series().to_list()
     say("| топ-k сделок | вклад | доля чистого R |")
     say("|---|---|---|")
     for k in (1, 3, 5, 10):

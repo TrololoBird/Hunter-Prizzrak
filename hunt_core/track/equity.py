@@ -45,6 +45,9 @@ import polars as pl
 import structlog
 from pydantic import BaseModel, Field
 
+from hunt_core.track.pnl import entry_base, realized_pct
+from hunt_core.track.pnl import stop_distance_pct as _stop_distance_pct
+
 LOG = structlog.get_logger(__name__)
 
 # Binance USDⓈ-M VIP 0, сверено 2026-07-27 (binance.com/en/fee/futureFee).
@@ -174,34 +177,12 @@ def _parse_ts(value: Any) -> dt.datetime | None:
     return stamp if stamp.tzinfo else stamp.replace(tzinfo=dt.UTC)
 
 
-def risk_base(row: dict[str, Any]) -> float | None:
-    """Кромка входа, от которой считается и стоп, и прибыль.
-
-    Лонг отсчитывается от `entry_hi`, шорт — от `entry_lo`: это ХУДШАЯ кромка зоны. Та же
-    точка, что и в `tracker.close_signal`; две разные базы в одной сделке уже приводили к
-    прибыли из ничего в половину ширины зоны.
-    """
-    lo, hi = _num(row.get("entry_lo")), _num(row.get("entry_hi"))
-    if lo and hi:
-        return hi if str(row.get("direction")) == "long" else lo
-    return lo or hi
-
-
-def stop_distance_pct(row: dict[str, Any]) -> float | None:
-    """Дистанция ПЕРВОНАЧАЛЬНОГО стопа в процентах — это и есть единица риска.
-
-    Берётся `original_stop_loss`, а не текущий `stop_loss`: размер позиции решается в момент
-    входа, и подтянутый позже безубыток риска не меняет. Считать риск по сдвинутому стопу
-    значило бы задним числом объявить сделку крупнее, чем она была.
-
-    Returns:
-        Дистанция в процентах либо None, если геометрия не восстановима.
-    """
-    base = risk_base(row)
-    stop = _num(row.get("original_stop_loss")) or _num(row.get("stop_loss"))
-    if not base or not stop:
-        return None
-    return abs(base - stop) / base * 100.0
+# ⚠ Геометрия входа и риска НЕ дублируется здесь — она живёт в `track/pnl.py` вместе с
+# формулой результата, и `tracker.close_signal` пользуется той же. Две копии базы входа уже
+# однажды разошлись (середина зоны против худшей кромки) и впрыснули половину ширины зоны в
+# каждый R, включая живой гейт `_cooldowns.net_r`. Имена ре-экспортируются ради вызывающих.
+risk_base = entry_base
+stop_distance_pct = _stop_distance_pct
 
 
 def _exit_fee_pct(row: dict[str, Any], costs: CostModel) -> float:
@@ -287,7 +268,19 @@ def build_trade_frame(
     for row in rows:
         opened, closed = _parse_ts(row.get("opened_at")), _parse_ts(row.get("closed_at"))
         dist = stop_distance_pct(row)
-        gross = row.get("pnl_pct")
+        # ⚠ РЕЗУЛЬТАТ ПЕРЕСЧИТЫВАЕТСЯ ИЗ ГЕОМЕТРИИ, ХРАНИМЫЙ `pnl_pct` НЕ ЧИТАЕТСЯ.
+        #
+        # В колонке `pnl_pct` смешаны ТРИ поколения формулы: пересчёт 283 записей по текущей
+        # конвенции даёт +976.2% против хранимых +1575.2% — расхождение 599 п.п. Хуже, что
+        # у 157 из 168 невырожденных зон хранимое число писалось от СЕРЕДИНЫ зоны, тогда как
+        # `stop_distance_pct` ниже меряет риск от ХУДШЕЙ кромки: числитель и знаменатель R
+        # брались от разных точек отсчёта.
+        #
+        # `realized_pct` — та же и единственная формула, которой считает `tracker.close_signal`
+        # (`track/pnl.py`). Держать вторую копию здесь значило бы воспроизвести ровно тот
+        # дефект, который правка закрывает.
+        realized = realized_pct(row)
+        gross = realized[0] if realized is not None else None
         if opened is None or closed is None or dist is None or gross is None:
             continue
         if dist < _MIN_STOP_DIST_PCT:

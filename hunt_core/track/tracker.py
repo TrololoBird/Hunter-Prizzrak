@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from hunt_core import clock, serde
 from hunt_core.contract import price_in_entry_zone
+from hunt_core.track.pnl import realized_pct
 import structlog
 import os
 from dataclasses import dataclass
@@ -763,49 +764,25 @@ def close_signal(
     sig["close_lifecycle_phase"] = sig.get("lifecycle_phase")
     if exit_price is not None and exit_price > 0:
         sig["exit_price"] = exit_price
-        lo = float(sig.get("entry_lo") or 0)
-        hi = float(sig.get("entry_hi") or 0)
-        # ⚠ БАЗА PnL — ХУДШАЯ КРОМКА ЗОНЫ, ТА ЖЕ, ОТ КОТОРОЙ СТАВИТСЯ СТОП.
+        # ⚠ ФОРМУЛА ЖИВЁТ В `track/pnl.py` — ОДНА НА ВЕСЬ ПРОЕКТ.
         #
-        # Раньше здесь стояла СЕРЕДИНА зоны, а `_trailing.py::_worst_entry` (верно) ставит
-        # безубыток и трейл от худшей кромки: лонг — от `entry_hi`, шорт — от `entry_lo`.
-        # Две разные точки отсчёта в одной сделке означают, что выход «в безубыток» книжится
-        # с прибылью в ПОЛОВИНУ ширины зоны — из ничего.
+        # Раньше она стояла здесь, а `track/equity.py` считал R как `хранимый pnl /
+        # дистанция стопа`, где дистанция меряется от ХУДШЕЙ кромки. Замер 2026-07-27: у 157
+        # из 168 невырожденных зон хранимый pnl писался от СЕРЕДИНЫ — то есть числитель и
+        # знаменатель R брали разные точки отсчёта, и в каждый R впрыснута половина ширины
+        # зоны. Это шло в `_cooldowns.net_r`, живой гейт допуска символа.
         #
-        # ЗАМЕР (пересчитан 2026-07-27 по очищенному леджеру — 283 настоящие записи): 40.6%
-        # зон вырождены (нулевая ширина), там разницы нет. Но у остальных 168 медиана ширины
-        # 2.245%, p90 4.883%, максимум 13.26% — то есть до **6.63%** фантомной прибыли на
-        # сделку. Не «мелочь, которой можно пренебречь»: это больше, чем весь буфер стопа.
-        # (Прежние «88.5% вырожденных» считались по файлу с 3423 тестовыми фикстурами, у
-        # которых lo == hi по построению; на настоящих данных дефект ШИРЕ, а не уже.)
+        # База — ХУДШАЯ кромка (лонг → `entry_hi`, шорт → `entry_lo`), та же, от которой
+        # `_trailing.py::_worst_entry` ставит безубыток. Две базы в одной сделке давали
+        # прибыль из ничего в половину ширины: у 168 невырожденных зон медиана 2.245%,
+        # максимум 13.26% — до 6.63% фантома на сделку, больше всего буфера стопа.
         #
-        # Худшая кромка — консервативный и единственный выбор, который нельзя оспорить: по
-        # лимитной лестнице неизвестно, где именно исполнилось, и приписывать себе лучшую
-        # половину зоны нельзя (I-6: не выдумывать число там, где его нет).
-        if lo > 0 and hi > 0:
-            base = hi if direction == "long" else lo
-        else:
-            base = lo or hi
-        if base > 0:
-
-            def _leg(px: float) -> float:
-                raw = (px - base) / base * 100.0
-                return raw if direction == "long" else -raw
-
-            # Faithful money-management PnL: the method banks a partial at TP1 and moves
-            # the stop to entry (BE), so the runner is what rides on. Marking the WHOLE
-            # position at the exit price (the old behaviour) reported a trade that took
-            # +20% on half and then trailed back to BE as PnL 0.00% — erasing a real gain
-            # and poisoning the outcome ledger / win-rate the calibration reads.
-            tp1 = float(sig.get("tp1") or 0)
-            fixed_pct = float(sig.get("partial_fixed_pct") or 0)
-            if sig.get("tp1_hit") and tp1 > 0 and 0.0 < fixed_pct < 100.0:
-                frac = fixed_pct / 100.0
-                sig["pnl_pct"] = round(frac * _leg(tp1) + (1.0 - frac) * _leg(exit_price), 2)
-                sig["pnl_basis"] = "partial_fix_at_tp1"
-            else:
-                sig["pnl_pct"] = round(_leg(exit_price), 2)
-                sig["pnl_basis"] = "full_position"
+        # `pnl_basis` теперь называет И базу, И способ: прежние `full_position` /
+        # `partial_fix_at_tp1` молчали о точке отсчёта, из-за чего поколение формулы было
+        # неотличимо по данным и его пришлось восстанавливать пересчётом.
+        realized = realized_pct(sig, direction=direction, exit_price=exit_price)
+        if realized is not None:
+            sig["pnl_pct"], sig["pnl_basis"] = realized
     try:
         opened = datetime.fromisoformat(str(sig.get("opened_at")))
         sig["duration_min"] = round((ts - opened).total_seconds() / 60.0, 1)

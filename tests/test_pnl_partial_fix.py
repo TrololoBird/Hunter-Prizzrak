@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+from hunt_core.track.pnl import BASIS_FULL, BASIS_PARTIAL
 from hunt_core.track.tracker import close_signal
 
 _OPENED = datetime(2026, 7, 14, tzinfo=UTC)
@@ -38,7 +39,7 @@ def test_partial_fix_then_breakeven_is_not_zero() -> None:
     )
     sig = state["signals"][key]
     assert sig["pnl_pct"] == 10.0  # 0.5*(+20%) + 0.5*(0%)
-    assert sig["pnl_basis"] == "partial_fix_at_tp1"
+    assert sig["pnl_basis"] == BASIS_PARTIAL
 
 
 def test_no_tp1_is_still_full_position() -> None:
@@ -49,7 +50,7 @@ def test_no_tp1_is_still_full_position() -> None:
     )
     sig = state["signals"][key]
     assert sig["pnl_pct"] == -10.0
-    assert sig["pnl_basis"] == "full_position"
+    assert sig["pnl_basis"] == BASIS_FULL
 
 
 def test_short_partial_fix() -> None:

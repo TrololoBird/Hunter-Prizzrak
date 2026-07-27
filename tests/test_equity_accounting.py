@@ -40,6 +40,11 @@ def _row(
     symbol: str = "AAAUSDT",
 ) -> dict:
     start = opened or _T0
+    # ⚠ Задаётся ЦЕНА ВЫХОДА, а не готовый `pnl_pct`. С 2026-07-27 `build_trade_frame`
+    # пересчитывает результат из геометрии и хранимое число не читает — в колонке `pnl_pct`
+    # смешаны три поколения формулы, и доверять ей нельзя. Фикстура обязана давать
+    # НАБЛЮДЕНИЯ (цена выхода), а не чужой вывод.
+    exit_price = entry * (1 + pnl / 100.0) if direction == "long" else entry * (1 - pnl / 100.0)
     return {
         "symbol": symbol,
         "direction": direction,
@@ -47,7 +52,7 @@ def _row(
         "entry_hi": entry,
         "original_stop_loss": stop,
         "stop_loss": stop,
-        "pnl_pct": pnl,
+        "exit_price": exit_price,
         "close_reason": reason,
         "opened_at": start.isoformat(),
         "closed_at": (start + dt.timedelta(hours=hours)).isoformat(),
