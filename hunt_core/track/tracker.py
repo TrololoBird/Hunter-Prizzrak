@@ -63,6 +63,7 @@ from hunt_core.track._cooldowns import (
     symbol_loss_streak_cooldown,
     symbol_repeat_loser_blocked,
 )
+from hunt_core.track._trailing import reset_stop_window
 from hunt_core.track._followups import evaluate_followups
 
 _LOG = structlog.get_logger(__name__)
@@ -297,6 +298,7 @@ def _apply_early_breakeven_lock(
         if new_stop <= entry or (cur > 0 and new_stop <= cur):
             return False
     active["stop_loss"] = new_stop
+    reset_stop_window(active, price=0.0)
     active["sl_at_breakeven"] = True
     return True
 
@@ -866,6 +868,18 @@ def auto_resolve_active_signals(
 
     for key, sig in list(signals.items()):
         if not isinstance(sig, dict) or sig.get("status") in ("closed", "invalidated"):
+            continue
+
+        # ⚠ ARMED = лимитка ВЫСТАВЛЕНА, но НЕ ИСПОЛНЕНА. Управлять нечем: позиции нет.
+        # Гард есть в `_evaluate_levels.py::evaluate_levels` с девятистрочным обоснованием, а
+        # здесь его не было — при том что в тик (`_cycle_tick.py`) подключён ИМЕННО этот
+        # резолвер. Воспроизведено на armed-шорте с лимиткой на 120 при цене 100→94: лимитка
+        # не тронута ни разу, а резолвер закрыл сделку `tp1_hit` с pnl +21.67 и меткой `win`.
+        # У armed-лонгов с раннером до полного закрытия не доходит, но `tp1_hit` ставится и
+        # `on_tp1_reached` банкует `partial_fixed_pct` — то есть `close_signal` позже начислит
+        # долю от `tp1` за сделку, которой не было. Это память `armed-tier-phantom-fill`,
+        # вернувшаяся во ВТОРОМ резолвере.
+        if str(sig.get("delivery_tier") or "").lower() == "armed":
             continue
 
         sym = sig.get("symbol") or ""

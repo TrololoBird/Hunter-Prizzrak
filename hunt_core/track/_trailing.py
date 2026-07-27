@@ -10,6 +10,24 @@ from hunt_core.params.store import tracker_thresholds
 
 _SQUEEZE_TRAIL_TIGHTEN = 0.70
 
+def reset_stop_window(active: dict[str, Any], *, price: float) -> None:
+    """Сбросить окно экстремумов для SL/TP — зовётся при КАЖДОЙ записи ``stop_loss``.
+
+    Стоп, переставленный на новый уровень, обязан проверяться только против движения цены
+    ПОСЛЕ перестановки. Без сброса он мгновенно срабатывает о минимум, случившийся когда
+    этого стопа ещё не было (разбор — в докстроке ``_bar_extremes``).
+
+    Args:
+        active: Запись активного сигнала.
+        price: Цена на момент сдвига — с неё окно и начинается.
+    """
+    if price > 0:
+        active["sl_window_hi"] = price
+        active["sl_window_lo"] = price
+    else:  # цены нет — честнее удалить окно, чем засеять нулём (I-6)
+        active.pop("sl_window_hi", None)
+        active.pop("sl_window_lo", None)
+
 def _worst_entry(active: dict[str, Any], *, direction: str) -> float:
     """Worst-case (least-favorable) fill edge for R:R, MFE and breakeven SL.
 
@@ -136,7 +154,10 @@ def _update_trailing_stop(
     # round(x, 6) here gridded stops 10-100× coarser than the exchange tick on
     # sub-1e-4 coins (1000SATS/DOGS/NEIRO…) — the whole trail distance vanished
     # or doubled. Quantize to the real tick, conservative side (long→floor).
+    # ⚠ Стоп не имеет права стоять ЛУЧШЕ рынка: для лонга — выше текущей цены. Иначе выход
+    # книжится по цене, по которой сделку никто бы не закрыл, и результат завышен.
     active["stop_loss"] = quantize_conservative(new_stop, symbol, direction=direction)
+    reset_stop_window(active, price=0.0)  # окно SL/TP начнётся со следующего опроса
     active["trailing_active"] = True
     # Once trailing SL is in profit territory, suppress bias_flip exits.
     if direction == "short" and new_stop < entry:
@@ -188,6 +209,7 @@ def apply_tp1_breakeven_trail(
         if new_stop <= entry or (cur > 0 and new_stop <= cur):
             return False
     active["stop_loss"] = new_stop
+    reset_stop_window(active, price=0.0)
     active["sl_at_breakeven"] = True
     active["tp1_breakeven_active"] = True
     return True
@@ -220,6 +242,7 @@ def apply_tp1_management(
     else:
         lock_stop = max(entry, cur) if cur > 0 else entry
     active["stop_loss"] = quantize_conservative(lock_stop, symbol, direction=direction)
+    reset_stop_window(active, price=0.0)
     active["partial_fixed_pct"] = pct
     active["sl_at_breakeven"] = True
     active["tp1_managed"] = True

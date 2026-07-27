@@ -53,7 +53,31 @@ _BAR_MIN_AGE_MIN = {"1m": 0.0, "1m_closed": 2.0, "5m": 6.0, "5m_closed": 11.0}
 def _bar_extremes(
     row: dict[str, Any], active: dict[str, Any], *, price: float, ts: datetime
 ) -> tuple[float, float]:
-    """Intrabar hi/lo since roughly the last poll — wicks must hit SL/TP, not only ticks."""
+    """Экстремумы для проверки SL/TP — накопленные С МОМЕНТА ПОСЛЕДНЕГО СДВИГА СТОПА.
+
+    ⚠ ПОЧЕМУ НЕ ЗА ВСЮ ЖИЗНЬ СДЕЛКИ. Раньше здесь копились экстремумы от самого открытия, и
+    ПОДВИНУТЫЙ стоп проверялся против ЗАМОРОЖЕННОГО минимума — то есть срабатывал мгновенно,
+    на следующем же опросе. Воспроизведено на живом коде (лонг, цена только росла и ни разу
+    не возвращалась):
+
+        тик 0  px=100.00  lo=100.00  stop= 94.0
+        тик 1  px=103.00  lo=100.00  stop=101.5   трейл сдвинулся
+        тик 2  px=106.00  lo=100.00  stop=104.5   TP1 защёлкнут
+        тик 3  px=105.50  lo=100.00  stop=104.5 → ЗАКРЫТ trailing_stop_profit +5.70 → «win»
+
+    `lo = 100.0` — это цена регистрации, из времени, когда стопа на 104.5 ещё не существовало.
+    Рынок ниже 104.5 после сдвига не торговался НИ РАЗУ. Следствия: раннера не существует
+    вовсе (любая сделка со сдвинувшимся стопом закрывается на следующем опросе), TP2 через
+    этот путь недостижим, а выход книжится по цене стопа — которая для лонга стоит ВЫШЕ
+    рынка, — то есть результат завышен систематически, и `outcome_kind` пишет это в победы.
+
+    Автор класс видел и закрыл ровно один тик (`stop_hit and trail_updated and
+    _stop_in_profit_zone`), но `trail_updated` на СЛЕДУЮЩЕМ опросе уже False, и гард отпускал.
+
+    Пожизненные `extreme_hi`/`extreme_lo` сохранены и по-прежнему считают MFE — там окно от
+    открытия и есть правильное. Для SL/TP ведётся отдельная пара, которую сбрасывает
+    `reset_stop_window` при каждой записи `stop_loss`.
+    """
     trk = _tracker_ref()
     hi = lo = price
     age = trk._signal_age_min(active, ts)
@@ -71,14 +95,25 @@ def _bar_extremes(
             hi = max(hi, c_hi)
         if c_lo > 0:
             lo = min(lo, c_lo)
-    # Cumulative extremes across polls (kline reconcile also writes these).
+    # Пожизненные экстремумы — ТОЛЬКО для MFE (окно от открытия там и есть верное).
+    life_hi, life_lo = hi, lo
     try:
-        hi = max(hi, float(active.get("extreme_hi") or price))
-        lo = min(lo, float(active.get("extreme_lo") or price))
+        life_hi = max(life_hi, float(active.get("extreme_hi") or price))
+        life_lo = min(life_lo, float(active.get("extreme_lo") or price))
     except (TypeError, ValueError):
         pass
-    active["extreme_hi"] = hi
-    active["extreme_lo"] = lo
+    active["extreme_hi"] = life_hi
+    active["extreme_lo"] = life_lo
+
+    # Окно ДЛЯ SL/TP — с последнего сдвига стопа. Отсутствие ключей = окно только что
+    # сброшено (или сделка новая): начинаем с того, что видно на этом опросе.
+    try:
+        hi = max(hi, float(active.get("sl_window_hi") or hi))
+        lo = min(lo, float(active.get("sl_window_lo") or lo))
+    except (TypeError, ValueError):
+        pass
+    active["sl_window_hi"] = hi
+    active["sl_window_lo"] = lo
     return hi, lo
 
 
