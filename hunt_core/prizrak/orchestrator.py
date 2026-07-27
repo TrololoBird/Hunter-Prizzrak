@@ -146,6 +146,38 @@ def _entry_band(anchor: float) -> tuple[float, float]:
     return round(anchor * (1 - _ENTRY_BAND_PCT), 8), round(anchor * (1 + _ENTRY_BAND_PCT), 8)
 
 
+def _activation_for(summary: dict[str, Any], *, price: float, direction: str) -> str:
+    """«Цена в полосе входа» — ПРОВЕРЕННОЕ утверждение, а не объявленное.
+
+    Кандидаты ставили `summary["activation"] = "in_entry_zone"` литералом, тогда как их
+    гейты допускают цену ЗА полосой: ретест-гейты на ±δ(τ), кромочный — на 35% вглубь бокса
+    при полосе ±0.2%. Дальше цепочка не спрашивает второй раз:
+    `signals/lifecycle.py` → state «activated» → `runtime/emitter.py` → `delivery_tier
+    = "triggered"` → трекер засевает экстремумы ЦЕНОЙ и считает PnL от кромки полосы.
+
+    ЗАМЕР на живых данных (207 символов, два прогона): утверждение было ЛОЖНЫМ у **68% и
+    72%** сработок ретест-гейтов (52/76 и 48/67); превышение над полосой до 1.29%.
+
+    ⚠ Почему это не «и так безопасно». Мгновенный MFE ограничен сверху δ(τ), а δ(τ) зажата
+    `toolkit/level_band.py::MAX_BAND_PCT = 2.0` — ниже порога взвода трейла 2.5. Но
+    безопасность СЛУЧАЙНА: без клампа δ превышает 2.5 у **30.7%** пар (73.8% на 1д, 100% на
+    1н, максимум 40.8%), кламп реально связывает у 34.7% пар, и живёт он в общем toolkit —
+    написан против вырожденных полос, а не ради этого порога. Поднять его или сделать
+    по-ТФ-ным (о чём прямо рассуждает докстрока самого модуля) — и путь открывается молча.
+
+    Проверка стоит здесь, у ИСТОЧНИКА утверждения. Трекер проверяет второй раз
+    (`register_signal_open`), но это оборона в глубину: карточка в Telegram печатается
+    ДО трекера и обещает живой вход над ценой, которая до лимитки не дошла.
+    """
+    lo, hi = summary.get("entry_lo"), summary.get("entry_hi")
+    if lo is None or hi is None:
+        return "near_entry"
+    inside = price_in_entry_zone(
+        {"entry_zone": [lo, hi]}, price=price, direction=direction
+    )
+    return "in_entry_zone" if inside else "near_entry"
+
+
 def _management_plan(direction: Literal["long", "short"]) -> list[str]:
     """Position-management plan per course — annotations for manual trading, not live
     management (the generator is stateless and does not track an open position).
@@ -2076,7 +2108,7 @@ def _pp_candidate(
         summary["pp_bodies"] = primary["bodies"]
         # ТВХ = ретест сломанного уровня, цена уже у зоны (гейт retest выше) — активный
         # вход, не «idle». Без этого шапка печатала «⏸ Не готово» над направленным сетапом.
-        summary["activation"] = "in_entry_zone"
+        summary["activation"] = _activation_for(summary, price=price, direction=direction)
         if partner is not None:
             gap = abs(partner["level"] - level) / level * 100
             # Стр.55: «Уровнем ПП является вся зона Тени свечи ... а НЕ ТОЛЬКО "шпиль"».
@@ -2147,7 +2179,9 @@ def _trap_flip_candidate(
         )
         if summary is not None:
             summary["pattern"] = "ловушка_пробой_флип"
-            summary["activation"] = "in_entry_zone"  # флип на ретесте — цена у уровня, не idle
+            summary["activation"] = _activation_for(
+                summary, price=price, direction=direction
+            )
             result = _apply_confluence(
                 summary, ohlcv=ohlcv,
                 cfg=cfg, htf_bias=htf_bias, struct_by_tier=struct_by_tier,
@@ -2174,7 +2208,9 @@ def _trap_flip_candidate(
         )
         if summary is not None:
             summary["pattern"] = "ловушка_пробой_флип"
-            summary["activation"] = "in_entry_zone"  # флип на ретесте — цена у уровня, не idle
+            summary["activation"] = _activation_for(
+                summary, price=price, direction=direction
+            )
             result = _apply_confluence(
                 summary, ohlcv=ohlcv,
                 cfg=cfg, htf_bias=htf_bias, struct_by_tier=struct_by_tier,
@@ -2236,7 +2272,7 @@ def _stop_volume_pre_exit_candidate(
     )
     if summary is None:
         return None
-    summary["activation"] = "in_entry_zone"
+    summary["activation"] = _activation_for(summary, price=price, direction=direction)
     result = _apply_confluence(
         summary, ohlcv=ohlcv, cfg=cfg, htf_bias=htf_bias, struct_by_tier=struct_by_tier,
     )
@@ -2348,7 +2384,7 @@ def _figure_pennant_candidate(
     )
     if summary is None:
         return None
-    summary["activation"] = "in_entry_zone"
+    summary["activation"] = _activation_for(summary, price=price, direction=direction)
     result = _apply_confluence(
         summary, ohlcv=ohlcv, cfg=cfg, htf_bias=htf_bias, struct_by_tier=struct_by_tier,
     )
