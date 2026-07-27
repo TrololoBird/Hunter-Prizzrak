@@ -117,6 +117,9 @@ class Engine:
         # 4 цикла = 20 минут истории: достаточно, чтобы пережить одиночный скачок ожидания в
         # общих воротах `/futures/data`, и мало, чтобы бонд следовал за ростом юниверса.
         self._walk_history: deque[float] = deque(maxlen=4)
+        # Последний вердикт по бонду каждого плана — чтобы писать в лог СМЕНУ состояния,
+        # а не повторять одно и то же условие каждые CADENCE_PUBLISH_S.
+        self._bound_state: dict[str, str] = {}
 
     async def start(self) -> None:
         await self._ingest.exchange.load_markets()
@@ -159,12 +162,26 @@ class Engine:
             # Ругаться только на ИЗМЕРЕННОЕ (`cad.measured`). Первый прогон без этого условия
             # выдал `bound_unreachable` для `kline.5m` при samples=1, где «периодом» был
             # промежуток «REST-сид → первый WS-бар», то есть артефакт старта, а не темп.
+            #
+            # ⚠ ПО СМЕНЕ ВЕРДИКТА, а не каждый цикл. Условие «бонд тесен» — свойство КОНСТАНТЫ,
+            # оно не меняется само; повторять его раз в CADENCE_PUBLISH_S значит выдать ~700
+            # одинаковых строк в сутки на один план. Постоянно висящее предупреждение перестаёт
+            # читаться, а лог здесь — основной способ верификации. Уход нарушения тоже событие,
+            # поэтому пишется `engine_plane_bound_ok`.
             for cad in sorted(seen.values(), key=_worst_first):
-                if not cad.bound_too_tight:
+                state = (
+                    "unreachable" if cad.bound_unreachable
+                    else "tight" if cad.bound_too_tight
+                    else "ok"
+                )
+                if self._bound_state.get(cad.plane) == state:
                     continue
+                was_flagged = self._bound_state.get(cad.plane) in ("tight", "unreachable")
+                self._bound_state[cad.plane] = state
+                if state == "ok" and not was_flagged:
+                    continue  # первый нормальный замер — не событие
                 LOG.warning(
-                    "engine_plane_bound_unreachable" if cad.bound_unreachable
-                    else "engine_plane_bound_tight",
+                    f"engine_plane_bound_{state}",
                     plane=cad.plane,
                     measured_median_s=round(cad.median_s, 1),
                     measured_p90_s=round(cad.p90_s, 1),
