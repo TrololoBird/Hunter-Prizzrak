@@ -15,6 +15,20 @@ LOSS_REASONS = frozenset(
         "trend_exhaustion",
         "reclaim_invalidation",
         "support_lost",
+    }
+)
+# Выходы, при которых тезис НЕ РАЗРЕШИЛСЯ: ни стоп, ни цель не достигнуты, позиция закрыта по
+# внешней причине. Это вертикальный барьер triple-barrier и его родня.
+#
+# ⚠ `bias_flip`, `lifecycle_stale` и `opposite_signal` ПЕРЕЕХАЛИ сюда из `LOSS_REASONS`, и это
+# не косметика: считать убытком выход по смене режима — значит утверждать, что тезис проверен и
+# провалился, тогда как проверки не было. У них та же природа, что у таймаута: мы закрыли сами.
+# `orphan_expired` и `time_stall` — там же по той же причине.
+UNRESOLVED_REASONS = frozenset(
+    {
+        "timeout",
+        "orphan_expired",
+        "time_stall",
         "bias_flip",
         "lifecycle_stale",
         "opposite_signal",
@@ -58,7 +72,7 @@ def entry_lifecycle_phase(sig: dict[str, Any]) -> str:
 
 
 def outcome_kind(reason: str, *, pnl_pct: float | None = None) -> str:
-    """Classify a closed trade as win/loss/flat/unknown.
+    """Классифицировать закрытую сделку: win / loss / **unresolved** / flat / unknown.
 
     Real PnL is authoritative whenever it clears the noise floor
     (``_PROFIT_STRUCTURAL_EXIT_MIN_PCT``), regardless of ``reason`` — the label
@@ -77,6 +91,24 @@ def outcome_kind(reason: str, *, pnl_pct: float | None = None) -> str:
     is capping downside — if it closed in genuine profit, that is a win by any
     honest accounting, not a special case for a curated reason list.
     """
+    # ⚠ ТАЙМАУТ И ПРОЧИЕ НЕРАЗРЕШЁННЫЕ ВЫХОДЫ — ТРЕТЬЯ КАТЕГОРИЯ, проверяется ПЕРВОЙ.
+    #
+    # Сделка здесь устроена как triple-barrier: стоп, цель, время. Первые два барьера
+    # разрешают тезис — цена дошла куда-то. Вертикальный барьер не разрешает НИЧЕГО: позиция
+    # просто закрыта по рынку, потому что кончилось отведённое время. В методологии López de
+    # Prado это отдельная метка, и по делу: «был в плюсе, когда истекло время» и «дошёл до
+    # цели» — разные события, и смешивать их в один винрейт нельзя.
+    #
+    # ЗАМЕР по 3672 записям истории: `timeout` — 1020 сделок, **28% всех**, и 775 из них
+    # (76%) уходили в победы по НЕЗАКРЫТОЙ бумажной прибыли. То есть больше четверти
+    # «статистики» состояла из позиций, которые ничего не доказали. Общий винрейт 83.8%
+    # держался в том числе на них.
+    #
+    # PnL при этом остаётся и записывается: если бы позицию закрыли по рынку в тот момент,
+    # результат был бы именно такой. Неверна была МЕТКА, а не число. Потребитель, считающий
+    # качество сигнала, обязан видеть три категории и решать сам, что делать с третьей.
+    if reason in UNRESOLVED_REASONS:
+        return "unresolved"
     if pnl_pct is not None:
         p = float(pnl_pct)
         if p > _PROFIT_STRUCTURAL_EXIT_MIN_PCT:
@@ -150,6 +182,7 @@ def kpi_bucket(record: dict[str, Any]) -> str:
 
 __all__ = [
     "LOSS_REASONS",
+    "UNRESOLVED_REASONS",
     "WIN_REASONS",
     "append_outcome_record",
     "entry_lifecycle_phase",

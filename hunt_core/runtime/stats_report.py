@@ -287,6 +287,12 @@ def build_stats_report_text() -> str:
     ]
     wins = sum(1 for k in kinds if k == "win")
     losses = sum(1 for k in kinds if k == "loss")
+    # ⚠ Неразрешённые показываются ЯВНО. Винрейт и так считается от `wins + losses`,
+    # то есть таймауты в знаменатель не попадают — но без этой цифры читатель не видит,
+    # какая доля выборки выпала. На живой истории это 29.8% (1099 из 3688): показывать
+    # «87.6% побед», умолчав, что треть сделок ничего не проверила, — то же умолчание,
+    # что и считать их победами.
+    unresolved = sum(1 for k in kinds if k == "unresolved")
     legacy_n = sum(1 for r in labeled if str(r.get("close_reason")) == LEGACY_UNKNOWN)
 
     pnls = [float(r["pnl_pct"]) for r in labeled if r.get("pnl_pct") is not None]
@@ -304,6 +310,7 @@ def build_stats_report_text() -> str:
         ),
         (
             f"<b>WR (PnL):</b> {wins}W / {losses}L"
+        + (f" · <i>{unresolved} без исхода</i>" if unresolved else "")
             + (f" · legacy <code>{legacy_n}</code>" if legacy_n else "")
             + f" · avg PnL <code>{avg_pnl:+.2f}%</code> · "
             f"median dur <code>{med_dur:.0f}m</code>"
