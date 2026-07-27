@@ -45,7 +45,11 @@ Homepage = "https://github.com/TrololoBird/Crypto-Analytic-Signal-Bot"
 Repository = "https://github.com/TrololoBird/Crypto-Analytic-Signal-Bot"
 
 [project.optional-dependencies]
-dev = ["ruff>=0.15", "mypy>=2.1.0", "pytest>=8.4", "pytest-asyncio>=0.25", "hypothesis>=6.100"]
+# ⚠ pytest/pytest-asyncio/hypothesis УДАЛЕНЫ вместе с каталогом `tests/` (2026-07-27).
+# Проверка перенесена на живые данные: `scripts/verify_*.py`, `measure_*.py`,
+# `score_vs_razbor.py` и прогон бота с разбором логов. Структурные инварианты (граница
+# модулей, достижимость от точки входа) — `scripts/check_structure.py`.
+dev = ["ruff>=0.15", "mypy>=2.1.0"]
 diagnostics = ["rich>=13.0"]
 monitoring = ["prometheus-client>=0.25", "prometheus-async>=26.0"]
 otel = [
@@ -99,8 +103,6 @@ exclude = ["_archive", "build", "dist"]
 [dependency-groups]
 dev = [
     "pre-commit>=4.6.0",
-    "pytest-testmon>=2.2.0",
-    "pytest-xdist>=3.8.0",
     "vulture>=2.16",
     # PYSEC-2026-3447 живёт в setuptools 82.0.1, чинится в 83.0.0. Пол в `[build-system].requires`
     # его НЕ закрывает: тот раздел описывает изолированное окружение СБОРКИ, а pip-audit проверяет
