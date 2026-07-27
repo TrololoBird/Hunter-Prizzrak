@@ -216,10 +216,30 @@ def _risk_block(labeled: list[dict[str, Any]]) -> str:
     как устойчивое качество, которого нет.
     """
     from hunt_core.track.equity import build_trade_frame
+    from hunt_core.track.outcomes import split_by_lane
+
+    # ⚠ ПОЛОСЫ СЧИТАЮТСЯ РАЗДЕЛЬНО. У призрака и манипуляций разные стоп, ТФ, гейты и
+    # источник истины — среднее по ним не описывает ни одну. Замер 2026-07-27: из 283
+    # закрытых записей 283 оказались манипуляциями, а призрака — НОЛЬ; общий счёт читался
+    # как результат обеих полос и вводил в заблуждение (я сам на этом ошибся).
+    lanes = split_by_lane(labeled)
+    if len(lanes) > 1:
+        parts = []
+        for name in sorted(lanes):
+            sub = build_trade_frame(lanes[name])
+            if sub.is_empty():
+                continue
+            parts.append(
+                f"· <code>{name}</code> n={sub.height} "
+                f"чистый <code>{float(sub['r_net'].sum()):+.1f}R</code>"
+            )
+        if parts:
+            return "<b>Риск-счёт по полосам</b>:\n" + "\n".join(parts)
 
     frame = build_trade_frame(labeled)
     if frame.is_empty():
         return "<b>Риск-счёт:</b> нет сделок с восстановимой геометрией"
+    lane = next(iter(lanes), "unknown")
     agg = frame.select(
         pl.col("r_gross").sum().alias("rg"),
         pl.col("r_net").sum().alias("rn"),
@@ -229,7 +249,7 @@ def _risk_block(labeled: list[dict[str, Any]]) -> str:
     top3 = frame.select(pl.col("r_gross").top_k(3).sum()).item()
     conc = (top3 / agg["rg"] * 100.0) if agg["rg"] else 0.0
     return (
-        f"<b>Риск-счёт</b> (n=<code>{frame.height}</code>): "
+        f"<b>Риск-счёт</b> · полоса <code>{lane}</code> (n=<code>{frame.height}</code>): "
         f"чистый <code>{agg['rn']:+.1f}R</code> · "
         f"издержки <code>{agg['rc']:+.1f}R</code> · "
         f"средний <code>{agg['avg']:+.2f}R</code>\n"

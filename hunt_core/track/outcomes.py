@@ -40,6 +40,46 @@ LEGACY_UNKNOWN = "legacy_unknown"
 _PROFIT_STRUCTURAL_EXIT_MIN_PCT = 0.15
 
 
+# Значения `setup_phase`, которыми полосы метят свои сделки в ОБЩЕМ леджере.
+# Продюсеры: `deliver/manipulation_delivery.py` (phase="manipulation"), `scanner/` через тот же
+# путь ("pre" / "smc_dump" / "ignition"); `prizrak/zone_watch.py` (phase=f"zone_{kind}").
+_MANIPULATION_PHASES = frozenset({"manipulation", "pre", "smc_dump", "ignition"})
+_PRIZRAK_PREFIX = "zone_"
+
+
+def lane_of(row: dict[str, Any]) -> str:
+    """Какая полоса завела эту сделку: ``manipulations`` | ``prizrak`` | ``unknown``.
+
+    ⚠ ЭТО НЕ КОСМЕТИКА, А ЗАЩИТА ОТ КОНКРЕТНОЙ ОШИБКИ ЧТЕНИЯ. `track/` обслуживает обе
+    полосы одинаково и пишет их в ОДИН файл, а `stats_report` и `ledger_metrics` считали по
+    нему сплошняком. Замер 2026-07-27: из 283 закрытых записей **283 — полоса манипуляций,
+    записей призрака НОЛЬ**. То есть винрейт 47.6%, +437R, концентрация топ-3 и дефект
+    неисполнимого входа — всё это про ЧУЖОЙ модуль, хотя читалось как общий результат.
+    Я сам на этом ошибся и полез править чужой файл.
+
+    Полосы нельзя смешивать не из аккуратности, а по существу: у них разные стоп, ТФ, гейты и
+    источник истины (CLAUDE.md, `.claude/rules/`). Среднее по ним не описывает ни одну.
+
+    Returns:
+        Ярлык полосы. ``unknown`` — честный ответ для записи, чей продюсер не опознан;
+        приписать её любой полосе значило бы выдумать принадлежность (I-6).
+    """
+    phase = str(row.get("setup_phase") or "")
+    if phase in _MANIPULATION_PHASES:
+        return "manipulations"
+    if phase.startswith(_PRIZRAK_PREFIX):
+        return "prizrak"
+    return "unknown"
+
+
+def split_by_lane(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """Разложить закрытые сделки по полосам — считать метрики можно только внутри полосы."""
+    out: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        out.setdefault(lane_of(row), []).append(row)
+    return out
+
+
 def is_polluted(row: dict[str, Any]) -> bool:
     """Canonical 'not a genuine live signal' test, shared by every reporter.
 
@@ -240,6 +280,8 @@ __all__ = [
     "genuine_closed",
     "is_polluted",
     "kpi_bucket",
+    "lane_of",
     "outcome_archive_key",
     "outcome_kind",
+    "split_by_lane",
 ]
