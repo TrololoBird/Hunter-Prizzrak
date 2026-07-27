@@ -203,6 +203,40 @@ def _phase_matrix(closed: list[dict[str, Any]]) -> list[str]:
     return lines
 
 
+def _risk_block(labeled: list[dict[str, Any]]) -> str:
+    """Результат в долях риска и за вычетом издержек — единственная сопоставимая форма.
+
+    Средний `pnl_pct` рядом остаётся, но сам по себе он ни о чём не говорит: складывать ход
+    цены по сделке со стопом 0.3% и по сделке со стопом 30% нельзя, это ставки разного
+    размера. R приводит их к общей единице, а издержки берутся с номинала и потому в R тем
+    тяжелее, чем теснее стоп.
+
+    ⚠ Печатается и КОНЦЕНТРАЦИЯ — доля трёх лучших сделок в валовом R. На живой истории это
+    43.9% (2026-07-27): результат делают единицы сделок, и средний R без этой цифры читается
+    как устойчивое качество, которого нет.
+    """
+    from hunt_core.track.equity import build_trade_frame
+
+    frame = build_trade_frame(labeled)
+    if frame.is_empty():
+        return "<b>Риск-счёт:</b> нет сделок с восстановимой геометрией"
+    agg = frame.select(
+        pl.col("r_gross").sum().alias("rg"),
+        pl.col("r_net").sum().alias("rn"),
+        pl.col("r_net").mean().alias("avg"),
+        pl.col("r_cost").sum().alias("rc"),
+    ).row(0, named=True)
+    top3 = frame.select(pl.col("r_gross").top_k(3).sum()).item()
+    conc = (top3 / agg["rg"] * 100.0) if agg["rg"] else 0.0
+    return (
+        f"<b>Риск-счёт</b> (n=<code>{frame.height}</code>): "
+        f"чистый <code>{agg['rn']:+.1f}R</code> · "
+        f"издержки <code>{agg['rc']:+.1f}R</code> · "
+        f"средний <code>{agg['avg']:+.2f}R</code>\n"
+        f"<i>топ-3 сделки = {conc:.0f}% валового R</i>"
+    )
+
+
 def _regime_block() -> str:
     if not MARKET_REGIME.is_file():
         return "<b>Regime:</b> нет snapshot"
@@ -289,14 +323,15 @@ def build_stats_report_text() -> str:
     losses = sum(1 for k in kinds if k == "loss")
     # ⚠ Неразрешённые показываются ЯВНО. Винрейт и так считается от `wins + losses`,
     # то есть таймауты в знаменатель не попадают — но без этой цифры читатель не видит,
-    # какая доля выборки выпала. На живой истории это 29.8% (1099 из 3688): показывать
-    # «87.6% побед», умолчав, что треть сделок ничего не проверила, — то же умолчание,
-    # что и считать их победами.
+    # какая доля выборки выпала. На очищенном леджере это 32.2% (91 из 283, замер
+    # 2026-07-27): показывать винрейт, умолчав, что треть сделок ничего не проверила, — то же
+    # умолчание, что и считать их победами.
     unresolved = sum(1 for k in kinds if k == "unresolved")
     legacy_n = sum(1 for r in labeled if str(r.get("close_reason")) == LEGACY_UNKNOWN)
 
     pnls = [float(r["pnl_pct"]) for r in labeled if r.get("pnl_pct") is not None]
     avg_pnl = sum(pnls) / len(pnls) if pnls else 0.0
+    r_block = _risk_block(labeled)
     durs = sorted(float(r.get("duration_min") or 0) for r in closed_all if r.get("duration_min"))
     med_dur = durs[len(durs) // 2] if durs else 0.0
 
@@ -315,6 +350,7 @@ def build_stats_report_text() -> str:
             + f" · avg PnL <code>{avg_pnl:+.2f}%</code> · "
             f"median dur <code>{med_dur:.0f}m</code>"
         ),
+        r_block,
         f"<b>Confidence:</b> {confidence_tier(wins + losses)} · "
         f"Bayesian WR {bayesian_wr_ci(wins=wins, n=wins + losses)}",
         f"<b>Closed (structural):</b> win {cw} · loss {cl} · stale {cs}",

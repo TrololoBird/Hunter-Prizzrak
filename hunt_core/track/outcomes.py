@@ -99,10 +99,15 @@ def outcome_kind(reason: str, *, pnl_pct: float | None = None) -> str:
     # Prado это отдельная метка, и по делу: «был в плюсе, когда истекло время» и «дошёл до
     # цели» — разные события, и смешивать их в один винрейт нельзя.
     #
-    # ЗАМЕР по 3672 записям истории: `timeout` — 1020 сделок, **28% всех**, и 775 из них
-    # (76%) уходили в победы по НЕЗАКРЫТОЙ бумажной прибыли. То есть больше четверти
-    # «статистики» состояла из позиций, которые ничего не доказали. Общий винрейт 83.8%
-    # держался в том числе на них.
+    # ЗАМЕР (пересчитан 2026-07-27 по ОЧИЩЕННОМУ леджеру — 283 настоящие записи): `timeout`
+    # даёт 25 сделок (8.8%), и 18 из них (72%) уходили в победы по НЕЗАКРЫТОЙ бумажной
+    # прибыли. Вся категория `unresolved` — 91 запись, **32.2% выборки**.
+    #
+    # ⚠ Прежняя редакция этого комментария называла 3672 записи, 1020 таймаутов и 28% — числа
+    # получены до того, как выяснилось, что 3423 строки из 3722 были ТЕСТОВЫМИ ФИКСТУРАМИ
+    # (утечка `close_signal(archive=True)`, закрыта `tests/conftest.py`). Доля таймаутов
+    # оказалась втрое меньше, но вывод не изменился: треть выборки по-прежнему ничего не
+    # проверяет, а бумажная прибыль по-прежнему уходила в победы.
     #
     # PnL при этом остаётся и записывается: если бы позицию закрыли по рынку в тот момент,
     # результат был бы именно такой. Неверна была МЕТКА, а не число. Потребитель, считающий
@@ -160,10 +165,56 @@ def _outcome_already_archived(path: Any, key: tuple[str, str, str]) -> bool:
     return False
 
 
+class ProductionWriteUnderTestError(RuntimeError):
+    """Тест попытался дописать строку в БОЕВОЙ леджер."""
+
+
+def _refuse_production_write(path: Any) -> None:
+    """Fail loud when a test process is about to append to the real ledger.
+
+    ⚠ ЭТО НЕ ПЕРЕСТРАХОВКА — УТЕЧКА БЫЛА ИЗМЕРЕНА И ОКАЗАЛАСЬ ОГРОМНОЙ.
+    `close_signal(archive=True)` — значение ПО УМОЛЧАНИЮ, а его докстрока просила тесты
+    передавать `archive=False`. Прямые вызовы это и делали; но `close_signal` зовут изнутри
+    ещё 17 мест (`_evaluate_levels`, `_followups`, `auto_resolve_active_signals`), и ЭТИ
+    вызовы шли с дефолтом. Любой тест, дёргающий функцию уровнем выше, писал в боевой файл.
+
+    ЗАМЕР 2026-07-27: в `data/signal_history.jsonl` было 3722 строки, из них **3423 —
+    фикстуры** (символ `X`, вход 100, стоп 90, цель 110/150; и ETHUSDT со входом 99/100 и
+    выходом 116.5 — 247 идентичных копий). Они давали **86% суммы pnl** (+37205% из +43045%).
+    Прогон одного `tests/test_manipulation_runner.py` дописывал 9 строк — проверено счётчиком
+    до/после. За 2026-07-26 накапало 372 строки, за 07-27 — 198.
+
+    Договорённость «тесты передают archive=False» — не механизм, а обещание, и оно не
+    сработало. Механизм — этот отказ: он не полагается на память автора теста.
+    """
+    import os
+    from pathlib import Path
+
+    if not os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+    import hunt_core.paths as paths
+
+    # ⚠ Каталог считается ОТ ФАЙЛА МОДУЛЯ, а не из `paths.DATA`. Изолирующая фикстура
+    # (`tests/conftest.py`) как раз подменяет `paths.DATA` на tmp — читая его здесь, гард
+    # объявил бы боевым сам песочный каталог и завалил бы каждый честный тест. Проверено:
+    # первая редакция именно так и уронила 9 тестов, которые ничего не нарушали.
+    real_data = Path(paths.__file__).resolve().parents[1] / "data"
+    try:
+        inside = Path(path).resolve().is_relative_to(real_data)
+    except (OSError, ValueError):  # неразрешимый путь — не наш случай
+        return
+    if inside:
+        raise ProductionWriteUnderTestError(
+            f"тест пишет в боевой леджер {path!r}: закрывай сигнал с archive=False "
+            "либо переопредели hunt_core.paths.SIGNAL_HISTORY на tmp_path"
+        )
+
+
 def append_outcome_record(path: Any, record: dict[str, Any]) -> None:
     """Single-writer outcome log append (§8E / P10)."""
     from pathlib import Path
 
+    _refuse_production_write(path)
     key = outcome_archive_key(record)
     if key is not None and _outcome_already_archived(path, key):
         return

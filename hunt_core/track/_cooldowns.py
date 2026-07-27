@@ -14,7 +14,21 @@ SYMBOL_DAILY_TG_MAX = 2
 GLOBAL_CONFIRM_BURST_MAX = 2
 GLOBAL_CONFIRM_BURST_WINDOW_MINUTES = 5.0
 SYMBOL_REPEAT_LOSER_LOOKBACK = 10
-SYMBOL_REPEAT_LOSER_NET_PCT = -8.0
+# ⚠ ПОРОГ В R, А НЕ В ПРОЦЕНТАХ. Раньше здесь стояло -8.0 «процентов», и гейт складывал
+# `pnl_pct` разных сделок — величину без смысла: сделка со стопом 0.3% и сделка со стопом 30%
+# входили в сумму одинаковым весом, хотя это ставки, различающиеся в сто раз.
+#
+# ЗАМЕР 2026-07-27 по 283 настоящим записям: два символа с суммой **-2.63R** показывали в
+# процентах **-0.09%** и проходили гейт насквозь. Их убытки случились на тесных стопах, где
+# процент мал по построению, — то есть правило было слепо ровно к тому классу, ради которого
+# существует.
+#
+# Числа не подобраны, а ПЕРЕСЧИТАНЫ из прежних при измеренной медиане стопа 2.42%:
+# -8.0% / 2.42 = -3.3R и -15.0% / 2.42 = -6.2R. Строгость политики сохранена, исправлена
+# единица. Подгонять их под выборку нельзя: символов с ≥5 сделками здесь всего 4.
+SYMBOL_REPEAT_LOSER_NET_R = -3.0
+SYMBOL_REPEAT_LOSER_LIFETIME_R = -6.0
+SYMBOL_REPEAT_LOSER_LIFETIME_MIN_SAMPLES = 15
 SYMBOL_REPEAT_LOSER_MIN_SAMPLES = 5
 SYMBOL_REPEAT_LOSER_COOLDOWN_HOURS = 24.0
 
@@ -229,30 +243,50 @@ def symbol_daily_tg_cap_reached(
     return count >= max_per_day
 
 
+def net_r(records: list[dict[str, Any]]) -> float:
+    """Суммарный результат в долях риска (R) по списку закрытых сделок.
+
+    R сопоставим между сделками, а процент — нет: он измеряет ход цены, а не размер ставки.
+    Записи, по которым риск не восстановим (нет геометрии либо стоп ниже шумового порога),
+    в сумму НЕ ВХОДЯТ — приписать им ноль значило бы объявить их безрисковыми (I-6).
+    """
+    from hunt_core.track.equity import stop_distance_pct
+
+    total = 0.0
+    for rec in records:
+        pnl = rec.get("pnl_pct")
+        dist = stop_distance_pct(rec)
+        if pnl is None or not dist:
+            continue
+        try:
+            total += float(pnl) / dist
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
 def symbol_repeat_loser_blocked(
     state: dict[str, Any],
     *,
     symbol: str,
     now: datetime,
     lookback: int = SYMBOL_REPEAT_LOSER_LOOKBACK,
-    net_floor: float = SYMBOL_REPEAT_LOSER_NET_PCT,
+    net_floor: float = SYMBOL_REPEAT_LOSER_NET_R,
     min_samples: int = SYMBOL_REPEAT_LOSER_MIN_SAMPLES,
     cooldown_hours: float = SYMBOL_REPEAT_LOSER_COOLDOWN_HOURS,
 ) -> bool:
-    """Block symbols with chronic TG losses."""
+    """Block symbols with chronic TG losses, measured in risk units."""
     sym = symbol.upper()
     tg_closed = [
         r for r in telegram_outcome_records(state) if str(r.get("symbol") or "").upper() == sym
     ]
     recent = tg_closed[-lookback:]
-    if len(tg_closed) >= 15:
-        total_net = sum(float(r.get("pnl_pct") or 0) for r in tg_closed)
-        if total_net < -15.0:
+    if len(tg_closed) >= SYMBOL_REPEAT_LOSER_LIFETIME_MIN_SAMPLES:
+        if net_r(tg_closed) < SYMBOL_REPEAT_LOSER_LIFETIME_R:
             return True
     if len(recent) < min_samples:
         return False
-    net = sum(float(r.get("pnl_pct") or 0) for r in recent)
-    if net >= net_floor:
+    if net_r(recent) >= net_floor:
         return False
     raw = recent[-1].get("closed_at")
     if not raw:
@@ -275,10 +309,13 @@ __all__ = [
     "SYMBOL_LOSS_STREAK_MIN",
     "SYMBOL_LOSS_STREAK_WINDOW_HOURS",
     "SYMBOL_REPEAT_LOSER_COOLDOWN_HOURS",
+    "SYMBOL_REPEAT_LOSER_LIFETIME_MIN_SAMPLES",
+    "SYMBOL_REPEAT_LOSER_LIFETIME_R",
     "SYMBOL_REPEAT_LOSER_LOOKBACK",
     "SYMBOL_REPEAT_LOSER_MIN_SAMPLES",
-    "SYMBOL_REPEAT_LOSER_NET_PCT",
+    "SYMBOL_REPEAT_LOSER_NET_R",
     "global_confirm_burst_cap_reached",
+    "net_r",
     "recent_stop_hit_cooldown",
     "record_confirm_burst",
     "symbol_daily_tg_cap_reached",
