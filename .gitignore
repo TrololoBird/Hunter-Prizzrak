@@ -43,3 +43,4 @@ compass_artifact_*.md
 # coverage artefacts (гейт --cov-fail-under в CI)
 .coverage
 htmlcov/
+data/*.bak-*
