@@ -98,11 +98,34 @@ class PlaneCadence:
     p90_s: float
     max_s: float
     bound_s: float | None
+    # План, чью свежесть держит `touch_liveness` («поток жив»), а не приход данных.
+    # ⚠ У такого плана бонд и темп меряют РАЗНОЕ, и сравнивать их нельзя — см.
+    # `bound_comparable`. Замер 2026-07-27: у `liq` темп событий 75.5 с при бонде 60 с
+    # (ratio 0.795), при том что `stale` не случился НИ РАЗУ за 700 строк тика — потому что
+    # бонд охраняет `received_ms`, который освежает каждый кадр универсального потока.
+    liveness_backed: bool = False
 
     @property
     def measured(self) -> bool:
         """Достаточно ли точек, чтобы это вообще считать темпом (см. ``MIN_CADENCE_SAMPLES``)."""
         return self.samples >= MIN_CADENCE_SAMPLES
+
+    @property
+    def bound_comparable(self) -> bool:
+        """Можно ли вообще сравнивать бонд этого плана с его темпом.
+
+        У ``liveness_backed``-плана — НЕЛЬЗЯ, и это не тонкость, а разные величины:
+        ``stale_by`` смотрит на ``received_ms``, который у такого плана освежает КАЖДЫЙ кадр
+        универсального потока («сокет жив»), а темп меряет интервал между РЕАЛЬНЫМИ событиями
+        по конкретному символу. Замер 2026-07-27 показал ровно эту вилку: у `liq` темп 75.5 с
+        против бонда 60 с (ratio 0.795 — формально «недостижим»), при том что `stale` не
+        случился ни разу за 700 строк тика, а все 71 нарушение были честными `absent` у
+        символов, по которым ликвидаций не было вовсе.
+
+        Не отсечь это — значит выдать вечное ложное предупреждение, то есть ровно тот дефект,
+        ради поимки которого измеритель и написан.
+        """
+        return not self.liveness_backed
 
     @property
     def bound_ratio(self) -> float | None:
@@ -118,7 +141,12 @@ class PlaneCadence:
         Это не «данные испортились», это ошибка настройки: план объявляется протухшим
         всегда, и потребитель теряет измеренное значение, ничего не узнав о причине.
         """
-        return self.measured and self.bound_s is not None and self.bound_s < self.median_s
+        return (
+            self.measured
+            and self.bound_comparable
+            and self.bound_s is not None
+            and self.bound_s < self.median_s
+        )
 
     @property
     def bound_too_tight(self) -> bool:
@@ -128,7 +156,12 @@ class PlaneCadence:
         на здоровом фиде, просто реже, чем при недостижимом бонде. Без запаса-множителя: см.
         комментарий к ``MIN_CADENCE_SAMPLES`` выше о том, чем кончились обе попытки его ввести.
         """
-        return self.measured and self.bound_s is not None and self.bound_s < self.p90_s
+        return (
+            self.measured
+            and self.bound_comparable
+            and self.bound_s is not None
+            and self.bound_s < self.p90_s
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,7 +202,10 @@ class SymbolState:
     Single-writer-per-plane and asyncio single-threaded, so no lock is needed.
     """
 
-    __slots__ = ("symbol", "_stamps", "_values", "_frames", "_intervals", "_last_data_ms")
+    __slots__ = (
+        "symbol", "_stamps", "_values", "_frames",
+        "_intervals", "_last_data_ms", "_liveness_backed",
+    )
 
     def __init__(self, symbol: str) -> None:
         self.symbol = symbol
@@ -190,6 +226,10 @@ class SymbolState:
         # касания», то есть ~0.1 с — и любой бонд, выведенный из такого «темпа», был бы
         # фикцией. Поймано тестом `test_liveness_touch_is_not_counted_as_an_update`.
         self._last_data_ms: dict[str, int] = {}
+        # Планы, чью свежесть держит `touch_liveness`. Пишется ПО ФАКТУ вызова, а не списком
+        # имён: список — это копия знания, которая разъезжается с кодом (здесь такое уже
+        # случалось с границей «отказ vs деградация»). Кто трогает — тот и помечен.
+        self._liveness_backed: set[str] = set()
 
     def _record_interval(self, name: str, received_ms: int) -> None:
         """Запомнить интервал от прошлого поступления ДАННЫХ по этому плану (в секундах).
@@ -240,6 +280,7 @@ class SymbolState:
         Fail-loud: план, который не штамповался НИ РАЗУ, не оживляется — «сокет жив» не значит
         «данные были». Такой символ остаётся ``absent``, а не «свежий, но пустой».
         """
+        self._liveness_backed.add(name)
         stamp = self._stamps.get(name)
         if stamp is None:
             return
@@ -302,6 +343,7 @@ class SymbolState:
                 p90_s=sorted(samples)[int(len(samples) * 0.9)],
                 max_s=max(samples),
                 bound_s=(stamp.bound_ms / 1000.0) if stamp is not None else None,
+                liveness_backed=name in self._liveness_backed,
             )
         return out
 

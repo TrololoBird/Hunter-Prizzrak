@@ -100,6 +100,43 @@ def test_kline_plane_that_really_misses_bars_does_warn() -> None:
     assert not cad.bound_unreachable, "медиана 60 с в бонд укладывается — не 'недостижим'"
 
 
+def test_liveness_backed_plane_is_not_judged_against_its_bound() -> None:
+    """У `liq` бонд и темп меряют РАЗНОЕ — сравнивать их значит выдать вечное ложное «недостижим».
+
+    Замер 2026-07-27, 700 строк тика: темп событий `liq` = 75.5 с при бонде 60 с (ratio 0.795),
+    и при этом `stale` не случился НИ РАЗУ — `touch_liveness` освежает `received_ms` каждым
+    кадром универсального потока. Все 71 нарушение были честными `absent` у символов, по
+    которым ликвидаций не было (PAXGUSDT — 0 из 100 строк за 53 минуты).
+    """
+    liq = PlaneCadence(
+        plane="liq", samples=32, median_s=75.46, p90_s=180.0, max_s=400.0,
+        bound_s=60.0, liveness_backed=True,
+    )
+    assert not liq.bound_comparable
+    assert not liq.bound_unreachable, "ratio 0.795 у liveness-плана — не дефект, а разные величины"
+    assert not liq.bound_too_tight
+    assert liq.bound_ratio is not None, "само отношение всё равно публикуется как справка"
+
+    # Тот же темп у плана БЕЗ liveness — настоящий дефект, и он обязан быть виден.
+    same_numbers = PlaneCadence(
+        plane="taker_5m", samples=32, median_s=75.46, p90_s=180.0, max_s=400.0, bound_s=60.0,
+    )
+    assert same_numbers.bound_unreachable
+
+
+def test_liveness_backed_flag_comes_from_the_actual_call() -> None:
+    """Пометка ставится по ФАКТУ вызова `touch_liveness`, а не по списку имён планов."""
+    st = SymbolState("BTCUSDT")
+    for i in range(MIN_CADENCE_SAMPLES + 1):
+        st.stamp_only("liq", PlaneStamp(Source.WS, i * 75_000, i * 75_000, 60_000))
+        st.put_value("oi", 1.0, PlaneStamp(Source.REST_SEED, i * 300_000, i * 300_000, 375_000))
+    assert not st.cadences()["liq"].liveness_backed, "до касания план обычный"
+    st.touch_liveness("liq", 10_000_000)
+    cads = st.cadences()
+    assert cads["liq"].liveness_backed
+    assert not cads["oi"].liveness_backed, "пометка не должна протекать на соседний план"
+
+
 def test_plane_without_bound_yields_no_ratio() -> None:
     """Нет бонда — нет отношения. Не 1.0, не 0.0 (I-6: никакого сфабрикованного числа)."""
     cad = _cad(median_s=10.0, p90_s=12.0, bound_s=None)
