@@ -181,7 +181,27 @@ def depth_imbalance_by_zone(
     current_price: float,
     zones_pct: list[float] | None = None,
 ) -> dict[str, float]:
-    """Proximity-weighted imbalance (-1..1) within each distance band from mid."""
+    """Perekos vidimoy glubiny v polose ±z% ot mid, VZVESHENNY po blizosti (−1…1).
+
+    ⚠ ДВЕ ОГОВОРКИ, БЕЗ КОТОРЫХ ИМЯ ВВОДИТ В ЗАБЛУЖДЕНИЕ.
+
+    1. ЭТО НЕ ПРОСТАЯ ПОЛОСА. Каждый уровень взвешен `exp(-k·d)`, где `k = 2/z`, поэтому
+       уровень на границе полосы учитывается с весом ≈0.135 — на 86% дешевле ближнего.
+       Канонический перекос в полосе НЕвзвешен, и знак может разойтись: замер 2026-07-27 по
+       10 живым книгам — 1 расхождение знака из 10 (LINK: −0.0021 против +0.0101).
+       Константа затухания 2.0 замером не обоснована — это открытый долг (I-7).
+
+    2. ПОЛОСА МОЖЕТ БЫТЬ НЕ НАКРЫТА КНИГОЙ. Снимок на 1000 уровней у мажоров кончается
+       гораздо раньше ±1%: замер — BTC ±0.20%, ETH ±0.57%, при медиане по выборке ±14.17%.
+       То есть «imb_1pct» у BTC описывает ±0.20%, а не ±1%. Значение при этом настоящее —
+       завышено ИМЯ, а не число, поэтому метрика не выбрасывается, но рядом теперь едет
+       `imb_<z>pct_covered_pct` — фактический охват, чтобы потребитель видел разрыв.
+
+    ⚠ Пустая полоса больше НЕ даёт 0.0. Ноль здесь — идеальный баланс, то есть уверенное
+    утверждение о рынке там, где нет ни одного уровня (I-6). Ключ просто отсутствует;
+    потребители читают через `.get(...)`, а `prizrak/liq_reconcile.py` прямо документирует
+    «None → нейтрально».
+    """
     if current_price <= 0:
         return {}
     zones = zones_pct or [0.5, 1.0, 2.0, 5.0]
@@ -191,17 +211,27 @@ def depth_imbalance_by_zone(
         lo = current_price - band
         hi = current_price + band
         decay_k = 2.0 / max(z, 0.001)
+        in_bids = [(p, q) for p, q in bids if lo <= p <= current_price]
+        in_asks = [(p, q) for p, q in asks if current_price <= p <= hi]
         bid_n = sum(
             p * q * math.exp(-decay_k * abs(current_price - p) / current_price * 100)
-            for p, q in bids if lo <= p <= current_price
+            for p, q in in_bids
         )
         ask_n = sum(
             p * q * math.exp(-decay_k * abs(p - current_price) / current_price * 100)
-            for p, q in asks if current_price <= p <= hi
+            for p, q in in_asks
         )
         total = bid_n + ask_n
         key = f"imb_{z:g}pct"
-        out[key] = round((bid_n - ask_n) / total, 4) if total > 0 else 0.0
+        if total <= 0:
+            continue  # уровней в полосе нет — сказать нечего (I-6)
+        out[key] = round((bid_n - ask_n) / total, 4)
+        # Насколько далеко книга реально дотянулась — минимум из двух сторон, в % от mid.
+        reach = min(
+            (current_price - min(p for p, _ in in_bids)) / current_price * 100.0,
+            (max(p for p, _ in in_asks) - current_price) / current_price * 100.0,
+        )
+        out[f"{key}_covered_pct"] = round(min(reach, z), 4)
     return out
 
 

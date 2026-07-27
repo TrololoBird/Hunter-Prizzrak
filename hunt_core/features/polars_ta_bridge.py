@@ -371,19 +371,23 @@ def rsi_series(df: pl.DataFrame, period: int = 14) -> pl.Series:
     )
     if df.is_empty() or "close" not in df.columns:
         return rsi
-    moved = (
-        df.select(
-            pl.col("close").diff().abs().rolling_sum(int(period), min_samples=int(period))
-            .alias("m")
-        )["m"]
-    )
-    return pl.Series(
-        rsi.name,
-        [
-            None if (mv is not None and mv <= 0.0) else v
-            for v, mv in zip(rsi.to_list(), moved.to_list(), strict=False)
-        ],
-        dtype=pl.Float64,
+    # ⚠ Гард ВЫРАЖЕНИЕМ, а не питоновским проходом по спискам. Прежняя редакция (моя же)
+    # делала `zip(rsi.to_list(), moved.to_list())` — это выводило обе серии в питон-объекты и
+    # собирало результат поэлементно, в горячем пути расчёта фич. Здесь то же самое считает
+    # Polars: `rolling_sum` по модулю приращений и `when/then/otherwise`.
+    return (
+        df.lazy()
+        .select(
+            pl.when(
+                pl.col("close").diff().abs()
+                .rolling_sum(int(period), min_samples=int(period)) <= 0.0
+            )
+            .then(None)
+            .otherwise(pl.lit(rsi))
+            .cast(pl.Float64)
+            .alias(rsi.name)
+        )
+        .collect()[rsi.name]
     )
 
 
@@ -395,9 +399,18 @@ def atr_series(df: pl.DataFrame, period: int = 14) -> pl.Series:
 
 
 def natr_series(df: pl.DataFrame, period: int = 14) -> pl.Series:
+    """NATR = **100 × ATR / close**, то есть ПРОЦЕНТ — в этом весь смысл «normalized».
+
+    ⚠ Возвращалась ДОЛЯ: `plta.NATR` — это буквально `ATR(...) / close`, и его собственная
+    докстрока предупреждает, что «talib.ATR multiples another 100». Множителя не было, и
+    имя обещало процент, а функция отдавала долю — ровно 100×. Замер на живом BTC 15m:
+    0.00285249 против канонических 0.285249.
+    """
     high, low, close = _ohlc()
     return _series_from_expr(
-        df, plta.NATR(high, low, close, timeperiod=int(period)), name=f"natr{period}"
+        df,
+        plta.NATR(high, low, close, timeperiod=int(period)) * 100.0,
+        name=f"natr{period}",
     )
 
 
@@ -486,9 +499,18 @@ def bbands_series(
 
 
 def aroon_series(df: pl.DataFrame, *, period: int = 14) -> tuple[pl.Series, pl.Series, pl.Series]:
+    """Aroon Up/Down в канонической шкале **[0, 100]**, осциллятор в [-100, +100].
+
+    ⚠ Бэкенд отдаёт ДОЛЮ: `100 × (n − barsSince) / n` без множителя, то есть ровно 100×
+    меньше канона. Замер на живом BTC 15m: up ∈ [0.0714, 1.0000] вместо [7.14, 100.00],
+    осциллятор ∈ [-0.857, +0.929] вместо [-85.7, +92.9].
+
+    Дефект латентный (потребителей с порогом по этим колонкам сегодня нет), но именно поэтому
+    и опасный: первый же гейт вида «aroon_up > 70» не сработает никогда, и молча.
+    """
     up, down = _struct_tuple(
         df,
-        plta.AROON(pl.col("high"), pl.col("low"), timeperiod=int(period)),
+        plta.AROON(pl.col("high"), pl.col("low"), timeperiod=int(period)) * 100.0,
         ("aroonup", f"aroon_up{period}"),
         ("aroondown", f"aroon_down{period}"),
     )
