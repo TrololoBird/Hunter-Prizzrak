@@ -4,6 +4,7 @@ from __future__ import annotations
 
 
 import structlog
+from collections.abc import Iterable
 from typing import Any
 
 import ccxt
@@ -35,6 +36,12 @@ def underlying_type_of(market: Any) -> str:
     return str(info.get("underlyingType") or "").upper()
 
 
+# Классы `underlyingType`, считающиеся настоящей криптой. Пустая строка — fail-open на
+# неизвестном формате. Константа общая для проверки по рыночной записи и по символу
+# (`is_crypto_symbol` ниже): два инлайновых множества разошлись бы молча.
+_CRYPTO_UNDERLYINGS = frozenset({"", "COIN"})
+
+
 def is_crypto_underlying(market: Any) -> bool:
     """True only for real-crypto perps (``underlyingType == COIN``).
 
@@ -42,8 +49,7 @@ def is_crypto_underlying(market: Any) -> bool:
     change never silently empties the scanner universe — the explicit non-COIN classes
     (EQUITY/COMMODITY/INDEX/…) are what we exclude.
     """
-    ut = underlying_type_of(market)
-    return ut in {"", "COIN"}
+    return underlying_type_of(market) in _CRYPTO_UNDERLYINGS
 
 
 class SymbolResolutionError(LookupError):
@@ -238,6 +244,77 @@ def normalize_ticker_rows(
             row["low_price"] = low
         rows.append(row)
     return rows
+
+
+# ── Класс базового актива: реестр по символу ──────────────────────────────────────────────
+#
+# Зачем реестр, а не разовая проверка. `is_crypto_underlying` требует РЫНОЧНУЮ ЗАПИСЬ CCXT, а
+# потребители глубже по стеку (трекер, форматтеры) знают только строку-символ и биржевой
+# ручки не держат. Тот же разрыв уже решён для тика цены — `market/tick_registry.py`
+# заполняется один раз из `exchange.markets` в `view/runtime.py::MarketRuntime.start` и
+# отвечает синхронно. Здесь ровно та же механика для класса актива.
+#
+# ⚠ ЗАЧЕМ ЭТО ВООБЩЕ. Binance USDⓈ-M листит токенизированные акции и товары (XAG=серебро,
+# XAU=золото, SPY/QQQ/ORCL/MSTR=акции, CL=нефть). Полоса призрака строит по ним ПОЛНЫЕ
+# карточки со входом/стопом/целями, опираясь на крипто-микроструктуру: фандинг печатается
+# «+0.000%», эндпоинт базиса отвечает `-4104` навсегда, а цену двигает внешний рынок с
+# сессией, которую бот не наблюдает. XAU/XAG/PAXG при этом закреплены в пиннед-наборе
+# НАМЕРЕННО (три места: `config.defaults.toml`, `domain/config.py::REQUIRED_PINNED_SYMBOLS`,
+# `data/universe.py::_CANONICAL_PINNED`) — как макро-якоря риск-он/риск-офф.
+#
+# Отсюда различие, которого в проекте не было: **наблюдается для контекста** ≠ **допущен к
+# сделкам**. Реестр даёт второе, не трогая первое.
+_UNDERLYINGS: dict[str, str] = {}
+
+
+def _registry_key(symbol: str) -> str:
+    """``BTC/USDT:USDT`` и ``BTCUSDT`` ключуются одинаково — как в тиковом реестре."""
+    sym = to_binance_symbol(symbol)
+    return sym.split(":", 1)[0].replace("/", "").upper()
+
+
+def register_underlyings_from_markets(markets: Iterable[Any]) -> int:
+    """Заполнить реестр классов актива из загруженных рыночных записей CCXT.
+
+    Публичные метаданные `exchangeInfo`, приватного API не касается. Никогда не бросает:
+    кривая запись пропускается.
+
+    Returns:
+        Сколько символов зарегистрировано.
+    """
+    count = 0
+    for market in markets:
+        if not is_linear_usdt_swap_market(market):
+            continue
+        symbol = market.get("symbol") if isinstance(market, dict) else None
+        if not symbol:
+            continue
+        _UNDERLYINGS[_registry_key(str(symbol))] = underlying_type_of(market)
+        count += 1
+    return count
+
+
+def underlying_type_for(symbol: str) -> str | None:
+    """Класс актива по символу, либо ``None`` если реестр о нём не знает.
+
+    ``None`` — это «не знаю», а не «крипта». Различать обязательно: подставить крипту по
+    умолчанию значило бы вернуть ровно то поведение, которое здесь исправляется (I-6).
+    """
+    return _UNDERLYINGS.get(_registry_key(symbol))
+
+
+def is_crypto_symbol(symbol: str) -> bool:
+    """Допущен ли символ к СДЕЛКАМ: настоящая крипта, а не токенизированный актив.
+
+    ⚠ FAIL-OPEN НА НЕИЗВЕСТНОМ — и это осознанно, а не недосмотр. Реестр заполняется после
+    `load_markets`; до этого он пуст, и строгий отказ заглушил бы вообще всё, включая BTC.
+    Та же дисциплина, что у `is_crypto_underlying` (пустой `underlyingType` → крипта): смена
+    формата `exchangeInfo` не должна выключать торговлю целиком. Цена ошибки несимметрична —
+    пропустить токенизированную акцию хуже, чем заглушить биржу, но заглушить биржу хуже,
+    чем пропустить одну акцию до прогрева реестра.
+    """
+    kind = underlying_type_for(symbol)
+    return kind is None or kind in _CRYPTO_UNDERLYINGS
 
 
 async def fetch_ticker_rows(exchange: Any) -> list[dict[str, float | str]]:

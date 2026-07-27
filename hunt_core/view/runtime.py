@@ -66,6 +66,7 @@ class MarketRuntime:
         # Without it, quantize_conservative (track SL/TP prices) has no tick and falls back to a coarse
         # round(), losing the real exchange grid. Public exchangeInfo precision; keeps the engine core
         # market-independent (this composition layer owns the market/ import).
+        from hunt_core.market.symbols import register_underlyings_from_markets
         from hunt_core.market.tick_registry import register_ticks_from_markets
 
         primary = getattr(self._multi, "primary", None)
@@ -73,6 +74,11 @@ class MarketRuntime:
         markets = getattr(exchange, "markets", None)
         if isinstance(markets, dict) and markets:
             register_ticks_from_markets(markets.values())
+            # Тот же приём для КЛАССА АКТИВА: Binance USDⓈ-M листит токенизированные акции и
+            # товары (XAG, XAU, SPY, CL…), а потребители глубже по стеку знают только строку
+            # -символ и биржевой ручки не держат. Без реестра трекер не может отличить
+            # серебро от криптоперпа и заводит по нему сделку.
+            register_underlyings_from_markets(markets.values())
         if self._spot is not None:
             await self._spot.start()
 

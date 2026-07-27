@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from hunt_core import clock, serde
 from hunt_core.contract import price_in_entry_zone
+from hunt_core.market.symbols import is_crypto_symbol, underlying_type_for
 from hunt_core.track.pnl import realized_pct
 import structlog
 import os
@@ -558,6 +559,32 @@ def register_signal_open(
     #
     # Понижение ГРОМКОЕ: тихое исправление сделало бы дефект неотличимым от штатной работы —
     # ровно то свойство, из-за которого он прожил незамеченным.
+    # ⚠ ТОКЕНИЗИРОВАННЫЙ АКТИВ НЕ СТАНОВИТСЯ ОТСЛЕЖИВАЕМОЙ СДЕЛКОЙ.
+    #
+    # Binance USDⓈ-M листит серебро (XAG), золото (XAU), акции (SPY/QQQ/ORCL/MSTR) и нефть
+    # (CL). Обе стратегии построены на крипто-микроструктуре — OI, фандинг, ликвидации, CVD;
+    # у токенизированного товара фандинг печатается «+0.000%», эндпоинт базиса отвечает
+    # `-4104` навсегда, а цену двигает внешний рынок с сессией, которую бот не наблюдает.
+    #
+    # ЗАМЕР: в леджере 54 записи из 283 (19.1%) — не крипта (43 EQUITY, 8 COMMODITY,
+    # 3 KR_EQUITY). Полоса манипуляций свой фильтр с 2026-07-14 держит (после этой даты таких
+    # записей нет), а пиннед-путь призрака идёт по `PINNED_SYMBOLS` напрямую, мимо
+    # `gate_symbol_list`, и строит по XAG полную карточку со входом, стопом и целями.
+    #
+    # Различие, которого в проекте не было: НАБЛЮДАЕТСЯ ДЛЯ КОНТЕКСТА ≠ ДОПУЩЕН К СДЕЛКАМ.
+    # XAU/XAG/PAXG закреплены в пиннед-наборе намеренно, как макро-якоря риск-он/риск-офф —
+    # их срезы и карточки остаются. Отказ стоит здесь, на общем приёмнике, потому что он
+    # обслуживает ОБЕ полосы и его нельзя обойти, иначе пришлось бы городить один и тот же
+    # гейт в каждом продюсере.
+    if not is_crypto_symbol(symbol):
+        _LOG.warning(
+            "register_rejected_non_crypto",
+            symbol=symbol,
+            direction=dir_l,
+            underlying=underlying_type_for(symbol),
+            setup_phase=setup.get("phase"),
+        )
+        return
     claimed_tier = str(setup.get("delivery_tier") or "").lower()
     filled = price > 0 and price_in_entry_zone(
         {"entry_zone": [entry_lo, entry_hi]}, price=price, direction=dir_l
