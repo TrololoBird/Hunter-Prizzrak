@@ -43,10 +43,19 @@ def _swing_prices(
 
 
 def _confirmed_close(frame: pl.DataFrame) -> float:
-    """Last fully closed bar close (exclude forming tail)."""
+    """Last fully closed bar close.
+
+    ⚠ ИНДЕКС −1, А НЕ −2. Кадры здесь ЗАКРЫТЫЕ post-finalize — форминг-свеча отбрасывается
+    на входе (`features/snapshot.py::tf_snapshot`), поэтому `-1` И ЕСТЬ новейший закрытый бар.
+    Прежнее `height - 2` обслуживало ПРЕДЫДУЩИЙ закрытый бар, то есть отставало на целый
+    интервал, а докстрока при этом обещала «последний закрытый». Это ровно та регрессия,
+    которая в проекте уже отгружалась однажды и закреплена памятью
+    `closed-bar-convention-off-by-one`; `detect_double_bottom` мерил свой `recovery` о
+    просроченный бар.
+    """
     if frame.is_empty() or "close" not in frame.columns:
         return 0.0
-    idx = frame.height - 2 if frame.height >= 2 else frame.height - 1
+    idx = frame.height - 1
     if idx < 0:
         return 0.0
     try:

@@ -37,6 +37,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+import polars as pl
+
 # Границы санитарной обрезки. Нужны не «на всякий случай», а против двух конкретных вырождений:
 # сверхтонкий ряд (все бары одинаковы → δ=0 → кластеризация склеит всё в один уровень) и
 # аварийный выброс (одна свеча на 40% → δ раздувается и зона поглотит весь график).
@@ -59,19 +61,26 @@ def mean_abs_increment_pct(closes: Sequence[float]) -> float | None:
         Среднее абсолютное приращение в процентах, обрезанное в
         ``[MIN_BAND_PCT, MAX_BAND_PCT]``, либо ``None``.
     """
-    n = len(closes)
-    if n < 30:
+    if len(closes) < 30:
         return None
-    steps: list[float] = []
-    for k in range(n - 1):
-        prev = float(closes[k])
-        if prev <= 0:
-            continue
-        steps.append(abs(float(closes[k + 1]) - prev) / prev * 100.0)
-    if not steps:
+    # Polars Expression API, а не питон-цикл: правило проекта — считать выражениями, а не
+    # руками. `pct_change().abs().mean()` — это в точности δ(τ) в процентах.
+    #
+    # ⚠ Плагины проверены и НЕ подошли, и это стоит записать, чтобы не проверяли заново:
+    # `polars_ds.query_mean_abs_change` даёт то же самое, но в АБСОЛЮТНЫХ единицах цены —
+    # для полосы нужны проценты, иначе она не переносится между символами. А `query_mad`,
+    # на который тянет имя, считает СРЕДНЕЕ отклонение от СРЕДНЕГО (замер: 26.389 против
+    # медианного 3.0 на одном ряду) — точка слома 0%, а не 50%, робастной оценкой не является.
+    series = pl.Series("close", [float(c) for c in closes], dtype=pl.Float64)
+    delta = (
+        pl.DataFrame({"close": series})
+        .select(
+            (pl.col("close").pct_change().abs().mean() * 100.0).alias("delta")
+        )["delta"][0]
+    )
+    if delta is None or not (delta > 0.0):
         return None
-    delta = sum(steps) / len(steps)
-    return min(MAX_BAND_PCT, max(MIN_BAND_PCT, delta))
+    return min(MAX_BAND_PCT, max(MIN_BAND_PCT, float(delta)))
 
 
 def level_band_fraction(bars: Sequence[dict[str, float]], *, fallback: float) -> float:

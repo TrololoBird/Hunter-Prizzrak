@@ -226,13 +226,17 @@ def willr_from_polars_ta(df: pl.DataFrame, period: int = 14) -> pl.Series:
         df,
         plta.WILLR(high, low, close, timeperiod=int(period)),
         name=f"willr{period}",
-        percent=True,
     )
-    raw_max = raw.max()
-    raw_min = raw.min()
-    if raw_max is not None and float(cast("Any", raw_max)) <= 0.0 and raw_min is not None and float(cast("Any", raw_min)) >= -1.5:
-        raw = raw * 100.0
-    return _clean(raw, fill=-50.0).clip(-100.0, 0.0)
+    # ⚠ WILLIAMS %R У ЭТОГО БЭКЕНДА ПОЛОЖИТЕЛЕН (0…1), а не канонический −100…0.
+    # Прежняя редакция масштабировала только если весь ряд ≤ 0, а потом всё равно резала
+    # `clip(-100, 0)` — то есть положительный ряд обнулялся ЦЕЛИКОМ. Замер: на 400 барах
+    # случайного блуждания `willr14` принимал РОВНО ОДНО значение — 0.0, при сыром диапазоне
+    # 0.00…0.96. Любой гейт по этому полю был константой.
+    #
+    # И масштаб больше не выводится из данных: доля ряда, попавшая в диапазон, зависела бы от
+    # длины окна, а это и lookahead (будущий бар меняет прошлую строку в 100 раз), и просто
+    # недетерминизм. Диапазон бэкенда известен — переворачиваем его явно.
+    return _clean(raw * -100.0, fill=-50.0).clip(-100.0, 0.0)
 
 
 _EXTENDED_BUILDERS: list[tuple[str, str, Callable[[], pl.Expr], float, bool, tuple[float, float] | None]] = [
