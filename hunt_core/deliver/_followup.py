@@ -206,7 +206,7 @@ def format_followup_telegram(followup: Any, row: dict[str, Any]) -> str:
         band = z_lo if z_lo == z_hi else f"{z_lo}–{z_hi}"
         poc = payload.get("poc")
         poc_s = f" (ПОК <code>{fmt_price(poc)}</code>)" if isinstance(poc, (int, float)) else ""
-        # ⚠ Подписи «по факту» здесь БОЛЬШЕ НЕТ, и это не потеря. С 2026-07-28
+        # ⚠ Подписи «по факту» здесь БОЛЬШЕ НЕТ, и это не потеря. С 2026-07-27
         # ``zone_watch._actionable_zones`` такие зоны в поток алертов не пускает вовсе (вход по
         # ним не лимитный), поэтому ветка стала недостижимой: `payload["by_fact"]` тут всегда
         # False. Оставить её значило бы завести ровно ту сироту, которую ловит I-6, — признак,

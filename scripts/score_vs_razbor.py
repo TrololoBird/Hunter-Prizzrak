@@ -37,6 +37,7 @@ from typing import Any
 import ccxt.async_support as ccxt
 
 from hunt_core.prizrak.config import PrizrakConfig
+from hunt_core.engine.params import OHLCV_LIMIT
 from hunt_core.engine.spot import SpotEngine
 from hunt_core.prizrak.orchestrator import _INTEREST_ZONE_MAX_WIDTH_PCT
 from hunt_core.prizrak.setups import build_symbol_setups
@@ -345,7 +346,19 @@ async def main() -> None:
             raw: dict[str, list[list[float]]] = {}
             for tf in TFS:
                 try:
-                    o = await ex.fetch_ohlcv(sym, tf, limit=500)
+                    # ⚠ БЫЛО 500 — оракул мерил карту на кадрах МЕЛЬЧЕ ПРОДОВЫХ. Прод держит
+                    # ровно ``OHLCV_LIMIT`` (движок обрезает кадр до него в
+                    # ``engine/state.py``), поэтому 500 — это не «поменьше для скорости», а
+                    # ДРУГОЙ объект: после среза по дате разбора от 500 баров у старых кейсов
+                    # остаётся заметно меньше 365, и дневной горизонт голодает системно.
+                    #
+                    # Замер 2026-07-27 на том же эталоне: 500 → recall 105/123, превышение
+                    # +51.7, зон 958; 1000 → 107/123, превышение +50.1, зон 976. То есть
+                    # прежний базлайн завышал превышение на ~1.6 п.п. Хуже: правка
+                    # ``max_zones`` меряется на кадрах 500 как −3.0 п.п. и +15 зон, а на
+                    # продовой глубине — как +0 зон. ОДИН И ТОТ ЖЕ КОД, РАЗНЫЙ ЗНАК; решение,
+                    # принятое на голодных кадрах, относится не к тому, что исполняется.
+                    o = await ex.fetch_ohlcv(sym, tf, limit=OHLCV_LIMIT)
                 except Exception:
                     continue
                 step = ex.parse_timeframe(tf) * 1000
