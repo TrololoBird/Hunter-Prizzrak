@@ -253,14 +253,24 @@ class DigestScheduler:
         self,
         pumps: list[DigestCandidate],
         dumps: list[DigestCandidate],
-        *,
-        interval_s: float,
     ) -> str:
-        hours = interval_s / 3600.0
-        label = f"{hours:.0f}h" if hours == int(hours) else f"{hours:.1f}h"
+        # ⚠ В заголовке НЕ ведро расписания, а окно, по которому ранжируются строки.
+        #
+        # Печаталось «DIGEST · 1h» / «· 3h» / «· 6h» — номер ведра, которое подошло по времени
+        # (`_due_interval` берёт САМОЕ ДЛИННОЕ из подошедших). Но содержимое во всех трёх случаях
+        # одно и то же: топ текущего вотчлиста по `score` и по изменению за 24 часа. То есть
+        # заголовок «за 3 часа» стоял ровно над колонкой «24h +46.3%» — читалось как «это движение
+        # за 3 часа», чем оно никогда не было. Живой канал 2026-07-27: 17 дайджестов, ярлык
+        # чередовался 1h/1h/3h при неизменной часовой каденции и неизменных 24h-числах.
+        #
+        # Само ведро читателю и не сообщает ничего: `maybe_emit` сбрасывает все ведра короче
+        # сработавшего, поэтому фактическая частота выпуска всегда равна САМОМУ КОРОТКОМУ
+        # интервалу. Периодичность ушла в подпись — там её нельзя спутать с окном замера.
+        hours = min(_digest_intervals_s()) / 3600.0
+        cadence = f"{hours:.0f}ч" if hours == int(hours) else f"{hours:.1f}ч"
         lines = [
-            f"🗞 <b>DIGEST · {label}</b>",
-            "<i>Top pump/dump radar — не вход, обзор рынка</i>",
+            "🗞 <b>DIGEST · движение за 24ч</b>",
+            f"<i>Top pump/dump radar — не вход, обзор рынка · срез раз в {cadence}</i>",
             "━━━━━━━━━━━━━━━━━━━━━━",
         ]
 
@@ -309,7 +319,7 @@ class DigestScheduler:
             # retry every tick.
             self._last_emit[interval] = mono
             return False
-        msg = self.format_message(pumps, dumps, interval_s=interval)
+        msg = self.format_message(pumps, dumps)
         result = await broadcaster.send_html(msg)
         if getattr(result, "status", "") == "sent":
             self._last_emit[interval] = mono

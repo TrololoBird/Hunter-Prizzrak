@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import faulthandler
+import html
 import os
 import time
 from collections.abc import Sequence
@@ -69,6 +70,48 @@ _ORPHAN_WS_LOG_INTERVAL_S = 60.0
 # for a stalled WS plane that the progress watchdog can't see). The alert fires at
 # streak≥3, so this leaves ~7 ticks of warning first; never fires on an IP ban.
 _BLACKOUT_RESTART_STREAK = int(os.getenv("HUNT_BLACKOUT_RESTART_STREAK", "10"))
+
+# ── Троттлинг алерта блэкаута ──────────────────────────────────────────────────
+# ⚠ ЗАМЕР 2026-07-27 по живому каналу: за 20 ч ушло **246 сообщений, из них 95 — этот алерт**
+# (39% всего канала). Эпизодов при этом было **11**: два длинных (74 и 34 тика) дали ~104
+# отправки, остальные девять — по одному-два тика. Алерт стоял без всякого троттлинга и уходил
+# КАЖДЫЙ тик (30 с), пока держался стрик; дедуп broadcaster'а (sha256 текста) его не ловил,
+# потому что в текст подставлен растущий счётчик тиков — каждое сообщение уникально побайтово.
+#
+# И ни одного сообщения о ВОССТАНОВЛЕНИИ: оператор получал 72 тревоги подряд и ни одной отбойной,
+# то есть канал не отвечал на единственный вопрос, который у него есть, — «сейчас-то живо?».
+_BLACKOUT_ALERT_COOLDOWN_S = float(os.getenv("HUNT_BLACKOUT_ALERT_COOLDOWN_S", "900") or 900)
+
+
+def _blackout_numeral(n: int) -> str:
+    """«3 тика» / «34 тика» / «11 тиков» — согласование числительного.
+
+    Печаталось «3 тиков», «34 тиков». Мелочь, но это первое, что читает оператор в тревоге."""
+    if 11 <= n % 100 <= 14:
+        return "тиков"
+    return {1: "тик", 2: "тика", 3: "тика", 4: "тика"}.get(n % 10, "тиков")
+
+
+def _egress_hint() -> str:
+    """Куда реально ходит бот за данными — из конфигурации, а не из памяти автора текста.
+
+    Подсказка была захардкожена строкой «соединение прямое, без прокси». Сегодня она верна
+    (`config.toml [bot.network]` без `proxy_url`), но верна СЛУЧАЙНО: она ничего не читает и
+    станет ложью в тот день, когда появится `HTTPS_PROXY`/`BINANCE_PROXY_URL` — а это первое,
+    что оператор пойдёт проверять по тревоге. ⚠ Не путать с прокси ТЕЛЕГРАМА
+    (`detect_local_proxies`, лог `watch_telegram_proxy`): он к плоскости данных не относится."""
+    from hunt_core.market.network import mask_proxy_url, resolve_proxy_url
+
+    proxy = resolve_proxy_url()
+    if proxy:
+        return (
+            f"Egress через прокси <code>{html.escape(mask_proxy_url(proxy))}</code> — "
+            "проверьте, что он жив; либо зависший фетч. Сигналы не формируются."
+        )
+    return (
+        "Egress прямой (прокси не настроен) — проверьте доступ к Binance "
+        "или зависший фетч. Сигналы не формируются."
+    )
 
 
 def _log_orphan_ws(exc: BaseException) -> None:
@@ -501,6 +544,10 @@ async def run_loop(
     # HTF frames live in the engine's kline planes now (seeded + WS-streamed by MultiEngine); the
     # legacy frame-cache persist/reload is gone, so a restart re-seeds off the engine, not a JSON blob.
     _degraded_streak = 0  # consecutive ticks the whole universe failed data assembly
+    # Троттлинг алерта блэкаута: когда тревога ушла в последний раз (monotonic) и какой стрик
+    # был максимальным за эпизод — второе печатается в отбойном сообщении.
+    _blackout_alert_at: float | None = None
+    _blackout_alert_peak = 0
     try:
         tick_ctx: dict[str, Any] | None = None
         while not should_stop():
@@ -802,6 +849,10 @@ async def run_loop(
                     _health = assess_universe_health(rows)
                     if _health.degraded:
                         _degraded_streak += 1
+                        # Пик копится КАЖДЫЙ тик, а не в момент отправки: тревоги уходят раз в
+                        # 15 мин (стрики 3, 33, 63…), и отбой по «последнему отправленному»
+                        # напечатал бы для эпизода в 74 тика цифру 63 — занижение на 15%.
+                        _blackout_alert_peak = max(_blackout_alert_peak, _degraded_streak)
                         LOG.warning(
                             "hunt_universe_degraded",
                             streak=_degraded_streak,
@@ -816,37 +867,48 @@ async def run_loop(
                         _is_ban = False
                         # Escalate to an ops alert once the blackout persists (not a
                         # one-off blip) — near-total failure across several ticks.
+                        #
+                        # Отправка — ОДИН РАЗ на эпизод, плюс повтор не чаще
+                        # `_BLACKOUT_ALERT_COOLDOWN_S`, если блэкаут всё ещё держится. Прежде
+                        # алерт уходил каждый тик и один эпизод давал до 72 одинаковых сообщений
+                        # (замер выше). Повтор оставлен намеренно: молчащий час — это тоже
+                        # неверный сигнал, оператор должен знать, что авария длится.
+                        _now_mono = time.monotonic()
                         if (
                             _health.critical
                             and _degraded_streak >= 3
                             and send_telegram
                             and broadcaster is not None
+                            and (
+                                _blackout_alert_at is None
+                                or (_now_mono - _blackout_alert_at) >= _BLACKOUT_ALERT_COOLDOWN_S
+                            )
                         ):
-                            # Cause-aware guidance: the rotating proxy pool was REMOVED
-                            # (direct Binance connection), so the old "проверьте прокси"
-                            # text is stale and misleading. The dominant real cause of a
-                            # klines blackout is a Binance IP rate-limit ban (418/429)
-                            # that pauses the REST plane and starves the 4h refresh —
-                            # detect it and say so (it self-heals when the ban lifts).
+                            # Cause-aware guidance: a Binance IP rate-limit ban (418/429) pauses
+                            # the REST plane and starves the 4h refresh — it self-heals when the
+                            # ban lifts, so say so instead of sending the operator hunting.
                             if _is_ban:
                                 _cause_hint = (
                                     f"⏳ Binance IP-бан/rate-limit — REST на паузе (~{_ban_pause:.0f}s). "
                                     "Частота запросов уже снижена; ждём снятия, процесс восстановится сам."
                                 )
                             else:
-                                _cause_hint = (
-                                    "Проверьте доступ к Binance (соединение прямое, без прокси) "
-                                    "или зависший фетч — сигналы не формируются."
-                                )
+                                _cause_hint = _egress_hint()
+                            # «7/7 символов (100%)» читалось как «вся вселенная погасла», хотя
+                            # оценивается ТОЛЬКО прогретый набор тика (7 при `watch_universe` в
+                            # 24–29 символов). Масштаб называем явно.
+                            _repeat = "" if _blackout_alert_at is None else " (авария продолжается)"
                             try:
                                 await broadcaster.send_html(
-                                    "🚨 <b>Data blackout</b>: "
-                                    f"{_health.failures}/{_health.total} символов "
+                                    f"🚨 <b>Data blackout</b>{_repeat}: "
+                                    f"{_health.failures}/{_health.total} прогретых символов "
                                     f"({_health.failure_frac * 100:.0f}%) не проходят проверку "
-                                    f"данных {_degraded_streak} тиков подряд.\n"
-                                    f"Причина: <code>{_health.dominant_kind}</code>.\n"
+                                    f"данных {_degraded_streak} "
+                                    f"{_blackout_numeral(_degraded_streak)} подряд.\n"
+                                    f"Причина: <code>{html.escape(str(_health.dominant_kind))}</code>.\n"
                                     f"{_cause_hint}"
                                 )
+                                _blackout_alert_at = _now_mono
                             except Exception:
                                 LOG.exception("hunt_universe_degraded_alert_failed")
                         # AUTO-RECOVERY: a sustained critical NON-ban blackout (e.g. a
@@ -869,6 +931,24 @@ async def run_loop(
                             )
                             os._exit(1)
                     else:
+                        # ОТБОЙ. Раньше эпизод просто переставал шуметь, и канал никогда не
+                        # отвечал на единственный вопрос оператора — «сейчас-то живо?». Шлётся
+                        # только тем, кого тревожили: без предшествующего алерта ничего не идёт.
+                        if _blackout_alert_at is not None:
+                            _peak = max(_blackout_alert_peak, 1)
+                            if send_telegram and broadcaster is not None:
+                                try:
+                                    await broadcaster.send_html(
+                                        "✅ <b>Data blackout снят</b>: данные снова проходят "
+                                        f"проверку ({_health.total - _health.failures}/"
+                                        f"{_health.total} прогретых символов).\n"
+                                        f"Пик аварии — {_peak} {_blackout_numeral(_peak)} подряд."
+                                    )
+                                except Exception:
+                                    LOG.exception("hunt_universe_recovered_alert_failed")
+                            LOG.info("hunt_universe_recovered", peak_streak=_peak)
+                        _blackout_alert_at = None
+                        _blackout_alert_peak = 0
                         _degraded_streak = 0
                 if (
                     not once

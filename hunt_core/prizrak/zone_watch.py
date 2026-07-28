@@ -289,8 +289,18 @@ def _rr_worst_fill(
 def _handoff(
     state: dict[str, Any], sym: str, z: dict[str, Any], *, price: float, stop: float,
     now: datetime, cfg: PrizrakConfig,
-) -> None:
+) -> str:
     """Price entered the zone → register it as a real tracked trade so SL/TP follow-ups take over.
+
+    Returns:
+        Исход передачи, который УХОДИТ В СООБЩЕНИЕ: ``"tracked"`` · ``"occupied"`` ·
+        ``"no_target"`` · ``"rr_below_floor"`` · ``"failed"``. Раньше функция возвращала ``None``
+        и все отказы были видны только в логе. Замер живого канала 2026-07-27: из трёх событий
+        «🎯 ЦЕНА В ЗОНЕ» передач состоялось **ноль** (дважды направление занято, один раз цели
+        не было вовсе), но все три сообщения одинаково звали «вход по факту касания» — и ни одно
+        не сказало, что дальше не будет ни SL/TP, ни сообщения о закрытии. Читатель ждал
+        сопровождения, которого код не собирался давать.
+
 
     Never clobbers an already-open signal for that direction: a gated emitted setup is the
     higher-confidence object, and ``register_signal_open`` would overwrite it under the same key.
@@ -318,7 +328,7 @@ def _handoff(
             # ведётся»: алерт выглядел как готовая к работе сделка, а её никто не завёл.
             LOG.info("zone_watch_handoff_skipped_occupied", symbol=sym, kind=z["kind"],
                      direction=z["direction"])
-            return
+            return "occupied"
         tps = list(z.get("targets") or [])
         entry_lo, entry_hi = _entry_band(z)
         rr = _rr_worst_fill(
@@ -331,7 +341,10 @@ def _handoff(
                 "zone_watch_handoff_skipped_rr", symbol=sym, kind=z["kind"],
                 direction=z["direction"], rr=rr, floor=floor,
             )
-            return
+            # ДВЕ разные причины, и читателю они говорят разное: «цели за зоной вообще нет»
+            # (R:R не из чего считать) против «цель есть, но отношение ниже пола». Один код на
+            # обе печатал бы «нет цели» под уже напечатанным списком целей.
+            return "no_target" if rr is None else "rr_below_floor"
         setup = {
             "entry_zone": [entry_lo, entry_hi],
             "rr": rr,
@@ -355,8 +368,10 @@ def _handoff(
             now=now,
         )
         LOG.info("zone_watch_handoff", symbol=sym, kind=z["kind"], direction=z["direction"], stop=stop)
+        return "tracked"
     except Exception:  # noqa: BLE001 — a tracking handoff must never break the tick
         LOG.exception("zone_watch_handoff_failed", symbol=sym)
+        return "failed"
 
 
 def evaluate_zone_watch(
@@ -443,8 +458,14 @@ def evaluate_zone_watch(
         if dist == 0.0:
             if not rec["entered_at"]:
                 rec["entered_at"] = now.isoformat()
-                out.append(_followup("zone_entry", sym, z, price=price, stop=stop, dist=0.0, now=now))
-                _handoff(state, sym, z, price=price, stop=stop, now=now, cfg=cfg)
+                ev = _followup("zone_entry", sym, z, price=price, stop=stop, dist=0.0, now=now)
+                # Исход передачи проставляется в УЖЕ созданное событие: сообщение обязано сказать
+                # читателю, ведёт ли бот эту сделку дальше, — иначе «вход по факту касания» звучит
+                # как сопровождаемая сделка, а SL/TP-follow-up не придёт никогда.
+                ev.payload["tracking"] = _handoff(
+                    state, sym, z, price=price, stop=stop, now=now, cfg=cfg
+                )
+                out.append(ev)
         elif dist > _RESET_PCT:
             # Genuinely left the area — re-arm both alerts for the next visit.
             rec["approached_at"] = None

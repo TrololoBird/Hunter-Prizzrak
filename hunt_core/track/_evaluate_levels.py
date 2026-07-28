@@ -12,6 +12,7 @@ from hunt_core.track._trailing import (
     _update_trailing_stop,
     _worst_entry,
 )
+from hunt_core.track.pnl import realized_pct
 
 if TYPE_CHECKING:
     from hunt_core.track.tracker import HuntFollowUp
@@ -519,11 +520,28 @@ def evaluate_levels(
 
     # Stop first: a wick through SL ends the signal even if TP printed later.
     if stop_hit:
-        pnl_at_stop = trk._pnl_at_price(active, direction, stop)
-        if active.get("trailing_active") and pnl_at_stop > 0:
+        # ⚠ Признак «это не стоп-аут» — СТОП БЫЛ СДВИНУТ, а не «работает трейл».
+        #
+        # Условие держалось на одном `trailing_active`, который ставит только
+        # `_trailing._update_trailing_stop`. Но безубыток после первой цели ставит
+        # `apply_tp1_management`, и он пишет ДРУГОЙ флаг — `sl_at_breakeven`. Итог на живом
+        # канале 2026-07-27: 4 закрытия из 6 ушли как «🔴 Стоп · Стоп-лосс пробит · Позиция
+        # закрылась по стопу» с ПОЛОЖИТЕЛЬНЫМ PnL в той же строке (BEAT +52.5%, DIA, AKE, BTW).
+        # Читатель видит взаимоисключающие утверждения и не может понять исход сделки.
+        #
+        # Второе изменение — вердикт по РЕЗУЛЬТАТУ СДЕЛКИ (`realized_pct`), а не по ходу
+        # последней ноги: после частичной фиксации на TP1 остаток штатно выходит в ноль, и
+        # ход ноги == 0 при взятых +65% на первой цели — это победа, а не «стоп».
+        # ⚠ Без запасного значения. `realized_pct` возвращает None ровно тогда, когда у сделки
+        # нет геометрии входа, и подстановка туда «хода ноги» дала бы 0.0 (`_pnl_at_price`
+        # падает в ноль по ТОМУ ЖЕ условию) — то есть `0.0 >= 0` объявил бы сделку без единой
+        # известной кромки «выходом в безубыток». Не измерено — значит обычный стоп (I-6).
+        realized = realized_pct(active, direction=direction, exit_price=stop)
+        stop_was_moved = bool(active.get("trailing_active") or active.get("sl_at_breakeven"))
+        if realized is not None and stop_was_moved and realized[0] >= 0:
             close_reason = "trailing_stop_profit"
             detail_msg = (
-                f"Trailing SL {trk._fmt(stop)} · фиксация +{pnl_at_stop:.1f}%"
+                f"Стоп в безубытке/прибыли {trk._fmt(stop)} · фиксация {realized[0]:+.1f}%"
             )
         else:
             close_reason = "stop_hit"
@@ -579,7 +597,19 @@ def evaluate_levels(
                     message_key=msg_key,
                     detail=detail,
                     price=price,
-                    payload={**latch, "tp2": tp2, "tp1_skipped": skipped},
+                    # Единственная ветка закрытия БЕЗ `_followup_trade_metrics`: форматтер падал
+                    # в свой запасной расчёт (полная позиция от кромки) и печатал не то число,
+                    # что `close_signal` только что записал в леджер (там частичная фиксация на
+                    # TP1 учтена). Сегодня расхождения нет — все три `tp2`-строки леджера без
+                    # частичной фиксации, — но это совпадение данных, а не свойство кода.
+                    payload={
+                        **latch,
+                        "tp2": tp2,
+                        "tp1_skipped": skipped,
+                        **trk._followup_trade_metrics(
+                            active, direction=direction, price=tp2, ts=ts
+                        ),
+                    },
                 )
             )
         return events

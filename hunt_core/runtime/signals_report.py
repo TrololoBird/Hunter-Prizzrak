@@ -25,6 +25,7 @@ from hunt_core.scanner.detect.delivery_support import (
 )
 from hunt_core.paths import WATCHLIST
 from hunt_core.runtime.symbol_probe import normalize_symbol, probe_symbol_signal
+from hunt_core.track.pnl import realized_pct
 from hunt_core.track.tracker import load_tracker_state
 
 _PROBE_RETRIES = 3
@@ -187,13 +188,17 @@ class _ReportRollup:
 
 
 def _pnl_pct(sig: dict[str, Any], direction: str, price: float) -> float | None:
-    lo = float(sig.get("entry_lo") or 0)
-    hi = float(sig.get("entry_hi") or 0)
-    mid = (lo + hi) / 2.0 if lo > 0 and hi > 0 else (lo or hi)
-    if mid <= 0 or price <= 0:
-        return None
-    raw = (price - mid) / mid * 100.0
-    return round(-raw if direction == "short" else raw, 2)
+    """Текущий результат открытой сделки для ответа на `/signals`.
+
+    ⚠ Здесь стояла ЧЕТВЁРТАЯ копия формулы — от СЕРЕДИНЫ полосы входа, вопреки прямому запрету
+    в докстроке `track/pnl.py`. Она живая: это и счётчик «N в плюсе», и PnL в строке каждого
+    сигнала. Пересчёт по 304 записям живого леджера: у 184 невырожденных зон середина завышает
+    результат ВСЕГДА (184 из 184), медиана расхождения 1.12 п.п., максимум 5.66 п.п., а у 5.9%
+    строк расходится даже ЗНАК. То есть `/signals` и карточка закрытия про одну и ту же сделку
+    отвечали разными числами, иногда с разным знаком.
+    """
+    realized = realized_pct(sig, direction=direction, exit_price=price)
+    return None if realized is None else realized[0]
 
 
 def _rollup_touch(

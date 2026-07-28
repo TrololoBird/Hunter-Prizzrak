@@ -168,8 +168,19 @@ def _targets_line(vals: list[Any], *, label: str = "💰 цели") -> str:
     return f"{label}: {inner}" if inner else ""
 
 
-def _first_opposing(setups: dict[str, Any], *, entry: float, direction: str) -> float | None:
-    """Ближайшая кромка зоны ЗА входом по всем горизонтам — первая стена на пути сделки."""
+def _first_opposing(
+    setups: dict[str, Any], *, entry_lo: float, entry_hi: float, direction: str
+) -> float | None:
+    """Ближайшая кромка зоны ЗА ВСЕЙ полосой входа — первая стена на пути сделки.
+
+    ⚠ Отсекается по ДАЛЬНЕЙ кромке полосы, а не по её середине. Прежде сюда передавалась
+    середина, и кромка, лежащая ВНУТРИ зоны входа, засчитывалась «первой стеной»: на живом
+    канале 2026-07-27 две активации ETH из четырёх напечатали «до 1-го уровня 1967.22 = 0.1R»
+    при входе 1965.36–1973.23 — цель внутри собственной зоны входа. Число выходило
+    арифметически верным и бессмысленным по существу: до уровня, который лимитная лестница
+    накрывает своими же ордерами, «идти» некуда, а 0.1R заставляет читателя списать сетап.
+    """
+    edge_ref = max(entry_lo, entry_hi) if direction == "long" else min(entry_lo, entry_hi)
     best: float | None = None
     for hz in (setups.get("horizons") or {}).values():
         if not isinstance(hz, dict):
@@ -184,9 +195,9 @@ def _first_opposing(setups: dict[str, Any], *, entry: float, direction: str) -> 
                     v = _num(z.get(edge))
                     if v is None:
                         continue
-                    if direction == "long" and v > entry and (best is None or v < best):
+                    if direction == "long" and v > edge_ref and (best is None or v < best):
                         best = v
-                    if direction == "short" and v < entry and (best is None or v > best):
+                    if direction == "short" and v < edge_ref and (best is None or v > best):
                         best = v
     return best
 
@@ -446,10 +457,15 @@ def _active_signal_block(summary: dict[str, Any], setups: dict[str, Any]) -> lis
         # Заменять одно другим НЕЛЬЗЯ — автор фиксирует часть на первом уровне и держит остаток
         # («частично фиксировать… смотреть, будет ли пробой закреп»), его 1к3 про сделку целиком.
         # Поэтому показываем ОБА: ambition и ближайшую стену. Гейт эмиссии не трогаем.
-        first = _first_opposing(setups, entry=(lo + hi) / 2.0, direction=direction)
+        first = _first_opposing(setups, entry_lo=lo, entry_hi=hi, direction=direction)
         if first is not None and stop is not None:
-            risk = ((lo + hi) / 2.0 - stop) if direction == "long" else (stop - (lo + hi) / 2.0)
-            gain = (first - (lo + hi) / 2.0) if direction == "long" else ((lo + hi) / 2.0 - first)
+            # База — ХУДШИЙ залив в полосе (лонг → hi, шорт → lo), как у `_rr_conservative`,
+            # `zone_watch._rr_worst_fill` и `pnl.entry_base`. От середины эти два R стояли рядом
+            # в одной строке, будучи посчитанными от разных точек отсчёта: широкая полоса дарила
+            # ближнему R половину своей ширины и делала «1-й уровень» несравнимым с «R:R».
+            edge = max(lo, hi) if direction == "long" else min(lo, hi)
+            risk = (edge - stop) if direction == "long" else (stop - edge)
+            gain = (first - edge) if direction == "long" else (edge - first)
             if risk > 0 and gain > 0:
                 bits.append(f"до 1-го уровня <code>{fmt_price(first)}</code> = {gain / risk:.1f}R")
     lines = [" · ".join(bits)]

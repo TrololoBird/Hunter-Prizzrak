@@ -4,7 +4,7 @@ from __future__ import annotations
 import html
 from typing import Any
 
-from hunt_core.deliver._labels import fmt_price, phase_human
+from hunt_core.deliver._labels import fmt_price, format_symbol_telegram, phase_human
 from hunt_core.track.tracker import duration_minutes
 
 def _duration_str(opened: str) -> str:
@@ -33,6 +33,11 @@ def _trade_duration_line(payload: dict[str, Any]) -> str:
     return _duration_str(opened_raw)
 
 
+# Ниже этого модуля результат печатается как «0.00%», поэтому и назвать его прибылью нельзя:
+# один порог на вердикт и на эмодзи, иначе «➖ Безубыток» стояло рядом с «💰 PnL: +0.02%».
+_BREAKEVEN_EPS_PCT = 0.05
+
+
 def _format_pnl_pct(pnl: Any) -> str:
     if pnl is None:
         return ""
@@ -41,7 +46,10 @@ def _format_pnl_pct(pnl: Any) -> str:
     except (TypeError, ValueError):
         return ""
     sign = "+" if val >= 0 else ""
-    emoji = "💰" if val > 0 else "💸" if val < 0 else "➖"
+    if abs(val) < _BREAKEVEN_EPS_PCT:
+        emoji = "➖"
+    else:
+        emoji = "💰" if val > 0 else "💸"
     return f"{emoji} PnL: <b>{sign}{val:.2f}%</b>"
 
 
@@ -52,24 +60,32 @@ def _pnl_pct_from_prices(
     entry_hi: Any,
     exit_price: Any,
 ) -> float | None:
+    """Запасной расчёт PnL, когда трекер не положил его в payload.
+
+    Делегирует `track/pnl.py::realized_pct` — единственной формуле проекта. Здесь стояла ТРЕТЬЯ
+    её копия, считавшая от СЕРЕДИНЫ полосы: на широкой зоне это дарит половину её ширины
+    (замер 2026-07-27 по 168 невырожденных зон: медиана 2.245%, максимум 13.26%), и одна и та же
+    сделка приезжала читателю разными числами из разных сообщений.
+    """
     if entry_lo is None or entry_hi is None or exit_price is None:
         return None
-    try:
-        entry_mid = (float(entry_lo) + float(entry_hi)) / 2.0
-        exit_p = float(exit_price)
-    except (TypeError, ValueError):
-        return None
-    if entry_mid <= 0 or exit_p <= 0:
-        return None
-    if direction.upper() == "SHORT":
-        return (entry_mid - exit_p) / entry_mid * 100.0
-    return (exit_p - entry_mid) / entry_mid * 100.0
+    from hunt_core.track.pnl import realized_pct
+
+    realized = realized_pct(
+        {"entry_lo": entry_lo, "entry_hi": entry_hi},
+        direction=str(direction).lower(),
+        exit_price=exit_price,
+    )
+    return None if realized is None else realized[0]
 
 
 def format_followup_telegram(followup: Any, row: dict[str, Any]) -> str:
     from hunt_core.deliver.readiness import invalidate_detail_human
 
-    sym = html.escape(str(followup.symbol).replace("USDT", "-USDT"))
+    # Общий рендер символа (`_labels`), а не своя `replace("USDT", "-USDT")`: та подменяла
+    # КАЖДОЕ вхождение и не проверяла, чем строка вообще является. Один рендер на канал — иначе
+    # один и тот же инструмент называется в соседних сообщениях по-разному.
+    sym = format_symbol_telegram(str(followup.symbol))
     direction = followup.direction.upper()
     price = fmt_price(followup.price)
     lc = row.get("lifecycle") or {}
@@ -145,13 +161,21 @@ def format_followup_telegram(followup: Any, row: dict[str, Any]) -> str:
     if event == "trailing_updated":
         new_sl = fmt_price(payload.get("stop_loss"))
         protected = payload.get("protected_pnl_pct")
-        try:
-            prot_str = f"+{float(protected or 0):.1f}%"
-        except (TypeError, ValueError):
+        # Знак ставит ЧИСЛО, а не разметка: было `f"+{...:.1f}%"` поверх значения, которое
+        # знак несёт само, — на любом отрицательном это дало бы «+-1.2%».
+        # ⚠ Честная граница находки: в логах за 24 ч такого рендера НЕТ (все наблюдённые
+        # значения положительные), и по коду он недостижим — `_update_trailing_stop` объявляет
+        # сдвиг только после того, как новый стоп ушёл за худшую кромку входа, а `protected`
+        # меряется от неё же. Это защита от рассинхрона двух условий, а не починка живого бага.
+        if isinstance(protected, (int, float)):
+            prot_str = f"{float(protected):+.1f}%"
+            guard_word = "стоп ещё в убытке" if float(protected) < 0 else "защита"
+        else:
             prot_str = "—"
+            guard_word = "защита"
         return (
             f"📈 <b>TRAILING АКТИВЕН · {sym} {direction}</b>\n"
-            f"Стоп подтянут → <code>{new_sl}</code> · защита ~<b>{prot_str}</b>\n"
+            f"Стоп подтянут → <code>{new_sl}</code> · {guard_word} ~<b>{prot_str}</b>\n"
             f"⚡ На бирже вручную подтяни SL до этого уровня (Hunt не торгует).\n"
             f"{entry_ref}\n"
             f"<i>Hunt follow-up · не auto-trade</i>"
@@ -213,10 +237,33 @@ def format_followup_telegram(followup: Any, row: dict[str, Any]) -> str:
                 lines_s = "\n📥 ордера: " + " · ".join(parts)
         rr_v = payload.get("rr")
         rr_s = f" · R:R <code>{float(rr_v):.2f}</code>" if isinstance(rr_v, (int, float)) else ""
+        # ⚠ Ведёт ли бот эту сделку дальше — это ДАННЫЕ (`zone_watch._handoff`), а не догадка
+        # читателя. Замер живого канала 2026-07-27: три события «ЦЕНА В ЗОНЕ», передач в трекер —
+        # НОЛЬ (два раза направление занято, один раз нет цели ⇒ R:R не считается), но все три
+        # сообщения звали «вход по факту касания» и молчали о том, что ни SL/TP, ни сообщения о
+        # закрытии по этой зоне не будет. Молчание читалось как «ведём» — худший из вариантов.
+        track_line = {
+            "tracked": "\n✅ <i>Бот ведёт эту сделку: SL/TP придут отдельными сообщениями.</i>",
+            "occupied": (
+                "\n⚠️ <i>Бот НЕ ведёт: по этому символу и направлению уже открыт сигнал. "
+                "Сопровождения по этой зоне не будет.</i>"
+            ),
+            "no_target": (
+                "\n⚠️ <i>Бот НЕ ведёт: за зоной нет структурной цели, R:R не из чего считать. "
+                "Уровень показан как ориентир — сопровождения не будет.</i>"
+            ),
+            "rr_below_floor": (
+                "\n⚠️ <i>Бот НЕ ведёт: R:R по худшему заливу ниже порога метода. "
+                "Уровень показан как ориентир — сопровождения не будет.</i>"
+            ),
+            "failed": "\n⚠️ <i>Бот НЕ ведёт: передача в трекер не удалась (см. лог).</i>",
+        }.get(str(payload.get("tracking") or ""), "") if event == "zone_entry" else ""
+        # Только для ВХОДА: на подходе к зоне передавать нечего, и решение ещё не принято —
+        # печатать там «бот ведёт/не ведёт» значило бы сообщать исход до самого события.
         return (
             f"{head}\n{sub}\n"
             f"📍 Цена <code>{price}</code> · стоп <code>{stop_s}</code> (за структуру){rr_s}"
-            f"{tgt_line}{lines_s}\n"
+            f"{tgt_line}{lines_s}{track_line}\n"
             f"<i>Зона карты · лимит вручную · не auto-trade</i>"
         )
 
@@ -232,11 +279,21 @@ def format_followup_telegram(followup: Any, row: dict[str, Any]) -> str:
     if event == "invalidate":
         duration = _trade_duration_line(payload)
 
+        # `pnl_basis` называет базу И способ (`track/pnl.py`): суффикс `partial_fix_at_tp1`
+        # означает, что часть уже снята на первой цели, и остаток вышел по ПЕРЕНЕСЁННОМУ стопу.
+        # Без этого различия «стоп в безубытке после взятого TP1» и «трейл в прибыли» печатались
+        # одной строкой, и читателю оставалось гадать, была ли фиксация.
+        _partial_booked = "partial_fix" in str(payload.get("pnl_basis") or "")
         _reason_map = {
             "stop_hit": ("🔴 Стоп-лосс пробит", "Позиция закрылась по стопу."),
             "trailing_stop_profit": (
-                "✅ Trailing stop / фиксация",
-                "Позиция закрыта по подтянутому стопу в зоне профита.",
+                "✅ Выход по перенесённому стопу",
+                (
+                    "Часть зафиксирована на первой цели, остаток вышел по стопу "
+                    "в безубытке/прибыли."
+                    if _partial_booked
+                    else "Стоп был подтянут за ценой — позиция закрыта не в убыток."
+                ),
             ),
             "tp1": ("✅ Достигнут TP1", "Взята первая цель."),
             "tp2": ("✅ Достигнут TP2", "Взята финальная цель."),
@@ -256,6 +313,18 @@ def format_followup_telegram(followup: Any, row: dict[str, Any]) -> str:
                 "⚠️ Потеря поддержки",
                 "Ключевая поддержка утрачена — лонг-тезис сломан.",
             ),
+            # Живые продюсеры без своей строки: `tracker._short_structure_invalidated` и
+            # `_long_structure_invalidated` (через `_followups.py`). Без них заголовок падал в
+            # сырой код («📌 reclaim_invalidation»), а тело было ПУСТЫМ — сообщение печатало
+            # голую строку между заголовком и призывом закрыть позицию.
+            "reclaim_invalidation": (
+                "🔄 Уровень отвоёван обратно",
+                "Цена вернулась выше уровня слома — тезис на шорт снят.",
+            ),
+            "trend_exhaustion": (
+                "🔄 Фаза сменилась на истощение",
+                "Рынок перешёл в истощение/раздачу — лонг-тезис исчерпан.",
+            ),
         }
         lc_phase_payload = str(payload.get("phase") or "")
         phase_txt = phase_human(lc_phase_payload) if lc_phase_payload else ""
@@ -268,16 +337,16 @@ def format_followup_telegram(followup: Any, row: dict[str, Any]) -> str:
             reason_title = "🔄 Фаза сменилась против позиции"
             reason_body = f"Новая фаза: <b>{html.escape(phase_txt)}</b> — тезис исчерпан."
 
-        # PnL from tracker payload (preferred) or entry midpoint vs exit tick
-        pnl_line = _format_pnl_pct(payload.get("pnl_pct"))
-        if not pnl_line:
-            est = _pnl_pct_from_prices(
+        # PnL сделки — той же формулой, что пишет леджер (`track/pnl.py::realized_pct`).
+        pnl_val = payload.get("pnl_pct")
+        if not isinstance(pnl_val, (int, float)):
+            pnl_val = _pnl_pct_from_prices(
                 direction=direction,
                 entry_lo=entry_lo,
                 entry_hi=entry_hi,
                 exit_price=followup.price,
             )
-            pnl_line = _format_pnl_pct(est)
+        pnl_line = _format_pnl_pct(pnl_val)
         if pnl_line:
             pnl_line += "\n"
 
@@ -289,19 +358,42 @@ def format_followup_telegram(followup: Any, row: dict[str, Any]) -> str:
         }
         action_line = "⚡ <b>Закрой позицию вручную</b>\n" if action_needed else ""
 
+        # ⚠ ВСЕ ТРИ строки исхода обязаны согласовываться с числом: вердикт, заголовок причины
+        # и её пояснение. На живом канале 2026-07-27 четыре закрытия из шести вышли как
+        # «🔴 Стоп · 🔴 Стоп-лосс пробит / Позиция закрылась по стопу» рядом с «💰 PnL +4.50%» —
+        # три взаимоисключающих утверждения в одном сообщении из шести строк.
+        #
+        # Классификацию чинит `_evaluate_levels.py`, но она НЕ единственный продюсер `stop_hit`:
+        # `tracker._short_structure_invalidated` / `_long_structure_invalidated` сверяют цену с
+        # ТЕКУЩИМ стопом, который `apply_tp1_management` уже подвинул в безубыток, и возвращают
+        # тот же код без всякой проверки знака. Поэтому форматтер — последний рубеж: если
+        # результат ИЗМЕРЕН, он и решает, как назвать исход.
+        _pnl = float(pnl_val) if isinstance(pnl_val, (int, float)) else None
+        _flat = _pnl is not None and abs(_pnl) < _BREAKEVEN_EPS_PCT
         if reason_raw in {"trailing_stop_profit", "tp1", "tp2"}:
-            verdict = "✅ Профит"
-        elif reason_raw in {"stop_hit"}:
-            verdict = "🔴 Стоп"
+            verdict = "➖ Безубыток" if _flat else "✅ Профит"
+        elif reason_raw == "stop_hit":
+            if _pnl is None or _pnl < 0:
+                verdict = "🔴 Стоп"
+            else:
+                # Стоп, который сработал ВЫШЕ входа (лонг) — физически не стоп-аут.
+                verdict = "➖ Безубыток" if _flat else "✅ Профит"
+                reason_title = "✅ Выход по перенесённому стопу"
+                reason_body = (
+                    "Стоп стоял уже не в убытке — позиция закрыта по нему, а не по исходному SL."
+                )
         elif reason_raw in {"time_stall", "timeout"}:
             verdict = "⏳ Таймаут"
         else:
             verdict = "🔄 Тезис снят"
 
+        # Пустое пояснение — это ПУСТАЯ СТРОКА в сообщении, а не отсутствие строки: причина без
+        # своей записи в `_reason_map` печатала голый разрыв между заголовком и призывом закрыть.
+        body_line = f"{reason_body}\n" if reason_body else ""
         return (
             f"📋 <b>ПОЗИЦИЯ ЗАКРЫТА · {sym} {direction}</b>\n"
             f"<b>{verdict}</b> · {reason_title}\n"
-            f"{reason_body}\n"
+            f"{body_line}"
             f"{action_line}"
             f"{pnl_line}"
             f"⏱ В сделке: {duration}\n"

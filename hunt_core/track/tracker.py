@@ -6,7 +6,7 @@ from __future__ import annotations
 from hunt_core import clock, serde
 from hunt_core.contract import price_in_entry_zone
 from hunt_core.market.symbols import is_crypto_symbol, underlying_type_for
-from hunt_core.track.pnl import realized_pct
+from hunt_core.track.pnl import entry_base, realized_pct
 import structlog
 import os
 from dataclasses import dataclass
@@ -1094,19 +1094,29 @@ def auto_resolve_active_signals(
 # candle may have opened BEFORE the signal did — its wick would falsely hit SL.
 
 
-def _entry_mid(active: dict[str, Any]) -> float:
-    lo = float(active.get("entry_lo") or 0)
-    hi = float(active.get("entry_hi") or 0)
-    if lo > 0 and hi > 0:
-        return (lo + hi) / 2.0
-    return lo or hi
+# `_entry_mid` удалена вместе с последним потребителем (`_pnl_at_price` перешёл на
+# `pnl.entry_base`). Середина полосы входа больше не является базой ни для одного расчёта в
+# проекте — оставлять её как «удобный хелпер» значит держать заряженную вторую конвенцию.
 
 
 def _pnl_at_price(active: dict[str, Any], direction: str, price: float) -> float:
-    mid = _entry_mid(active)
-    if mid <= 0 or price <= 0:
+    """Ход ОДНОЙ ноги от худшей кромки входа до ``price``, в процентах.
+
+    База — `pnl.entry_base` (лонг → `entry_hi`, шорт → `entry_lo`), та же, от которой
+    `_trailing._worst_entry` ставит безубыток и от которой считает `pnl.realized_pct`. Раньше
+    здесь стояла середина полосы — вторая, расходящаяся копия формулы, ровно та, которую
+    докстрока `track/pnl.py` объявляет запрещённой. Цена этого на живом канале 2026-07-27:
+    у BEAT-USDT закрытие по безубытку после взятого TP1 ушло в телеграм как «+1.81%» (середина),
+    тогда как леджер той же сделки записал **+52.46%** — расхождение в 29 раз в одном сообщении.
+
+    ⚠ Это ход ноги, а НЕ результат сделки: частичная фиксация на TP1 сюда не входит. Для
+    результата — `pnl.realized_pct`; здесь нога нужна там, где вопрос именно «где сейчас цена
+    относительно входа» (защита трейла, гейт контр-биаса, признак «стоп в прибыли»).
+    """
+    base = entry_base(active, direction=direction)
+    if not base or base <= 0 or price <= 0:
         return 0.0
-    raw = (price - mid) / mid * 100.0
+    raw = (price - base) / base * 100.0
     return raw if direction == "long" else -raw
 
 
@@ -1149,11 +1159,22 @@ def _followup_trade_metrics(
     price: float,
     ts: datetime,
 ) -> dict[str, Any]:
-    """PnL % and duration for Telegram follow-ups."""
-    return {
-        "duration_min": duration_minutes(active.get("opened_at"), now=ts),
-        "pnl_pct": round(_pnl_at_price(active, direction, price), 2),
-    }
+    """Результат сделки и её длительность для follow-up сообщений в телеграм.
+
+    ``pnl_pct`` считается ТОЙ ЖЕ формулой, что пишет леджер (`pnl.realized_pct`): худшая кромка
+    входа + модель частичной фиксации на TP1. Иначе одна и та же сделка приезжает читателю двумя
+    разными числами — измерено на живом канале 2026-07-27: BEAT-USDT ушёл в телеграм как
+    «💰 PnL +1.81%», а в `hunt_outcome_ledger.jsonl` лёг как ``+52.46``, потому что сообщение
+    считало ход ноги от середины полосы и не знало про 80%, снятые на TP1.
+
+    Геометрии не хватило (`realized_pct` → ``None``) — ключ ОТСУТСТВУЕТ, а не равен нулю: строка
+    PnL тогда просто не печатается (I-6). Ноль здесь читался бы как «сделка вышла в ноль».
+    """
+    out: dict[str, Any] = {"duration_min": duration_minutes(active.get("opened_at"), now=ts)}
+    realized = realized_pct(active, direction=direction, exit_price=price)
+    if realized is not None:
+        out["pnl_pct"], out["pnl_basis"] = realized[0], realized[1]
+    return out
 
 
 
