@@ -142,7 +142,24 @@ def _dedupe(zones: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _actionable_zones(setups: dict[str, Any]) -> list[dict[str, Any]]:
-    """Live-limit zones of the ACTIONABLE horizons: 🟢 перезакуп · 🟡 добор · 🔴 ближний шорт."""
+    """Live-limit zones of the ACTIONABLE horizons: 🟢 перезакуп · 🟡 добор · 🔴 ближний шорт.
+
+    ⚠ «По факту» СЮДА НЕ ПОПАДАЕТ — и это не косметика, а граница между картой и торговлей.
+    До 2026-07-28 такие зоны удалялись из карты целиком (``setups._drop_by_fact``), поэтому до
+    вотчера физически не доходили. Теперь они на карте остаются — потому что оба автора их
+    публикуют с ярлыком, а не стирают, — но смысл ярлыка ровно в том, что вход по ним НЕ лимитный:
+    стр.31 «вход только по слому», у Pavel M — «только по факту … либо входить по алерту уже
+    после теста зоны». Резервировать под них направление в трекере (``_handoff`` ключует
+    ``SYMBOL:direction``) значило бы занять место настоящего лимитного сетапа сигналом, который
+    сам себя объявил неторгуемым лимитом.
+
+    ⚠ Инвариант здесь ровно один: **ни одна зона «по факту» не попадает в авто-вход**. Он
+    проверен на живых данных (BTC/ETH 2026-07-28: 0 из 4 и 0 из 5). Соблазнительно было бы
+    написать «торгуемое множество не изменилось» — ЭТО НЕВЕРНО и замер это показал: смежные
+    правки того же коммита (``setups._rank_rungs``, ``setups._same_zone``) публикуют больше
+    ЧИСТЫХ зон, и авто-вход вырос с 2 до 4–5 на символ. Меняется не фильтр «по факту», а то,
+    какие зоны вообще доживают до карты.
+    """
     horizons = (setups.get("horizons") or {}) if isinstance(setups, dict) else {}
     out: list[dict[str, Any]] = []
     for hname in _ALERT_HORIZONS:
@@ -156,7 +173,7 @@ def _actionable_zones(setups: dict[str, Any]) -> list[dict[str, Any]]:
         short_t = _st if isinstance(_st, list) else []
 
         pk = hz.get("perezakup")
-        if isinstance(pk, dict):
+        if isinstance(pk, dict) and not pk.get("by_fact"):
             rec = _mk_zone(pk, kind="перезакуп", direction="long", targets=long_t)
             if rec is not None:
                 out.append(rec)
@@ -165,12 +182,12 @@ def _actionable_zones(setups: dict[str, Any]) -> list[dict[str, Any]]:
         # автор сидит лимитом дольше всего. Предел теперь общий с картой: сколько ступеней
         # напечатано, столько и наблюдается.
         for z in (hz.get("dobor") or [])[:_LADDER_MAX]:
-            if isinstance(z, dict):
+            if isinstance(z, dict) and not z.get("by_fact"):
                 rec = _mk_zone(z, kind="добор", direction="long", targets=long_t)
                 if rec is not None:
                     out.append(rec)
         for z in (hz.get("short") or [])[:_LADDER_MAX]:
-            if isinstance(z, dict):
+            if isinstance(z, dict) and not z.get("by_fact"):
                 rec = _mk_zone(z, kind="шорт", direction="short", targets=short_t)
                 if rec is not None:
                     out.append(rec)

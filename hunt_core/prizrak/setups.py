@@ -75,9 +75,42 @@ _LADDER_MAX = 3
 _SETUP_LOOKBACK: dict[str, int] = {"5m": 500, "15m": 400, "1h": 360, "4h": 300, "1d": 365, "1w": 260}
 
 
-def _course_flags(bars: list[dict[str, float]], *, level: float, side: str) -> dict[str, Any]:
-    """Курс стр.25/31/28 verdict at ``level``: reacted-off (worked) / «пила» (saw) / limit_ok."""
-    worked = _level_already_worked(bars, level=level, direction=side)
+def _formed_at(z: dict[str, Any]) -> int | None:
+    """Индекс бара, на котором структура зоны ДОСТРОИЛАСЬ (``last_touch_idx``), или None.
+
+    Всё, что происходило ДО него, — это касания, которые зону и построили; «уровень уже
+    отработал» может относиться только к тому, что было ПОСЛЕ.
+    """
+    v = z.get("last_touch_idx")
+    return int(v) if isinstance(v, (int, float)) else None
+
+
+def _course_flags(
+    bars: list[dict[str, float]], *, level: float, side: str, since: int | None = None
+) -> dict[str, Any]:
+    """Курс стр.25/31/28 verdict at ``level``: reacted-off (worked) / «пила» (saw) / limit_ok.
+
+    ``since`` — индекс, с которого считаются отработки (см. :func:`_formed_at`). Без него счёт
+    шёл по ВСЕМУ окну, и критерий противоречил сам себе: ``find_accumulation_zones`` требует
+    ``accumulation_min_touches`` касаний, то есть зоной объект становится ИМЕННО по реакциям, —
+    а затем ``worked >= 1`` его за эти же реакции дисквалифицировал. Замер 2026-07-28 (топ-30
+    символов по обороту, живой CCXT) показал вырождение, растущее с длиной окна:
+
+    | ТФ  | сопротивления | поддержки |
+    |-----|---------------|-----------|
+    | 15m | 60.7%         | 60.0%     |
+    | 1h  | 78.8%         | 88.6%     |
+    | 4h  | **97.0%**     | **100%**  |
+    | 1d  | **97.4%**     | **100%**  |
+
+    На 4ч окно = 300 баров ≈ 50 дней, там отреагировал хоть раз ЛЮБОЙ уровень. Метка, стоящая
+    на всём, не отделяет ничего (ровно то, чем начинается докстрока :func:`_tag_by_fact`).
+    ``saw`` намеренно считается по всему окну: «пила» — свойство поведения цены у уровня, а не
+    событие после его постройки, и на живом замере она дала 2 срабатывания из 106 — не тот член,
+    который что-то решает.
+    """
+    scan = bars[since:] if since is not None and 0 <= since < len(bars) else bars
+    worked = _level_already_worked(scan, level=level, direction=side)
     saw = detect_level_saw(bars, level=level)
     return {"worked": int(worked), "saw": bool(saw), "limit_ok": worked < 1 and not saw}
 
@@ -151,7 +184,7 @@ def _zone_view(
     edge = key_px if key_px is not None else (
         poc if (poc_in and poc is not None) else (hi if side == "long" else lo)
     )
-    flags = _course_flags(bars, level=edge, side=side)
+    flags = _course_flags(bars, level=edge, side=side, since=_formed_at(z))
     by_fact, reason = _fact_reason(flags, side=side, bias=bias, is_perezakup=False)
     return {
         "lo": round(lo, 8), "hi": round(hi, 8),
@@ -210,7 +243,7 @@ def _perezakup_view(
     ):
         return None
     anchor = poc if (poc is not None and lo <= poc <= hi and stable) else hi
-    flags = _course_flags(bars, level=anchor, side="long")
+    flags = _course_flags(bars, level=anchor, side="long", since=_formed_at(base))
     by_fact, reason = _fact_reason(flags, side="long", bias=bias, is_perezakup=True)
     return {
         "lo": round(lo, 8), "hi": round(hi, 8),
@@ -220,6 +253,42 @@ def _perezakup_view(
         "lines": lines,
         "by_fact": by_fact, "fact_reason": reason, **flags,
     }
+
+
+def _rank_rungs(
+    src: list[dict[str, Any]], *, price: float, side: str, n: int = _LADDER_MAX
+) -> list[dict[str, Any]]:
+    """Какие ``n`` ступеней публиковать: БЛИЖНЯЯ + сильнейшие по объёму, на выходе — по цене.
+
+    ⚠ Раньше здесь стояла чистая сортировка ПО БЛИЗОСТИ (``sorted(..., key=lambda z: z["lo"])``
+    у шорта, ``key=z["hi"], reverse=True`` у добора) с срезом ``[:_LADDER_MAX]``. Она игнорирует
+    силу уровня — ровно то, что курс стр.22 называет определяющим («сила уровня определяется ТФ и
+    объёмом») и что этот же модуль уже цитирует в :func:`_dedupe_horizons`. Замер на трёх реальных
+    постах 2026-07-28 показал, чем это стоило: зона, которую автор публикует как ОСНОВНОЙ сетап,
+    оказывалась за срезом — ARB 4-я и 5-я из 5, KAS 7-я из 8, BTC (Pavel M, шорт 66 610–67 130,
+    найден на 1д с перекрытием 92%) — вне тройки. Сортировка по объёму поднимала её во 2–3.
+
+    Но и чистый объём неверен: ближний уровень автор называет ВСЕГДА — это решение на ближайшие
+    часы. В одном обзоре Pavel M держит и ближние (🟡 1844–1858, 1883), и глубокую ключевую
+    (🟢 1771–1804, «стоят лимитки»). Поэтому ближняя ступень занимает место безусловно, а
+    остальные ``n-1`` разыгрываются по силе.
+
+    Сила = ``касания × объём``. A/B по четырём размеченным постам (2 автора, 19 зон, 2026-07-28):
+    объём 10/19 · касания 11/19 · **касания×объём 11/19**. ⚠ Разница — ОДНА зона (KAS 0.03106:
+    10 касаний, но наименьший объём в наборе), то есть замер выбор НЕ решает. Ключ взят по
+    согласованности: ровно им ``grid.zone_lines`` выбирает КЛЮЧЕВУЮ линию, и там он проверен
+    против уровня, который автор назвал ключевым вслух. Два места одного модуля, меряющие «силу»
+    разными формулами, — это будущее расхождение карты с сеткой внутри неё.
+    """
+    if not src:
+        return []
+    edge = "hi" if side == "long" else "lo"
+    near = min(src, key=lambda z: abs(float(z[edge]) - price))
+    rest = sorted(
+        (z for z in src if z is not near),
+        key=lambda z: -(float(z.get("touches") or 0) * float(z.get("zone_volume") or 0.0)),
+    )
+    return sorted([near, *rest[: max(0, n - 1)]], key=lambda z: float(z["lo"]))
 
 
 def _tight(side: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -279,14 +348,14 @@ def _horizon_zones(
         z for z in _tight(below_long)
         if float(z["hi"]) < price and z is not base and not _clashes_with_perezakup(z)
     ]
-    dobor_src.sort(key=lambda z: z["hi"], reverse=True)  # nearest-first
     if dobor_src:
         out["dobor"] = [
-            _zone_view(window, bars, z, side="long", cfg=cfg, bias=bias) for z in dobor_src[:_LADDER_MAX]
+            _zone_view(window, bars, z, side="long", cfg=cfg, bias=bias)
+            for z in _rank_rungs(dobor_src, price=price, side="long")
         ]
-    # 🔴 ШОРТ — near resistance (tight above-boxes + straddle ceilings), nearest first.
+    # 🔴 ШОРТ — сопротивления (tight above-boxes + straddle ceilings): ближнее + сильнейшие.
     _, above = _split_below_above(zones, price=price, decompose_short=True)
-    short_src = sorted(_tight(above), key=lambda z: z["lo"])[:_LADDER_MAX]
+    short_src = _rank_rungs(_tight(above), price=price, side="short")
     if short_src:
         out["short"] = [
             _zone_view(window, bars, z, side="short", cfg=cfg, bias=bias) for z in short_src
@@ -323,6 +392,35 @@ def _anchor(z: dict[str, Any], *, side: str) -> float:
     return float(z["hi"] if side == "long" else z["lo"])
 
 
+def _same_zone(z: dict[str, Any], k: dict[str, Any], *, side: str) -> bool:
+    """Один ли это уровень, увиденный на двух ТФ, — или два разных.
+
+    Три условия, и третье добавлено 2026-07-28 по замеру. Близости якорей и пересечения полос
+    НЕДОСТАТОЧНО: ``_HORIZON_MATCH_TOL_PCT`` — константа 1.0%, а ширина полос гуляет от 0.29%
+    до 2.4%, поэтому фиксированный допуск объявляет «одной зоной» объекты, разнесённые вдвое
+    больше собственного разрешения победителя.
+
+    Живой случай (BTC, 2026-07-28, обзор Pavel M): дневная полоса 65 481–67 090 с якорем
+    **66 600,43** — это названный автором уровень 66 610 с точностью **0.02%** — схлопывалась в
+    часовую 66 084–66 278 (якоря расходятся на 0.497% < 1.0%, полосы пересекаются). Узкая
+    побеждала по ширине, но якорь 66 600 в неё НЕ ВХОДИТ: публикуемый вход уезжал на 0.5% вниз,
+    а подтверждённый дневкой уровень исчезал из карты вовсе.
+
+    Поэтому: полоса-победитель обязана НАКРЫВАТЬ чужой якорь. Не накрывает — это два уровня,
+    и схлопывать их значит выдумывать цену, которой ни один из них не считал входом (I-6).
+    """
+    az, ak = _anchor(z, side=side), _anchor(k, side=side)
+    if az <= 0 or ak <= 0:
+        return False
+    if abs(az / ak - 1.0) * 100.0 > _HORIZON_MATCH_TOL_PCT:
+        return False
+    if float(z["lo"]) > float(k["hi"]) or float(z["hi"]) < float(k["lo"]):
+        return False
+    z_w, k_w = float(z["hi"]) - float(z["lo"]), float(k["hi"]) - float(k["lo"])
+    narrow, foreign = (z, ak) if z_w < k_w else (k, az)
+    return float(narrow["lo"]) <= foreign <= float(narrow["hi"])
+
+
 def _dedupe_horizons(horizons: dict[str, Any]) -> None:
     """Одна и та же зона, найденная на нескольких ТФ, публикуется ОДИН раз — и тем сильнее.
 
@@ -351,21 +449,14 @@ def _dedupe_horizons(horizons: dict[str, Any]) -> None:
             for z in zs:
                 if not isinstance(z, dict):
                     continue
-                a = _anchor(z, side=side)
                 width = float(z["hi"]) - float(z["lo"])
-                # Совпадение — это ТОЛЬКО пересечение полос при близких якорях, и только ВНУТРИ
-                # одного вида. Одного якоря мало: у 1д зоны 62232–62317 и у часовой 62533–63137
-                # якоря расходятся на 0.72%, но полосы не пересекаются вовсе — это два разных
-                # уровня, и узкая проглотила бы широкую. А разные виды нельзя слеплять и подавно:
-                # перезакуп это объёмная база, добор — полка внутри неё, и запись содержимого
-                # добора в ячейку перезакупа печатала бы «🟢 перезакуп» над чужими числами.
+                # Критерий совпадения целиком в :func:`_same_zone` — там же и замер, почему
+                # близости якорей с пересечением полос НЕДОСТАТОЧНО. Здесь остаётся только
+                # ограничение по ВИДУ: перезакуп это объёмная база, добор — полка внутри неё, и
+                # запись содержимого добора в ячейку перезакупа печатала бы «🟢 перезакуп» над
+                # чужими числами.
                 twin = next(
-                    (
-                        k for kind, k in kept
-                        if kind == key and _anchor(k, side=side) > 0
-                        and abs(a / _anchor(k, side=side) - 1.0) * 100.0 <= _HORIZON_MATCH_TOL_PCT
-                        and float(z["lo"]) <= float(k["hi"]) and float(z["hi"]) >= float(k["lo"])
-                    ),
+                    (k for kind, k in kept if kind == key and _same_zone(z, k, side=side)),
                     None,
                 )
                 if twin is None:
@@ -389,21 +480,38 @@ def _dedupe_horizons(horizons: dict[str, Any]) -> None:
                     hz.pop(key, None)
 
 
-def _drop_by_fact(horizons: dict[str, Any]) -> dict[str, int]:
-    """Убрать из карты зоны, которые торговать НЕЛЬЗЯ, и вернуть счёт убранного по причинам.
+def _tag_by_fact(horizons: dict[str, Any]) -> dict[str, int]:
+    """Сосчитать зоны «по факту». НЕ удалять их — вернуть тираж по причинам.
 
-    Метка «по факту» задумывалась как редкое предупреждение, а на живом BTC оказалась на КАЖДОЙ
-    зоне: при нисходящем старшем тренде каждый лонг контр-трендовый, а отработанных уровней в
-    зрелой структуре большинство. Метка на всём не значит ничего, и хуже — карточка печатала
-    «🎯 План: ТВХ ★64141.3», указывая в полосу, которую строкой выше сама же дисквалифицировала
-    как «против тренда». Читателю предлагалось одновременно и брать, и не брать.
+    ⚠ ПРЕЖНЯЯ РЕДАКЦИЯ УДАЛЯЛА, И ЭТО БЫЛО НЕВЕРНО — вопреки п.4 докстроки модуля («помечаются
+    ``by_fact=True`` **не дропаются** … автор именно так и торгует "по факту слома"»). Код
+    противоречил собственной задекларированной конструкции; исправлено 2026-07-28 по трём
+    измеренным свидетельствам:
 
-    Курс тут однозначен: отработанный уровень лимитом больше не торгуется (стр.31), по пиле ждут
-    выхода (стр.28), против тренда входят только по факту слома. Всё это — НЕ сетапы, а история.
-    Возвращается счёт, чтобы карточка могла честно сказать «чистых зон нет, N отработаны» вместо
-    того, чтобы просто замолчать (I-6: пусто и «нечего показать» — разные вещи).
+    1. **Замер вырождения.** На 4ч метка стояла на 97% сопротивлений и 100% поддержек, на 1д —
+       97.4% / 100% (топ-30 символов). Удаление по такому признаку — это удаление всего.
+       Причина критерия исправлена отдельно (``since`` в :func:`_course_flags`).
+    2. **Автор оставляет такую зону на карте.** Pavel M, обзор BTC/ETH 2026-07-27: «🟡 1987-2014-2040
+       — только по факту, нет хороших опорных уровней, а основной уровень уже протестирован и
+       **отработан**». Тот же диагноз тем же словом — и зона публикуется с ярлыком, а не стирается.
+    3. **Отработанный уровень остаётся торгуемым как НОВАЯ сделка.** PrizrakTrade, #KAS
+       2026-07-28: «Текущая шортовая позиция уже забрала частичный тейк ✅ · Шорт выше, как
+       отдельный новый трейд от уровня 4ч ТФ, по-прежнему остаётся актуальным».
+
+    Дефект, ради которого удаление вводилось, — карточка печатала «🎯 План: ТВХ ★64141.3» в
+    полосу, которую строкой выше сама же дисквалифицировала, — настоящий, но лечится он НЕ здесь:
+    зона обязана остаться на карте с ярлыком, а из АВТОМАТИЧЕСКИХ путей входа быть исключена.
+    Это сделано у потребителей, каждый на своём слое:
+
+    * ``format_post._plan_zone`` — «по факту» не может стать ТВХ плана;
+    * ``zone_watch._zone_entry`` — «по факту» не попадает в поток алертов и в передачу трекеру,
+      то есть множество РЕАЛЬНО торгуемого ботом не изменилось этой правкой ни на одну зону.
+
+    Курс так и читается: стр.31 запрещает ЛИМИТ на отработанном уровне («вход только по слому»),
+    а не упоминание уровня. Возвращается тираж, чтобы карточка могла сказать «N зон только по
+    факту» — «зон нет» и «зоны есть, но все по факту» это разные сообщения (I-6).
     """
-    dropped: dict[str, int] = {}
+    tagged: dict[str, int] = {}
     for hname in list(horizons):
         hz = horizons.get(hname)
         if not isinstance(hz, dict):
@@ -411,24 +519,10 @@ def _drop_by_fact(horizons: dict[str, Any]) -> dict[str, int]:
         for key in ("perezakup", "dobor", "short"):
             raw = hz.get(key)
             zs = raw if isinstance(raw, list) else ([raw] if isinstance(raw, dict) else [])
-            keep = []
             for z in zs:
                 if isinstance(z, dict) and z.get("by_fact"):
                     reason = str(z.get("fact_reason") or "по факту")
-                    dropped[reason] = dropped.get(reason, 0) + 1
-                    continue
-                keep.append(z)
-            if raw is None:
-                continue
-            if isinstance(raw, list):
-                if keep:
-                    hz[key] = keep
-                else:
-                    hz.pop(key, None)
-            elif keep:
-                hz[key] = keep[0]
-            else:
-                hz.pop(key, None)
+                    tagged[reason] = tagged.get(reason, 0) + 1
         # Горизонт без единой зоны — это не горизонт; цели без своих ступеней тоже бессмысленны.
         if not any(hz.get(k) for k in ("perezakup", "dobor")):
             hz.pop("long_targets", None)
@@ -436,7 +530,7 @@ def _drop_by_fact(horizons: dict[str, Any]) -> dict[str, int]:
             hz.pop("short_targets", None)
         if not any(hz.get(k) for k in ("perezakup", "dobor", "short")):
             horizons.pop(hname, None)
-    return dropped
+    return tagged
 
 
 # Насколько близко две цели должны стоять, чтобы считаться ОДНОЙ стеной. Замер на живом ETH
@@ -586,14 +680,16 @@ def build_symbol_setups(
                 horizons[name] = hz
                 break  # first TF with usable zones wins for this horizon
     _dedupe_horizons(horizons)
-    dropped = _drop_by_fact(horizons)
+    tagged = _tag_by_fact(horizons)
     targets = _global_targets(horizons)
     for hz in horizons.values():  # служебный список уровней наружу не отдаём
         if isinstance(hz, dict):
             hz.pop("_levels", None)
     out: dict[str, Any] = {"horizons": horizons, "price": float(price), "bias": bias, **targets}
-    if dropped:
-        out["dropped_by_fact"] = dropped
+    # ⚠ Ключ ПЕРЕИМЕНОВАН вместе со сменой смысла: зоны больше не удаляются, а помечаются, и
+    # оставить имя ``dropped_by_fact`` значило бы соврать именем (I-6, класс «name-lies»).
+    if tagged:
+        out["by_fact_tagged"] = tagged
     headroom = _headroom(horizons, price=float(price))
     if headroom is not None:
         out["headroom"] = headroom

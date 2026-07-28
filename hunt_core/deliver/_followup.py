@@ -206,7 +206,12 @@ def format_followup_telegram(followup: Any, row: dict[str, Any]) -> str:
         band = z_lo if z_lo == z_hi else f"{z_lo}–{z_hi}"
         poc = payload.get("poc")
         poc_s = f" (ПОК <code>{fmt_price(poc)}</code>)" if isinstance(poc, (int, float)) else ""
-        fact = " · <i>по факту</i>" if payload.get("by_fact") else ""
+        # ⚠ Подписи «по факту» здесь БОЛЬШЕ НЕТ, и это не потеря. С 2026-07-28
+        # ``zone_watch._actionable_zones`` такие зоны в поток алертов не пускает вовсе (вход по
+        # ним не лимитный), поэтому ветка стала недостижимой: `payload["by_fact"]` тут всегда
+        # False. Оставить её значило бы завести ровно ту сироту, которую ловит I-6, — признак,
+        # у которого нет продюсера, неотличим от штатной работы. Ярлык живёт на КАРТЕ
+        # (``format_post._fact_tag``), где зона и остаётся.
         stop_s = fmt_price(payload.get("stop_loss"))
         tgts = [t for t in (payload.get("targets") or []) if isinstance(t, (int, float))][:3]
         tgt_line = (
@@ -214,14 +219,14 @@ def format_followup_telegram(followup: Any, row: dict[str, Any]) -> str:
         )
         if event == "zone_entry":
             head = f"🎯 <b>ЦЕНА В ЗОНЕ · {sym}</b>"
-            sub = f"{emoji} {kind} <code>{band}</code>{poc_s}{fact} — вход по факту касания"
+            sub = f"{emoji} {kind} <code>{band}</code>{poc_s} — вход по факту касания"
         else:
             try:
                 d = f"{float(payload.get('dist_pct') or 0):.1f}%"
             except (TypeError, ValueError):
                 d = "—"
             head = f"🔔 <b>ПОДХОД К ЗОНЕ · {sym}</b>"
-            sub = f"{emoji} {kind} <code>{band}</code>{poc_s}{fact} — <b>{d}</b> до зоны"
+            sub = f"{emoji} {kind} <code>{band}</code>{poc_s} — <b>{d}</b> до зоны"
         # Ордерная сетка и R:P — те же числа, что в карточке. Без RR сообщение про зону, которую
         # бот ВЕДЁТ, и про зону, отвергнутую по RR, выглядели одинаково.
         lines_s = ""

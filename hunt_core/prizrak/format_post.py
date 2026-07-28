@@ -207,7 +207,14 @@ def _plan_zone(setups: dict[str, Any], price: float) -> dict[str, Any] | None:
 
     Вынесена из ``_plan_line``, потому что её же ширину печатает строка линеек: у автора это две
     РАЗНЫЕ величины, и обе он меряет линейкой на графике (разбор BTC 1ч 2026-07-25) — ход внутри
-    коридора и толщина самой зоны входа."""
+    коридора и толщина самой зоны входа.
+
+    ⚠ Зона «по факту» ТВХ стать не может. Это тот самый дефект, ради которого зоны раньше
+    вырезались из карты целиком: карточка печатала «🎯 План: ТВХ ★64141.3» в полосу, которую
+    строкой выше сама же дисквалифицировала, и читателю предлагалось одновременно брать и не
+    брать. Вырезание было неверным лекарством (см. ``setups._tag_by_fact``) — зона остаётся на
+    карте с ярлыком, а отказ от неё как от ТВХ живёт здесь, где он и осмыслен.
+    """
     best: tuple[float, dict[str, Any]] | None = None
     for hz in (setups.get("horizons") or {}).values():
         if not isinstance(hz, dict):
@@ -216,7 +223,7 @@ def _plan_zone(setups: dict[str, Any], price: float) -> dict[str, Any] | None:
             raw = hz.get(kind)
             zs = raw if isinstance(raw, list) else ([raw] if isinstance(raw, dict) else [])
             for z in zs:
-                if not isinstance(z, dict):
+                if not isinstance(z, dict) or z.get("by_fact"):
                     continue
                 try:
                     lo, hi = float(z["lo"]), float(z["hi"])
@@ -734,9 +741,9 @@ def _plan_hint(setups: dict[str, Any]) -> str:
     if any(h.get("dobor") for h in hzs):
         bits.append("добор по сетке")
     if any(h.get("short") for h in hzs):
-        # Было «шорт по факту («уровень есть уровень»)». «По факту» — это вход в отработанную или
-        # контр-трендовую зону, а такие зоны в карту больше не попадают (``setups._drop_by_fact``),
-        # так что подпись описывала то, чего в сообщении уже нет.
+        # Подпись намеренно НЕ говорит «по факту»: с 2026-07-28 такие зоны в карте снова есть
+        # (``setups._tag_by_fact``), но ярлык носит КАЖДАЯ своя — общая строка «по приборам»
+        # обобщила бы его на все шорты горизонта, включая чистые.
         bits.append("шорт от сопротивления")
     return ", ".join(bits)
 
@@ -1050,12 +1057,15 @@ def format_prizrak_post(analysis: AnalystReport) -> str:
     if zlines:
         parts.extend(["", "🔎 <b>Зоны интереса</b>", *zlines])
     else:
-        # «Зон нет» и «все зоны отработаны» — разные сообщения, и второе как раз то, что автор
-        # проговаривает вслух («эти все уровни мы ранее уже отработали… не актуальны»).
-        drop = setups.get("dropped_by_fact") if isinstance(setups, dict) else None
-        if isinstance(drop, dict) and drop:
-            snyato = ", ".join(f"{k}: {v}" for k, v in sorted(drop.items(), key=lambda kv: -kv[1]))
-            parts.extend(["", f"🔎 <i>Чистых зон нет — все уровни сняты ({html.escape(snyato)})</i>"])
+        # «Зон нет» и «зоны есть, но все по факту» — разные сообщения, и второе как раз то, что
+        # автор проговаривает вслух («эти все уровни мы ранее уже отработали… не актуальны»).
+        # ⚠ Ветка стала РЕДКОЙ: с 2026-07-28 зоны «по факту» из карты не вырезаются, поэтому
+        # ``zlines`` при них не пуст и сюда управление не доходит. Она осталась как честный
+        # ответ на случай, когда карта пуста по ДРУГОЙ причине, а тираж ярлыков ненулевой.
+        tagged = setups.get("by_fact_tagged") if isinstance(setups, dict) else None
+        if isinstance(tagged, dict) and tagged:
+            snyato = ", ".join(f"{k}: {v}" for k, v in sorted(tagged.items(), key=lambda kv: -kv[1]))
+            parts.extend(["", f"🔎 <i>Чистых зон нет — только по факту ({html.escape(snyato)})</i>"])
         else:
             parts.extend(["", "🔎 <i>Качественных зон накопления сейчас нет — ждём формирования</i>"])
 
