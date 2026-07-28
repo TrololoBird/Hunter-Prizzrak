@@ -255,7 +255,9 @@ class TelegramBroadcaster:
         self._circuit_state = "closed"
         self._circuit_reset_time: datetime | None = None
         self._recent_message_hashes: dict[str, datetime] = {}
-        self._send_buffer: deque[str] = deque(maxlen=50)
+        # (текст, когда поставлено в очередь). Время нужно, чтобы отложенное сообщение при
+        # проигрывании сказало читателю, что оно отложенное, — см. `_replay_note`.
+        self._send_buffer: deque[tuple[str, datetime]] = deque(maxlen=50)
         self._rate_limit_until: datetime | None = None
         self._last_send_monotonic: float = 0.0
 
@@ -281,7 +283,7 @@ class TelegramBroadcaster:
                     self._circuit_reset_time is not None
                     and datetime.now(UTC) < self._circuit_reset_time
                 ):
-                    self._send_buffer.append(text)
+                    self._send_buffer.append((text, datetime.now(UTC)))
                     LOG.debug(
                         "telegram circuit breaker open; buffering message (%s buffered)",
                         len(self._send_buffer),
@@ -317,17 +319,21 @@ class TelegramBroadcaster:
             except DEFENSIVE_EXC as exc:
                 return DeliveryResult(status="failed", reason=f"{exc.__class__.__name__}: {exc}")
             while self._send_buffer:
-                buffered = self._send_buffer.popleft()
+                buffered, queued_at = self._send_buffer.popleft()
+                # Дедуп считается по ИСХОДНОМУ тексту: пометка о задержке дописывается после,
+                # иначе то же сообщение, вернувшееся из буфера, перестало бы совпадать с собой.
                 buffered_hash = hashlib.sha256(buffered.encode("utf-8")).hexdigest()
                 if buffered_hash in self._recent_message_hashes:
                     continue
                 try:
                     await self._send_immediate(
-                        buffered, message_hash=buffered_hash, reply_to_message_id=None
+                        buffered + _replay_note(queued_at),
+                        message_hash=buffered_hash,
+                        reply_to_message_id=None,
                     )
                 except DEFENSIVE_EXC as exc:
                     LOG.debug("telegram buffered message retry failed", error=str(exc))
-                    self._send_buffer.appendleft(buffered)
+                    self._send_buffer.appendleft((buffered, queued_at))
                     break
             return DeliveryResult(status="sent", message_id=sent_message_id)
 
@@ -748,6 +754,32 @@ def _split_telegram_text(text: str, *, limit: int = TELEGRAM_CHUNK_LIMIT) -> lis
     if chunk:
         parts.extend(_hard_split(chunk))
     return _rebalance_parts(parts or _hard_split(text[:limit]))
+
+
+_REPLAY_NOTE_MIN_AGE_S = 30.0
+
+
+def _replay_note(queued_at: datetime) -> str:
+    """Пометка о задержке для сообщения, пролежавшего в буфере на время сбоя связи.
+
+    При открытом circuit breaker сообщения складываются в буфер и уходят пачкой ПОЗЖЕ — с ценами
+    и геометрией на момент ПОСТРОЕНИЯ. Замер живого канала 2026-07-27: две карточки входа по
+    манипуляциям (PUMP, RIF) построены в 14:48:30 и доставлены в 14:51:29 — **179 секунд**
+    спустя, и ничто в тексте об этом не говорило; читатель видел их как свежие. Карточка
+    призрака от этого защищена своим футером (`format_row_freshness_footer`), а всё остальное —
+    нет, поэтому пометка ставится здесь, на общем пути доставки, и покрывает все типы сразу.
+
+    Порог в 30 с отсекает обычную паузу rate-limit: подписывать «задержано» сообщение, ушедшее
+    на секунду позже, значит обесценить пометку там, где она важна.
+    """
+    age = (datetime.now(UTC) - queued_at).total_seconds()
+    if age < _REPLAY_NOTE_MIN_AGE_S:
+        return ""
+    human = f"{age / 60.0:.0f} мин" if age >= 90 else f"{age:.0f} с"
+    return (
+        f"\n<i>⏳ Отложено на {human} из-за сбоя связи — числа на момент построения, "
+        "сверьте с рынком.</i>"
+    )
 
 
 def _message_preview(text: str, *, limit: int = TELEGRAM_LOG_PREVIEW_LIMIT) -> str:

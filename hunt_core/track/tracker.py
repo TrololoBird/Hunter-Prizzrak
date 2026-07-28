@@ -306,6 +306,34 @@ def _apply_early_breakeven_lock(
     return True
 
 
+def _backfill_announced(sig: dict[str, Any]) -> None:
+    """Проставить отметку анонса открытым записям, заведённым до её появления.
+
+    ``_deliver_followup`` шлёт SL/TP/закрытие только тем сделкам, у которых стоит
+    ``telegram_sent``/``entry_message_id`` — «канал про эту сделку слышал». Флаг ставил лишь
+    путь МАНИПУЛЯЦИЙ; путь призрака (`runtime/emitter._register_tracker`) и передача зоны
+    (`prizrak/zone_watch._handoff`) — нет, хотя оба заводят сделку ТОЛЬКО после успешной
+    отправки сообщения. Итог на живом состоянии 2026-07-27: 7 записей без флага, все семь —
+    пиннед-символы призрака, и ни одного сообщения о трейле/стопе/закрытии по ним за сутки.
+
+    Продюсеры исправлены, но открытые записи так и остались бы немыми до самого закрытия:
+    флаг ставится один раз при регистрации. Чинится здесь, потому что регистраторов ровно три
+    и все три анонсируют вход по построению — значит у ОТКРЫТОЙ записи без флага анонс был.
+    Закрытых не касается (ранний выход в вызывающем): их follow-up уже не придут, а тихо
+    менять историю нельзя.
+    """
+    if sig.get("telegram_sent") or sig.get("entry_message_id"):
+        return
+    sig["telegram_sent"] = True
+    sig["announced_backfilled"] = True
+    _LOG.warning(
+        "tracker_announced_backfilled",
+        symbol=sig.get("symbol"),
+        direction=sig.get("direction"),
+        opened_at=sig.get("opened_at"),
+    )
+
+
 def _backfill_signal_geometry(sig: dict[str, Any]) -> None:
     """Repair missing risk_reward / original_stop on legacy tracker rows."""
     if not isinstance(sig, dict) or sig.get("status") == "closed":
@@ -355,6 +383,8 @@ def load_tracker_state(path: Path = STATE_PATH) -> dict[str, Any]:
             for sig in (raw.get("signals") or {}).values():
                 if isinstance(sig, dict):
                     _backfill_signal_geometry(sig)
+                    if sig.get("status") != "closed":
+                        _backfill_announced(sig)
             return raw
     except (OSError, serde.JSONDecodeError):
         pass

@@ -357,6 +357,11 @@ def _handoff(
             # Price IS inside the zone at this point — a real fill, not a pending limit (the ARMED
             # tier exists for the not-yet-reached case and would mis-model this one).
             "delivery_tier": "triggered",
+            # Анонсом этой сделки служит сам алерт «🎯 ЦЕНА В ЗОНЕ», который тик отправляет тем
+            # же проходом (`_followup(..., "announced": True)`). Без флага
+            # `_cycle_reconcile._deliver_followup` резал бы ВСЕ последующие SL/TP/закрытие —
+            # то есть вотчер заводил бы сделку, о судьбе которой канал не узнаёт никогда.
+            "telegram_sent": True,
         }
         register_signal_open(
             state,

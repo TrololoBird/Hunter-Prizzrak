@@ -120,6 +120,13 @@ def _register_tracker(
         setup["delivery_tier"] = (
             "triggered" if signal.state == "activated" else "armed"
         )
+        # ⚠ ОТМЕТКА АНОНСА — не бухгалтерия, а ворота доставки. Вызов происходит ТОЛЬКО после
+        # успешной отправки карточки (`emit_deep` проверяет `message_id is not None`), но флаг
+        # никто не ставил, и `_cycle_reconcile._deliver_followup` резал по нему ВСЕ follow-up
+        # этой сделки — молча, без строки в логе. Замер 2026-07-27: 7 записей трекера без флага,
+        # все семь — пиннед-символы призрака; за сутки канал получил 5 карточек «✅ Активация» и
+        # НИ ОДНОГО сообщения о трейле, стопе или закрытии ни по одной из них.
+        setup["telegram_sent"] = True
         register_signal_open(
             state,
             symbol=signal.symbol,
@@ -129,6 +136,7 @@ def _register_tracker(
             # No typed lifecycle model on the native deep lane yet (ADR-0004 gap) → empty.
             lifecycle={},
             now=datetime.now(UTC),
+            entry_message_id=message_id,
         )
         save_state(state)
     except Exception:

@@ -150,7 +150,21 @@ async def _deliver_followup(
 ) -> bool:
     """Send one follow-up; mark + persist immediately on success."""
     announced = bool((fu.payload or {}).get("announced", True))
-    if not send_telegram or broadcaster is None or not announced:
+    if not send_telegram or broadcaster is None:
+        return False
+    if not announced:
+        # ⚠ ГРОМКО. Здесь стоял общий `return False` без единой строки — и это скрывало не
+        # мелочь: `announced` читается из записи трекера (`telegram_sent`/`entry_message_id`),
+        # а путь эмиссии призрака их не проставлял, поэтому КАЖДОЕ сообщение о трейле, стопе и
+        # закрытии по его сделкам молча исчезало. Диагностировать было нечем: событие
+        # создавалось (`watch_followup`), но ни `watch_followup_sent`, ни
+        # `watch_followup_send_failed` за ним не появлялись — дыра без имени.
+        LOG.warning(
+            "watch_followup_suppressed_unannounced",
+            symbol=fu.symbol,
+            followup_event=fu.event,
+            detail=str(fu.detail or ""),
+        )
         return False
     from hunt_core.deliver.templates import format_followup_telegram_message
 
