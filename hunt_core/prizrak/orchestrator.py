@@ -277,7 +277,7 @@ def _tf_lookback_map(cfg: PrizrakConfig) -> dict[str, int]:
     return mapping
 
 
-def _zone_edge_band(z: dict[str, Any], *, side: str) -> dict[str, Any]:
+def _zone_edge_band(z: dict[str, Any], *, side: str) -> dict[str, Any] | None:
     """Decompose an ENCLOSING (straddling) accumulation box into ONE actionable boundary
     band: its support-cluster floor (``ext_lo..lo``, price is bought) for ``side="long"``
     or its resistance-cluster ceiling (``hi..ext_hi``, price is shorted) for ``side="short"``.
@@ -290,12 +290,26 @@ def _zone_edge_band(z: dict[str, Any], *, side: str) -> dict[str, Any]:
     62850 and ceiling ≈ his short 66850. ``ext_lo/ext_hi/lo_touches/hi_touches`` are
     unconditionally written by ``_zone_from_clusters`` — read directly, no ``or``-fallback: the
     band rests on a real boundary cluster, never a synthesized level (invariant I-6).
+
+    ⚠ ВОЗВРАЩАЕТ ``None`` НА ВЫРОЖДЕННОЙ ПОЛОСЕ (``hi <= lo``) — это отказ, а не полоса (I-6).
+    Ширина ровно 0 здесь ГАРАНТИРОВАНА ПОСТРОЕНИЕМ, а не редкий сбой: у кластера из ОДНОГО
+    пивота ``_zone_from_clusters`` пишет ``lo = price`` (среднее кластера) и ``ext_lo = px_min``,
+    а у единственного элемента среднее и минимум тождественны ⇒ ``ext_lo == lo`` ⇒ ширина 0.0.
+    Замер 2026-07-27, 25 живых символов: **21 вызов из 87** дал полосу < 0.1%, **15 — ровно
+    0.0%**; касаний у такой «полосы» 1–3 при родительском боксе медианой 8.86%.
+
+    Полоса нулевой ширины дальше по конвейеру превращается в «ТВХ ★X в диапазоне X–X», в стоп
+    вплотную к входу и в RR, посчитанный делением на ноль-ширину. Пола ширины здесь намеренно
+    НЕ вводится: константу пришлось бы выбирать и калибровать по тем же 123 уровням, которыми
+    потом оценивают (I-7), а отказ от вырожденного объекта константы не требует вовсе.
     """
     if side == "long":  # floor band: the support cluster price bounces off (стр.18/19)
         lo, hi, touches = z["ext_lo"], z["lo"], z["lo_touches"]
     else:  # ceiling band: the resistance cluster price is shorted into
         lo, hi, touches = z["hi"], z["ext_hi"], z["hi_touches"]
-    width_pct = round((hi - lo) / lo * 100.0, 4) if lo > 0 else 0.0
+    if not (float(hi) > float(lo) > 0):
+        return None
+    width_pct = round((hi - lo) / lo * 100.0, 4)
     return {**z, "lo": float(lo), "hi": float(hi), "touches": int(touches), "width_pct": width_pct}
 
 
@@ -321,9 +335,16 @@ def _split_below_above(
         elif z["lo"] > price:
             above.append(z)
         else:  # straddle — the floor is always actionable; the ceiling only for the card
-            below.append(_zone_edge_band(z, side="long"))
+            # ``None`` = вырожденная кромка (см. :func:`_zone_edge_band`). Пропускаем, а не
+            # аппендим: полоса нулевой ширины ниже по конвейеру даёт «диапазон X–X», стоп
+            # вплотную ко входу и RR с нулевым знаменателем.
+            floor = _zone_edge_band(z, side="long")
+            if floor is not None:
+                below.append(floor)
             if decompose_short:
-                above.append(_zone_edge_band(z, side="short"))
+                ceil = _zone_edge_band(z, side="short")
+                if ceil is not None:
+                    above.append(ceil)
     return below, above
 
 
