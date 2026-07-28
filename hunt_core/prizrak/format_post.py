@@ -5,7 +5,8 @@ Replaces the 7-section «wall of ~40 numbers» deep card with the author's own l
     💻 #SYMBOL · Prizrak-bot · price
     режим: <накопление / распределение / тренд / ждём>
     🔎 Зоны интереса
-       [Локально] 🟢 перезакуп lo–hi (ПОК X) · 🟡 добор … · 🔴 шорт …   💰 цели: …
+       [Локально] 🟢 перезакуп lo–hi (ПОК X) · 🟢 добор … · 🔴 шорт …   💰 цели: …
+       маркер = ДЕЙСТВИЕ, не вид (:func:`_zone_marker`): 🟢/🔴 лимитка стоит · 🟡 только по факту
        [Старший]  …
        [Спот]     ниже / выше …
     🌪 По приборам: RSI · диверы 1ч/4ч · крупные продажи (CVD) · фандинг · OI · слом · ликв.-магнит
@@ -146,10 +147,33 @@ def _perezakup_line(pk: dict[str, Any]) -> str:
         poc_s = " (ПОК <i>неустойчив — профиль двугорбый, полоса из него же</i>)"
     grid = _grid_str(pk)
     tail = f"\n   ордера: {grid}" if grid else ""
-    return f"🟢 перезакуп {_band(pk)}{poc_s}{_touch_tag(pk)}{_confirm_tag(pk)}{_fact_tag(pk)}{tail}"
+    mark = _zone_marker(pk, side="long")
+    return f"{mark} перезакуп {_band(pk)}{poc_s}{_touch_tag(pk)}{_confirm_tag(pk)}{_fact_tag(pk)}{tail}"
 
 
-def _rung_line(emoji: str, label: str, rungs: list[dict[str, Any]]) -> list[str]:
+def _zone_marker(z: dict[str, Any], *, side: str) -> str:
+    """Маркер зоны по ДЕЙСТВИЮ, а не по виду: 🟡 — только по факту, 🟢/🔴 — лимитка стоит.
+
+    ⚠ Прежде маркер кодировал ВИД (🟢 перезакуп · 🟡 добор · 🔴 шорт), и это прямо конфликтовало
+    с грамматикой автора, на которую карточка равняется. Он расшифровывает свои цвета вслух
+    (обзор Pavel M 2026-07-27, 48:47): «в чём смысл жёлтые и красные зоны: **жёлтые зоны — это
+    должно быть под наблюдением ПО ФАКТУ**, где вы быстро можете среагировать и эту позицию
+    покинуть … [красные] — **прямо лимитки, которые стоят даже когда я сплю или не у компа**».
+    Его текстовый обзор того же дня подчиняется этому же: 🟡 «только по факту», 🟢/🔴 «выставил
+    лимитки».
+
+    Столкновение было не косметическим, а инверсией смысла в обе стороны: наш 🟡 добор без
+    ``by_fact`` — это как раз лимитная ступень, а наш 🔴 шорт С ``by_fact`` — наоборот, только
+    наблюдение. Читатель его канала прочитывал ровно наоборот в обоих случаях.
+
+    Вид зоны при этом не теряется: он и так стоит рядом словом («перезакуп»/«добор»/«шорт»).
+    """
+    if z.get("by_fact"):
+        return "🟡"
+    return "🔴" if side == "short" else "🟢"
+
+
+def _rung_line(label: str, rungs: list[dict[str, Any]], *, side: str) -> list[str]:
     """Одна СТРОКА НА СТУПЕНЬ, а не все ступени в одну строку.
 
     Раньше три добора печатались как «🟡 добор A–B · C–D · E–F», и приписать ступени её сетку было
@@ -159,7 +183,10 @@ def _rung_line(emoji: str, label: str, rungs: list[dict[str, Any]]) -> list[str]
     for z in rungs:
         grid = _grid_str(z)
         tail = f"\n   ордера: {grid}" if grid else ""
-        out.append(f"{emoji} {label} {_band(z)}{_touch_tag(z)}{_confirm_tag(z)}{_fact_tag(z)}{tail}")
+        out.append(
+            f"{_zone_marker(z, side=side)} {label} {_band(z)}"
+            f"{_touch_tag(z)}{_confirm_tag(z)}{_fact_tag(z)}{tail}"
+        )
     return out
 
 
@@ -329,10 +356,10 @@ def _horizon_block(title: str, hz: dict[str, Any]) -> list[str]:
         lines.append(_perezakup_line(pk))
     dobor = hz.get("dobor")
     if isinstance(dobor, list) and dobor:
-        lines.extend(_rung_line("🟡", "добор", dobor))
+        lines.extend(_rung_line("добор", dobor, side="long"))
     short = hz.get("short")
     if isinstance(short, list) and short:
-        lines.extend(_rung_line("🔴", "шорт", short))
+        lines.extend(_rung_line("шорт", short, side="short"))
     # Цели тут БОЛЬШЕ НЕ ПЕЧАТАЮТСЯ: направление у карты одно, значит и встречная стена одна.
     # Они считаются глобально (``setups._global_targets``) и выводятся один раз под всей картой.
     return lines if len(lines) > 1 else []
