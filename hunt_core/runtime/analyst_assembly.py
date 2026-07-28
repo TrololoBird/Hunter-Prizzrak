@@ -157,8 +157,17 @@ async def send_analyst_change_telegram(
     *,
     cycle_peers: list[NativeAnalystView] | None = None,
     lifecycle_event: str = "signal",
-) -> bool:
-    """Send the deep-analysis Telegram card.
+) -> int | None:
+    """Send the deep-analysis Telegram card. Returns its ``message_id``, ``None`` if not sent.
+
+    ⚠ ВОЗВРАЩАЕТ ID, А НЕ `bool`, и это не косметика. `emitter._register_tracker` заводит по
+    этой карточке РЕАЛЬНУЮ отслеживаемую сделку, а `_cycle_reconcile._deliver_followup` шлёт её
+    SL/TP/закрытие только когда у записи стоит `telegram_sent`/`entry_message_id` («канал про эту
+    сделку слышал»). Ставить их было НЕЧЕМ: id уходил в лог и терялся. Замер 2026-07-27 —
+    7 записей трекера без флага, и все семь пиннед-символы призрака; ETH-шорт получил в канал
+    ЧЕТЫРЕ «✅ Активация», закрылся в 15:41:50 (`watch_auto_resolve`), и ни трейл, ни
+    предупреждение о стопе, ни закрытие в канал не ушли — молча, без единой строки в логе.
+
 
     Два режима. **LONG/SHORT** — эмитированный сетап, проходит арбитра (кулдаун, качество).
     **WAIT** — карта уровней и причина отказа; это ОСНОВНОЙ жанр автора, а не отсутствие
@@ -187,12 +196,12 @@ async def send_analyst_change_telegram(
         if not wait_card_ok(sym, wait_fp):
             LOG.info("analyst_pinned_tg_skipped_wait", symbol=sym, action=action,
                      reason="map_unchanged" if wait_fp else "no_zones")
-            return False
+            return None
     else:
         ok, blockers = evaluate_deep_delivery(symbol=sym, verdict=summary)
         if not ok:
             LOG.info("analyst_pinned_tg_skipped_arbiter", symbol=sym, blockers=blockers)
-            return False
+            return None
 
     blocks: list[str] = []
     if lifecycle_event == "activated":
@@ -229,9 +238,9 @@ async def send_analyst_change_telegram(
             mark_wait_sent(sym, wait_fp)
         LOG.info("analyst_pinned_tg_sent", symbol=sym, message_id=result.message_id,
                  plane="deep", kind="wait" if wait_fp else action)
-        return True
+        return result.message_id
     LOG.warning("analyst_pinned_tg_failed", symbol=sym, status=result.status, reason=result.reason)
-    return False
+    return None
 
 
 def _prizrak_row_variants(native: NativeAnalystView) -> list[tuple[NativeAnalystView, str]]:

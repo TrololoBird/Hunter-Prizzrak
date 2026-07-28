@@ -43,18 +43,20 @@ class SignalEmitter:
                 transition.suppress_reason,
             )
             return False
-        ok = await send_analyst_change_telegram(
+        message_id = await send_analyst_change_telegram(
             broadcaster,
             native,
             cycle_peers=cycle_peers,
             lifecycle_event=transition.event,
         )
-        if ok and transition.signal is not None:
+        if message_id is not None and transition.signal is not None:
             self.store.record_emit(transition.signal, event=transition.event)
             self.store.save()
             _record_deep_outcome(transition.signal, native, event=transition.event)
-            _register_tracker(transition.signal, native)
-        return ok
+            # id карточки идёт в трекер: по нему `_deliver_followup` решает, слышал ли канал про
+            # эту сделку, и он же печатается в follow-up как «сигнал TG #NNNNN».
+            _register_tracker(transition.signal, native, message_id=message_id)
+        return message_id is not None
 
 
 def _ledger_setup_from_plan(plan: dict[str, Any]) -> dict[str, Any]:
@@ -91,7 +93,9 @@ def _record_deep_outcome(signal: Signal, native: NativeAnalystView, *, event: st
         _LOG.exception("deep_outcome_ledger_failed symbol=%s", signal.symbol)
 
 
-def _register_tracker(signal: Signal, native: NativeAnalystView) -> None:
+def _register_tracker(
+    signal: Signal, native: NativeAnalystView, *, message_id: int | None = None
+) -> None:
     try:
         from datetime import UTC, datetime
 

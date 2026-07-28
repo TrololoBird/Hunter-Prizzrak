@@ -33,7 +33,7 @@ from __future__ import annotations
 from typing import Any
 
 from hunt_core.prizrak.config import PrizrakConfig
-from hunt_core.prizrak.poc import _MIN_STRUCTURE_BARS, _structure_bars
+from hunt_core.prizrak.poc import _structure_span
 
 # Минимальный зазор между соседними линиями. У него внутри бокса 17–18.07 шаги 0.32% / 0.56% /
 # 0.39%, в боксе 22–23.07 — 0.48%. Ниже 0.25% две «линии» описывают одно и то же скопление и
@@ -150,9 +150,21 @@ def zone_lines(
         return []
     if not 0 < lo < hi:
         return []
-    bars = _structure_bars(ohlcv, zone)
-    if len(bars) < _MIN_STRUCTURE_BARS:
+    # ⚠ ОТКАЗ, А НЕ ОТКАТ. Прежний вызов `_structure_bars` при неудачной локализации структуры
+    # возвращал ВСЁ ОКНО, а проверка `len(bars) < _MIN_STRUCTURE_BARS` на 400-барном окне
+    # тривиально ложна — то есть гард физически не мог сработать, и сетка плотности считалась
+    # бы по всей истории. Это прямо против замера в докстроке этого же модуля: на широком окне
+    # НИ ОДНА линия автора не воспроизводится, потому что ретесты столетней давности попадают
+    # в плотность наравне с касаниями самой структуры.
+    #
+    # Пустой список — честный ответ «линий нет» (I-6), он уже есть в контракте функции.
+    # Замер 2026-07-27 на 84 живых зонах: откат не срабатывает НИ РАЗУ (0.0%), на большей
+    # выборке — 3 зоны из 747 (0.4%). То есть правка защищает от латентного отказа, а не
+    # чинит живой; направление её действия — только УБРАТЬ линии, добавить новых она не может.
+    span = _structure_span(ohlcv, zone)
+    if span is None:
         return []
+    bars = ohlcv[span[0]:span[1] + 1]
 
     width_pct = (hi / lo - 1.0) * 100.0
     buckets = max(4, min(_MAX_BUCKETS, int(width_pct / _MIN_BUCKET_PCT)))

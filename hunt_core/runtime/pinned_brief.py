@@ -55,7 +55,7 @@ async def deliver_pinned_startup_brief(
             if native is None:
                 continue
             if material_deep_change(sym, native, prev=prev):
-                if await send_analyst_change_telegram(broadcaster, native):
+                if await send_analyst_change_telegram(broadcaster, native) is not None:
                     sent += 1
         except Exception as exc:
             LOG.warning("pinned_brief_probe_failed", symbol=sym, error=repr(exc))

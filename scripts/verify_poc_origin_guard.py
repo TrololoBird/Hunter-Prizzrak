@@ -22,19 +22,14 @@ import polars as pl
 from hunt_core.features.volume_profile import volume_profile_levels
 from hunt_core.prizrak.accumulation import find_accumulation_zones
 from hunt_core.prizrak.config import PrizrakConfig
-from hunt_core.prizrak.poc import _POC_STABILITY_BUCKETS, _POC_STABILITY_ORIGINS
+from hunt_core.prizrak.poc import (
+    _POC_STABILITY_BUCKETS,
+    _POC_STABILITY_ORIGINS,
+    _structure_bars,
+)
 from hunt_core.prizrak.structure import bars_from_ohlcv
 
 _TFS = ("15m", "1h", "4h")
-
-
-def _frame(rows: list[dict[str, float]], lo_i: int, hi_i: int) -> pl.DataFrame:
-    seg = rows[max(0, lo_i):hi_i + 1]
-    return pl.DataFrame({
-        "high": [r["high"] for r in seg],
-        "low": [r["low"] for r in seg],
-        "volume": [r["volume"] for r in seg],
-    })
 
 
 async def main() -> None:
@@ -52,12 +47,27 @@ async def main() -> None:
     try:
         for sym in symbols:
             for tf in _TFS:
-                bars = await ex.fetch_ohlcv(sym, tf, limit=400)
+                raw = await ex.fetch_ohlcv(sym, tf, limit=400)
+                # I-5 не имеет исключений для измерительных скриптов: замер, снятый по
+                # формирующемуся бару, непроверяем задним числом.
+                bars = raw[:-1] if raw else raw
                 if not bars or len(bars) < 200:
                     continue
                 rows = bars_from_ohlcv(bars)
                 for z in find_accumulation_zones(rows, tf=tf, cfg=cfg, max_zones=4):
-                    fr = _frame(rows, int(z["first_touch_idx"]), int(z["last_touch_idx"]))
+                    # ⚠ ТОТ ЖЕ срез, что у продакшна (`zone_poc` → `_structure_bars`), а НЕ
+                    # огибающая касаний `[first_touch_idx … last_touch_idx]`. Прежняя редакция
+                    # брала огибающую и потому сертифицировала другой объект: замер 2026-07-27
+                    # дал ей медиану 138–168 баров против 23–26 у продакшна и 45–56%
+                    # неустойчивых против 20–31%. Ровно тот дефект, который докстрока
+                    # `poc._structure_bars` уже описывает словами: огибающая касаний склеивает
+                    # происхождение структуры со всеми последующими ретестами и НЕ является span.
+                    seg = _structure_bars(bars, z)
+                    fr = pl.DataFrame({
+                        "high": [float(r[2]) for r in seg],
+                        "low": [float(r[3]) for r in seg],
+                        "volume": [float(r[5]) for r in seg],
+                    })
                     if fr.height < 5:
                         continue
                     span = float(z["hi"]) - float(z["lo"])

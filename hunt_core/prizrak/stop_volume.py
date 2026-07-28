@@ -15,16 +15,24 @@ from typing import Any
 from hunt_core.prizrak.config import PrizrakConfig
 from hunt_core.prizrak.poc import _MIN_STRUCTURE_BARS
 
-# Width of the sub-window scanned for a стоповый объём. find_stop_volume stamps the winner's
-# span as structure_lo_idx/structure_hi_idx (width = _SUB_WINDOW), which poc._structure_bars
-# then profiles — but only if the span has >= _MIN_STRUCTURE_BARS bars, else it silently falls
-# back to the whole window and returns the PARENT's ПОК (the exact bug str.35's own-ПОК fix
-# closed). The two constants live in different files; this assert makes the coupling machine-
-# checked at import, ahead of the test that also pins it (test_stop_volume_poc_is_its_own_*).
+# Ширина подокна, в котором ищется стоповый объём. `find_stop_volume` штампует span победителя
+# как structure_lo_idx/structure_hi_idx (ширина = _SUB_WINDOW), а `poc._structure_bars` его
+# профилирует — но только если в span'е >= _MIN_STRUCTURE_BARS баров, иначе он МОЛЧА
+# откатывается на всё окно и возвращает ПОК РОДИТЕЛЯ (ровно тот дефект, ради которого стр.35
+# даёт стоповому СВОЙ ПОК).
+#
+# ⚠ АССЕРТ СВЯЗЫВАЕТ ДВЕ КОНСТАНТЫ, А НЕ СТАВИТ ПОТОЛОК ОДНОЙ. Прежняя формулировка провоцировала
+# чтение «6 — потолок _MIN_STRUCTURE_BARS»; это неверно. Замер 2026-07-27: T=7/8/10/12 в одиночку
+# роняют ИМПОРТ (AssertionError → orchestrator → весь ПРИЗРАК), но T=7 + _SUB_WINDOW=7 и
+# T=20 + _SUB_WINDOW=20 импортируются штатно. Настоящая цена подъёма — не «падает призрак», а
+# «меняется геометрия стопового объёма», и она на живых данных НЕ измерена.
+#
+# ⚠ Ссылка на пиннинг-тест снята: каталог tests/ удалён 2026-07-27, и с тех пор этот ассерт —
+# ЕДИНСТВЕННЫЙ механический читатель связки (I-8: ссылка на несуществующий якорь гниёт молча).
 _SUB_WINDOW = 6
 assert _SUB_WINDOW >= _MIN_STRUCTURE_BARS, (
-    f"_SUB_WINDOW ({_SUB_WINDOW}) < poc._MIN_STRUCTURE_BARS ({_MIN_STRUCTURE_BARS}): a стоповый's "
-    "span would be too short to profile, and zone_poc would return the parent's ПОК"
+    f"_SUB_WINDOW ({_SUB_WINDOW}) < poc._MIN_STRUCTURE_BARS ({_MIN_STRUCTURE_BARS}): span "
+    "стопового объёма короче минимума профиля — zone_poc молча вернёт ПОК РОДИТЕЛЬСКОГО окна"
 )
 
 
@@ -87,8 +95,9 @@ def find_stop_volume(
                 #
                 # Must stay >= poc._MIN_STRUCTURE_BARS, or _structure_bars silently falls
                 # back to the whole window and hands back the PARENT's ПОК — the exact bug
-                # this span exists to prevent. Pinned by
-                # test_stop_volume_poc_is_its_own_not_the_parent_window.
+                # this span exists to prevent. Механически это держит ассерт при импорте
+                # (см. _SUB_WINDOW выше); прежняя ссылка на пиннинг-тест снята вместе с
+                # каталогом tests/ 2026-07-27 — она указывала в пустоту (I-8).
                 "structure_lo_idx": i, "structure_hi_idx": i + _SUB_WINDOW - 1,
             }
     return best
