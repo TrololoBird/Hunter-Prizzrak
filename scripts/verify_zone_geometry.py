@@ -29,6 +29,8 @@ from typing import Any
 
 import ccxt.async_support as ccxt
 
+from hunt_core.engine.params import OHLCV_LIMIT
+
 from hunt_core.prizrak.config import PrizrakConfig
 from hunt_core.toolkit.ohlcv import ccxt_ohlcv_to_frame
 from hunt_core.engine.spot import SpotEngine
@@ -217,7 +219,11 @@ async def main(symbols: list[str]) -> None:
             raw: dict[str, list[list[float]]] = {}
             for tf in TFS:
                 try:
-                    o = await ex.fetch_ohlcv(sym, tf, limit=500)
+                    # Продовая глубина, а не 500: движок обрезает кадр ровно до OHLCV_LIMIT,
+                    # и у одной и той же правки на 500 и на 1000 бывает РАЗНЫЙ ЗНАК (замер
+                    # 2026-07-27, см. `setups._horizon_zones`). Верификатор, меряющий на
+                    # кадрах мельче боевых, сертифицирует не тот объект.
+                    o = await ex.fetch_ohlcv(sym, tf, limit=OHLCV_LIMIT)
                 except Exception:
                     continue
                 step = ex.parse_timeframe(tf) * 1000
