@@ -12,9 +12,11 @@ import asyncio
 import html
 import os
 import structlog
+import time
 from datetime import datetime, timezone
 from typing import Any
 
+from hunt_core import paths as _paths, serde
 from hunt_core.deliver._labels import fmt_price
 from hunt_core.deliver.lab import send_lane_html
 from hunt_core.paths import SCANNER_STATE
@@ -46,9 +48,48 @@ _LOG = structlog.get_logger(__name__)
 _MIN_RR = 1.2
 # Advisory («ОЖИДАНИЕ подтверждения — НЕ вход») resend throttle: same card re-sends
 # only after this many seconds unless the setup progressed (steps_covered grew).
-# In-process only — a restart re-sends once, which is acceptable.
+#
+# ⚠ ПЕРЕЖИВАЕТ РЕСТАРТ. Прежняя редакция держала это в памяти процесса с пометкой «a restart
+# re-sends once, which is acceptable» — суждение, верное при редких перезапусках. Замер
+# 2026-07-28: три рестарта за час дали **четыре доставки одного и того же сетапа RIFUSDT**
+# (15:29, 15:33, 16:10, 17:04), каждая в новом процессе. Порог в 6 часов при этом не нарушался
+# ни разу — его просто нечем было применить, потому что память обнулялась раньше.
+#
+# Это ДОСТАВКА, а не детект: что считается сетапом и как он ведётся, правка не трогает, поэтому
+# бэктест-гейт модуля к ней неприменим (он покрывает `advance_manipulation_scales`).
 _ADVISORY_RESEND_S = float(os.getenv("HUNT_MANIP_ADVISORY_RESEND_S", "21600") or 21600)
-_ADVISORY_SENT: dict[tuple[str, str, str], tuple[float, int]] = {}
+_ADVISORY_STATE_PATH = _paths.DATA / "manip_advisory_sent.json"
+
+
+def _load_advisory_sent() -> dict[tuple[str, str, str], tuple[float, int]]:
+    """Прочитать память advisory-отправок (пустая при любой неожиданности)."""
+    try:
+        raw = serde.loads(_ADVISORY_STATE_PATH.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 — нет файла / битый JSON: начинаем с чистой памяти
+        return {}
+    out: dict[tuple[str, str, str], tuple[float, int]] = {}
+    for k, v in (raw or {}).items():
+        try:
+            a, b, c = str(k).split("\x1f")
+            out[(a, b, c)] = (float(v[0]), int(v[1]))
+        except Exception:  # noqa: BLE001 — одна битая запись не роняет остальные
+            continue
+    return out
+
+
+def _save_advisory_sent() -> None:
+    """Сохранить память advisory-отправок. Best-effort: сбой записи не глушит доставку."""
+    try:
+        _ADVISORY_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _ADVISORY_STATE_PATH.write_text(
+            serde.dumps_str({"\x1f".join(k): [ts, n] for k, (ts, n) in _ADVISORY_SENT.items()}),
+            encoding="utf-8",
+        )
+    except Exception:  # noqa: BLE001
+        _LOG.warning("manip_advisory_persist_failed", path=str(_ADVISORY_STATE_PATH))
+
+
+_ADVISORY_SENT: dict[tuple[str, str, str], tuple[float, int]] = _load_advisory_sent()
 # Minimum structural sweep depth (|swept_level − sweep_extreme| / swept_level) for a
 # dip to count as a liquidity-grab «свип». Grounded on real bars: the corpus winners
 # swept ≥1%, while the junk O/USDT A-long «swept» only 0.07–0.34% (chart noise). 0.5%
@@ -489,11 +530,17 @@ async def deliver_manipulation_setups(
         if not bool(getattr(setup, "micro_confirmed", False)):
             adv_key = (symbol, setup.direction, setup.pattern_type)
             prev = _ADVISORY_SENT.get(adv_key)
-            now_mono = asyncio.get_event_loop().time()
+            # ⚠ НАСТЕННОЕ время, не монотонное. Раньше здесь стоял
+            # ``asyncio.get_event_loop().time()`` — монотонные часы, чей отсчёт начинается заново
+            # в КАЖДОМ процессе. Пока память жила только в процессе, это было безразлично; с
+            # персистом метка от прошлого запуска сравнивалась бы с чужой точкой отсчёта, и порог
+            # в 6 часов срабатывал бы случайным образом. Сохранять монотонное время на диск —
+            # ошибка по построению, поэтому обе точки переведены на ``time.time()``.
+            now_wall = time.time()
             if (
                 prev is not None
                 and setup.steps_covered <= prev[1]
-                and (now_mono - prev[0]) < _ADVISORY_RESEND_S
+                and (now_wall - prev[0]) < _ADVISORY_RESEND_S
             ):
                 if new_state != prior_state:
                     scanner_states[symbol] = new_state
@@ -512,9 +559,10 @@ async def deliver_manipulation_setups(
         # and the still-armed pattern retries on the next cycle instead of being lost.
         if not bool(getattr(setup, "micro_confirmed", False)):
             _ADVISORY_SENT[(symbol, setup.direction, setup.pattern_type)] = (
-                asyncio.get_event_loop().time(),
+                time.time(),  # настенное — переживает рестарт, см. комментарий у сравнения выше
                 setup.steps_covered,
             )
+            _save_advisory_sent()
         message_id = getattr(result, "message_id", None)
         if new_state != prior_state:
             scanner_states[symbol] = new_state

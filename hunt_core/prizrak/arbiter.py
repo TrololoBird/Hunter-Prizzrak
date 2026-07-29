@@ -6,6 +6,12 @@ import os
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import structlog
+
+from hunt_core import paths as _paths, serde
+
+LOG = structlog.get_logger(__name__)
+
 _DEEP_COOLDOWN: dict[str, datetime] = {}
 DEFAULT_STALE_HOURS = 4.0
 
@@ -43,8 +49,44 @@ def mark_deep_sent(symbol: str, *, now: datetime | None = None) -> None:
 # Дедуп — по ОТПЕЧАТКУ КАРТЫ, а не по времени: карта пересчитывается каждый тик и дрожит, поэтому
 # ключ по координатам плодил бы «новую» карту каждые 60 секунд (тот же урок, что в zone_watch).
 # Пока набор зон тот же — молчим, сколько бы ни прошло; сменился — шлём.
-_WAIT_SENT: dict[str, tuple[str, datetime]] = {}
+#
+# ⚠ ПАМЯТЬ ПЕРЕЖИВАЕТ РЕСТАРТ, и это не удобство, а условие работоспособности дедупа. Пока словарь
+# жил только в процессе, каждый запуск начинался с `prev is None` → «слать», то есть ВСЕ семь
+# закреплённых символов получали карточку в первые же секунды, минуя часовой интервал. Наблюдено
+# 2026-07-28 на собственном рестарте: сообщения 20186–20191 — шесть карточек за семь секунд.
+# Рестартов за день было три, то есть ~21 карточка родилась ровно из забывчивости.
+_WAIT_STATE_PATH = _paths.DATA / "prizrak_wait_sent.json"
 _WAIT_MIN_HOURS = 1.0
+
+
+def _load_wait_sent() -> dict[str, tuple[str, datetime]]:
+    """Прочитать память отправок с диска (пустая при любой неожиданности — дедуп не критичен)."""
+    try:
+        raw = serde.loads(_WAIT_STATE_PATH.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 — нет файла / битый JSON: начинаем с чистой памяти
+        return {}
+    out: dict[str, tuple[str, datetime]] = {}
+    for sym, val in (raw or {}).items():
+        try:
+            out[str(sym).upper()] = (str(val["fp"]), datetime.fromisoformat(str(val["at"])))
+        except Exception:  # noqa: BLE001 — одна битая запись не должна ронять остальные
+            continue
+    return out
+
+
+def _save_wait_sent() -> None:
+    """Сохранить память отправок. Best-effort: сбой записи не должен глушить доставку."""
+    try:
+        _WAIT_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _WAIT_STATE_PATH.write_text(
+            serde.dumps_str({s: {"fp": fp, "at": at.isoformat()} for s, (fp, at) in _WAIT_SENT.items()}),
+            encoding="utf-8",
+        )
+    except Exception:  # noqa: BLE001
+        LOG.warning("wait_sent_persist_failed", path=str(_WAIT_STATE_PATH))
+
+
+_WAIT_SENT: dict[str, tuple[str, datetime]] = _load_wait_sent()
 
 
 def wait_card_fingerprint(setups: dict[str, Any]) -> str:
@@ -85,6 +127,7 @@ def wait_card_ok(symbol: str, fingerprint: str, *, now: datetime | None = None) 
 
 def mark_wait_sent(symbol: str, fingerprint: str, *, now: datetime | None = None) -> None:
     _WAIT_SENT[symbol.upper()] = (fingerprint, now or datetime.now(UTC))
+    _save_wait_sent()
 
 
 def evaluate_deep_delivery(*, symbol: str, verdict: dict[str, Any]) -> tuple[bool, list[str]]:

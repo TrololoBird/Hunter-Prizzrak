@@ -51,6 +51,14 @@ _RESET_PCT = float(os.getenv("HUNT_ZONE_RESET_PCT", "3.0") or 3.0)
 # per-tick jitter of a recomputed map. Too tight ⇒ duplicate alerts; too loose ⇒ a genuinely new zone
 # inherits the old one's "already alerted" state.
 _MATCH_TOL_PCT = float(os.getenv("HUNT_ZONE_MATCH_TOL_PCT", "1.0") or 1.0)
+
+from hunt_core.view.build import plane_is_required as _plane_is_required  # noqa: E402
+from hunt_core.prizrak.zone_registry import (  # noqa: E402 — рядом с общим допуском
+    horizon_of,
+    mark_announced,
+    update_registry,
+    was_announced,
+)
 # Потолок зон на символ. Поднят с 5 до 9, потому что горизонтов теперь три, а не два:
 # при пяти слотах часовой горизонт (перезакуп + 3 добора + 3 шорта) выбирал их все, и
 # четырёхчасовые с недельными зонами молча отбрасывались после дедупа. Усечение логируется —
@@ -192,10 +200,155 @@ def _actionable_zones(setups: dict[str, Any]) -> list[dict[str, Any]]:
                 if rec is not None:
                     out.append(rec)
     kept = _dedupe(out)
+    # Спорные полосы снимаются ДО расчёта целей: зона, пересечённая встречной, не должна ни
+    # алертить сама, ни служить кому-то целью — целиться в оспариваемый уровень так же
+    # бессмысленно, как входить в него.
+    kept = _drop_contested(kept)
+    # Цели считаются ПОСЛЕ dedupe и ДО обрезки: они выводятся из взаимного расположения зон, а не
+    # приходят из карты, поэтому им нужен весь набор. Считать до dedupe значило бы целиться в
+    # зону-дубль, а после обрезки — потерять встречную стену, не попавшую в лимит сообщения.
+    _assign_symmetric_targets(kept)
     if len(kept) > _MAX_ZONES:
         LOG.info("zone_watch_truncated", kept=_MAX_ZONES, dropped=len(kept) - _MAX_ZONES,
                  dropped_kinds=[z["kind"] for z in kept[_MAX_ZONES:]])
     return kept[:_MAX_ZONES]
+
+
+def _all_zones_by_horizon(setups: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    """ВСЕ зоны карты по горизонтам — для реестра, а не для алертов.
+
+    Отличий от :func:`_actionable_zones` ровно три, и все три намеренные:
+
+    * берутся ВСЕ горизонты, включая ``intraday`` и ``sniper``/``spot``, а не только те три, по
+      которым автор сидит лимитом, — карточка печатает их все, а требование «каждая зона
+      фиксируется и отслеживается» относится к напечатанному;
+    * зоны «по факту» НЕ выбрасываются: по ним не ставят лимитку, но именно их отработку и надо
+      наблюдать, чтобы подтвердить или опровергнуть уровень;
+    * нет ни ``_dedupe``, ни ``_MAX_ZONES``: реестр хранит объекты, а не строки сообщения, и
+      обрезание списка здесь означало бы потерю истории, а не экономию места в посте.
+
+    Возвращать зоны по горизонтам, а не плоским списком, обязательно: ``zone_registry.zone_id``
+    включает горизонт, иначе часовая и четырёхчасовая зоны с близкими якорями склеились бы в одну
+    запись и растащили бы историю друг друга.
+    """
+    horizons = (setups.get("horizons") or {}) if isinstance(setups, dict) else {}
+    out: dict[str, list[dict[str, Any]]] = {}
+    for hname, _hz in horizons.items():
+        hz = _hz if isinstance(_hz, dict) else {}
+        if not hz:
+            continue
+        _lt = hz.get("long_targets")
+        long_t = _lt if isinstance(_lt, list) else []
+        _st = hz.get("short_targets")
+        short_t = _st if isinstance(_st, list) else []
+        bucket: list[dict[str, Any]] = []
+
+        pk = hz.get("perezakup")
+        if isinstance(pk, dict):
+            rec = _mk_zone(pk, kind="перезакуп", direction="long", targets=long_t)
+            if rec is not None:
+                bucket.append(rec)
+        for z in hz.get("dobor") or []:
+            if isinstance(z, dict):
+                rec = _mk_zone(z, kind="добор", direction="long", targets=long_t)
+                if rec is not None:
+                    bucket.append(rec)
+        for z in hz.get("short") or []:
+            if isinstance(z, dict):
+                rec = _mk_zone(z, kind="шорт", direction="short", targets=short_t)
+                if rec is not None:
+                    bucket.append(rec)
+        if bucket:
+            out[str(hname)] = bucket
+    # Цели — по ВСЕЙ карте, а не внутри горизонта: встречная стена для часовой зоны законно может
+    # лежать на четырёхчасовой карте, и замыкание на свой горизонт оставило бы её без цели.
+    flat = [z for bucket in out.values() for z in bucket]
+    _assign_symmetric_targets(flat)
+    return out
+
+
+def _drop_contested(zones: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Выбросить зоны, чьи полосы ПЕРЕСЕКАЮТСЯ со встречными: спорный уровень — не уровень.
+
+    ⚠ Сосуществование лонговых и шортовых зон само по себе нормально: у автора карта штатно несёт
+    закуп снизу и шорт сверху, и зоны приходят с разных ТФ. Вопрос только к ПЕРЕСЕКАЮЩИМСЯ полосам.
+
+    Замер на живом канале 2026-07-28, SOLUSDT: за 14 минут ушли два алерта «вход по факту касания»
+    в противоположных направлениях практически на одной цене — 🔴 шорт ``74.2000–74.2300``
+    (стоп 75.7146 сверху) и 🟢 перезакуп ``73.7147–74.2200`` (стоп 72.2404 снизу). Полосы
+    пересекаются на 74.2000–74.2200. Взяв оба, читатель получил бы нулевую позицию и два стопа —
+    убыток при любом исходе.
+
+    Почему МОЛЧИМ ОБЕ, а не выбираем «подтверждённую». Первая редакция правила предлагала отдавать
+    победу зоне с наблюдённой реакцией. От этого пришлось отказаться: если одна и та же цена
+    одновременно является и зоной набора, и зоной сброса, то не определён сам УРОВЕНЬ, а не только
+    его сторона. Выбрать сторону значило бы выдать спор за сигнал.
+
+    Дедуп по направлению И виду (``_dedupe``) здесь не помогает by construction: он схлопывает
+    только ОДНОНАПРАВЛЕННЫЕ зоны, а встречные не сливает никогда.
+    """
+    contested: set[int] = set()
+    for i, a in enumerate(zones):
+        for j in range(i + 1, len(zones)):
+            b = zones[j]
+            if a.get("direction") == b.get("direction"):
+                continue
+            try:
+                if float(a["lo"]) <= float(b["hi"]) and float(b["lo"]) <= float(a["hi"]):
+                    contested.add(i)
+                    contested.add(j)
+            except (KeyError, TypeError, ValueError):
+                continue
+    if contested:
+        LOG.info("zone_watch_contested_dropped", count=len(contested),
+                 bands=[f"{zones[i]['kind']} {zones[i]['lo']:.6g}-{zones[i]['hi']:.6g}"
+                        for i in sorted(contested)])
+    return [z for i, z in enumerate(zones) if i not in contested]
+
+
+def _assign_symmetric_targets(zones: list[dict[str, Any]]) -> None:
+    """Проставить каждой зоне цель — ДАЛЬНЮЮ кромку ближайшей встречной зоны. Мутирует на месте.
+
+    ⚠ Здесь чинятся СРАЗУ ДВА дефекта, и второй важнее первого.
+
+    **Сирота-ключ.** Раньше цели брались из ``hz.get("long_targets")`` / ``short_targets`` — ключа,
+    которого НИКТО не пишет: ``setups.py:555,557`` его ``pop``-ает, а цели складываются ГЛОБАЛЬНО
+    в ``setups.py:612,621``. Замер 2026-07-28: у **90 из 90** зон реестра ``targets=[]``, отсюда
+    ``rr=None`` и «за зоной нет структурной цели» в каждом алерте (I-6: продюсер переехал,
+    потребитель остался).
+
+    **Асимметрия.** Даже с починенным ключом цель бралась как БЛИЖНЯЯ кромка встречной зоны, тогда
+    как вход берётся В ГЛУБИНЕ своей. Замер на живых зонах ETH 2026-07-28 (стоп 2% за VAH,
+    консервативный «худший залив»):
+
+    ==========================  =================  ================
+    структура шорта             R:R к ближней      R:R к дальней
+    ==========================  =================  ================
+    1954.70–1967.72             0.92               1.70
+    1965.78–1971.62             1.30               2.21
+    1953.05–1958.75             1.03               1.94
+    ==========================  =================  ================
+
+    Логика симметрии — из самого метода: вход мы набираем лесенкой внутрь своей зоны, значит и
+    фиксировать надо внутрь встречной, а не на её пороге. Зона — это область интереса, а не
+    линия, и обе её стороны обязаны трактоваться одинаково.
+
+    Цель ставится ОДНА, а не три: дальняя кромка — это уже граница встречной структуры, за ней
+    начинается чужая территория, и следующая цель означала бы пересиживание чужой зоны насквозь.
+    """
+    longs = [z for z in zones if z.get("direction") == "long"]
+    shorts = [z for z in zones if z.get("direction") == "short"]
+    for z in zones:
+        lo, hi = float(z["lo"]), float(z["hi"])
+        if z.get("direction") == "long":
+            # Лонг отрабатывает ВВЕРХ → встречная стена это ближайшая шортовая зона НАД полосой.
+            opp = [o for o in shorts if float(o["lo"]) > hi]
+            best = min(opp, key=lambda o: float(o["lo"])) if opp else None
+            z["targets"] = [round(float(best["hi"]), 8)] if best else []
+        else:
+            opp = [o for o in longs if float(o["hi"]) < lo]
+            best = max(opp, key=lambda o: float(o["hi"])) if opp else None
+            z["targets"] = [round(float(best["lo"]), 8)] if best else []
 
 
 def _stop_for(lo: float, hi: float, *, buffer_frac: float, direction: str) -> float:
@@ -280,7 +433,8 @@ def _entry_band(z: dict[str, Any]) -> tuple[float, float]:
 
 
 def _rr_worst_fill(
-    *, direction: str, entry_lo: float, entry_hi: float, stop: float, tp1: float | None
+    *, direction: str, entry_lo: float, entry_hi: float, stop: float, tp1: float | None,
+    poc: float | None = None,
 ) -> float | None:
     """R:R по ХУДШЕМУ заливу в полосе (long → hi, short → lo) — широкая полоса не льстит отношению.
 
@@ -295,9 +449,36 @@ def _rr_worst_fill(
         return None
     if min(lo, hi, sl, tp) <= 0:
         return None
-    edge = hi if direction == "long" else lo
-    risk = (edge - sl) if direction == "long" else (sl - edge)
-    reward = (tp - edge) if direction == "long" else (edge - tp)
+    # ⚠ РИСК СЧИТАЕТСЯ ОТ ТОЙ ЖЕ ЦЕНЫ, КОТОРУЮ КАРТОЧКА НАЗЫВАЕТ ВХОДОМ.
+    #
+    # Полоса сюда приходит из `_entry_band`, а он уже якорит её на ПОК: для лонга это (ПОК, hi),
+    # для шорта (lo, ПОК). То есть ПОК — это та кромка полосы, которая ДАЛЬШЕ от рынка, и именно
+    # её курс называет входом: «метка входа ставится точно на POC-линии» (стр.21), «уровень =
+    # именно линия POC, а не край базы».
+    #
+    # Прежний расчёт брал ПРОТИВОПОЛОЖНУЮ кромку («худший залив»), и до сегодняшней правки карты
+    # это было безразлично: микрозона шириной 0.1% не отличала ПОК от края. На структурных зонах
+    # (медиана 1.25%) разница решает исход, и карточка стала внутренне противоречивой — печатала
+    # вход по ПОКу, а R:R считала от другой цены. Замер 2026-07-28: от кромки медиана 2.10, от
+    # ПОКа 2.94 (курсовое 1к3).
+    #
+    # Это правка на СОГЛАСОВАННОСТЬ, а не послабление ради прохождения гейта: если бы карточка
+    # печатала входом кромку, честным был бы расчёт от кромки. Обе цены обязаны быть одной.
+    # Консерватизм прежнего варианта («широкая полоса не льстит отношению») сохраняется там, где
+    # ПОКа нет: тогда `_entry_band` отдаёт зону целиком, и `edge` снова становится худшей кромкой.
+    #
+    # ⚠ ПОК передаётся ЯВНО, а не выводится из полосы. Полоса от `_entry_band` выглядит одинаково
+    # в двух РАЗНЫХ случаях: якорь на ПОКе (тогда дальняя кромка И ЕСТЬ ПОК) и ПОКа нет вовсе
+    # (тогда отдаётся зона целиком). Отличить их изнутри `_rr` невозможно, и без явного параметра
+    # лонг без ПОКа считался бы от `lo` — самой ВЫГОДНОЙ цены, то есть отношение льстило бы себе
+    # ровно там, где якоря нет. Первая редакция этой правки такую ошибку и содержала.
+    anchor = float(poc) if isinstance(poc, (int, float)) and lo <= float(poc) <= hi else None
+    if anchor is not None:
+        entry = anchor
+    else:
+        entry = hi if direction == "long" else lo  # нет якоря → худший залив, как прежде
+    risk = (entry - sl) if direction == "long" else (sl - entry)
+    reward = (tp - entry) if direction == "long" else (entry - tp)
     if risk <= 0 or reward <= 0:
         return None
     return round(reward / risk, 2)
@@ -350,7 +531,7 @@ def _handoff(
         entry_lo, entry_hi = _entry_band(z)
         rr = _rr_worst_fill(
             direction=z["direction"], entry_lo=entry_lo, entry_hi=entry_hi,
-            stop=stop, tp1=tps[0] if tps else None,
+            stop=stop, tp1=tps[0] if tps else None, poc=z.get("poc"),
         )
         floor = float(getattr(cfg, "min_rr", 2.0) or 2.0)
         if rr is None or rr < floor:
@@ -422,8 +603,50 @@ def evaluate_zone_watch(
     if price <= 0:
         return []
     _setups = native.prizrak.setups
-    zones = _actionable_zones(_setups if isinstance(_setups, dict) else {})
+    setups_d = _setups if isinstance(_setups, dict) else {}
+    zones = _actionable_zones(setups_d)
     sym = _compact(native.view.symbol)
+
+    # РЕЕСТР обновляется РАНЬШЕ и ШИРЕ алертов и намеренно не зависит от их условий.
+    # Раньше — чтобы карточка этого же тика читала уже учтённое касание, а не прошлое.
+    # Шире — потому что алерты идут по трём горизонтам живых лимиток, а фиксировать требуется
+    # каждую зону карты. И БЕЗУСЛОВНО: ранние возвраты ниже (пустая карта) означают «алертить не о
+    # чем», но не «наблюдений не было» — именно на таком возврате прежний код и стирал историю.
+    if cfg is None:
+        from hunt_core.prizrak.config import PrizrakConfig as _Cfg
+
+        cfg = _Cfg.load()
+
+    # ⚠ ГАРД: на протухших кадрах реестр НЕ трогаем. Карта, посчитанная на несвежих барах, — это не
+    # рынок, а артефакт, и заводить по ней зоны значит выдавать сбой инфраструктуры за событие.
+    # Замер 2026-07-28: три зоны завелись в 13:28 внутри окна деградации (13:20–13:31), сдвинули
+    # отпечаток сразу у нескольких символов и дали залп из ПЯТИ карточек в 13:35 — при том, что ни
+    # одна зона не сменила статус. Молчание здесь честнее: реестр — журнал наблюдений, а наблюдения
+    # на сломанном приборе не наблюдения.
+    # ⚠ Скипаем ТОЛЬКО по ОБЯЗАТЕЛЬНЫМ планам, и решает это `view.build.plane_is_required` —
+    # единственный держатель границы. Первая редакция гарда смотрела на `view.not_ready` целиком и
+    # глушила реестр в 203 случаях из ~240 за 17 минут (85%): срабатывало на `liq` (87 раз),
+    # `bbo`, `basis`, `oi` — то есть на НЕОБЯЗАТЕЛЬНЫХ планах. Для `liq` это буквально ошибка,
+    # описанная в CLAUDE.md: «молчание событийного потока — данные, а не протухание»; ликвидаций
+    # просто не было. Свой список планов здесь был бы копией знания о границе — тем самым
+    # механизмом, которым она в этом проекте уже дважды разъезжалась.
+    stale_required = [p for p in native.view.not_ready if _plane_is_required(str(p).split(":", 1)[0])]
+    if stale_required:
+        LOG.info("zone_registry_skipped_stale", symbol=sym, not_ready=stale_required[:4])
+        return []
+
+    try:
+        update_registry(
+            state,
+            symbol=sym,
+            zones_by_horizon=_all_zones_by_horizon(setups_d),
+            price=price,
+            now=now,
+            stop_buffer_pct=float(cfg.stop_buffer_pct),
+        )
+    except Exception:  # noqa: BLE001 — реестр наблюдательный: его сбой не должен глушить алерты
+        LOG.exception("zone_registry_update_failed", symbol=sym)
+
     book = state.setdefault("zone_watch", {})
     stored = book.get(sym) or []
     if not zones:
@@ -431,10 +654,6 @@ def evaluate_zone_watch(
         book.pop(sym, None)
         return []
 
-    if cfg is None:
-        from hunt_core.prizrak.config import PrizrakConfig as _Cfg
-
-        cfg = _Cfg.load()
     buf = float(cfg.stop_buffer_pct)
 
     # COLD START: with no memory for this symbol we have observed no TRANSITION — price may have been
@@ -477,9 +696,16 @@ def evaluate_zone_watch(
                 rec["approached_at"] = now.isoformat()
             fresh.append(rec)
             continue
+        # ⚠ ВТОРОЙ замок, поверх одноразовых флагов, и он обязателен: флаги ниже сбрасываются при
+        # уходе цены дальше `_RESET_PCT`, поэтому цена, качающаяся между 1.5% и 3.0% от полосы,
+        # перевзводила их каждый круг. Замер по отправленному 2026-07-28: подход к XAG
+        # 55.8067–56.4600 ушёл 4 раза за полтора часа, ни разу не превратившись во вход.
+        # Реестр колебания переживает — объявленная зона молчит, пока не отработает или не пробита.
+        hz_name = horizon_of(state, sym, z) or "hourly"
         if dist == 0.0:
-            if not rec["entered_at"]:
+            if not rec["entered_at"] and not was_announced(state, sym, z, horizon=hz_name, event="entry"):
                 rec["entered_at"] = now.isoformat()
+                mark_announced(state, sym, z, horizon=hz_name, event="entry", now=now)
                 ev = _followup("zone_entry", sym, z, price=price, stop=stop, dist=0.0, now=now)
                 # Исход передачи проставляется в УЖЕ созданное событие: сообщение обязано сказать
                 # читателю, ведёт ли бот эту сделку дальше, — иначе «вход по факту касания» звучит
@@ -492,8 +718,13 @@ def evaluate_zone_watch(
             # Genuinely left the area — re-arm both alerts for the next visit.
             rec["approached_at"] = None
             rec["entered_at"] = None
-        elif dist <= _APPROACH_PCT and not rec["approached_at"]:
+        elif (
+            dist <= _APPROACH_PCT
+            and not rec["approached_at"]
+            and not was_announced(state, sym, z, horizon=hz_name, event="approach")
+        ):
             rec["approached_at"] = now.isoformat()
+            mark_announced(state, sym, z, horizon=hz_name, event="approach", now=now)
             out.append(_followup("zone_approach", sym, z, price=price, stop=stop, dist=dist, now=now))
         fresh.append(rec)
     book[sym] = fresh

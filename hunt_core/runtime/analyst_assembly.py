@@ -180,8 +180,10 @@ async def send_analyst_change_telegram(
 
     from hunt_core.prizrak.arbiter import (
         evaluate_deep_delivery,
+        # `wait_card_fingerprint` здесь БОЛЬШЕ НЕ ИМПОРТИРУЕТСЯ, и это главный признак того, что
+        # подпорка снята: решение об отправке больше не выводится из отпечатка карты. Сама функция
+        # пока жива в `arbiter` — у неё может быть другой читатель; проверить и удалить отдельно.
         mark_wait_sent,
-        wait_card_fingerprint,
         wait_card_ok,
     )
 
@@ -191,8 +193,43 @@ async def send_analyst_change_telegram(
     action = str(summary.get("action") or "wait").lower()
     wait_fp = ""
     if action not in {"long", "short"}:
+        # Отпечаток берётся из РЕЕСТРА (состав зон + их статусы), а не из сырой карты: карта дрожит,
+        # и прежний отпечаток по координатам разрешал новую отправку примерно раз в час на символ —
+        # 142 карточки `wait` за прогон 2026-07-28 при нуле сделок. Реестровый меняется только когда
+        # зона появилась или сменила статус, то есть ровно тогда, когда читателю есть что узнать.
+        # Падать сюда нельзя: без отпечатка карточка не отправится вовсе, поэтому сырой остаётся
+        # запасным вариантом, а не заменяется молча.
+        # ⚠ РЕШЕНИЕ «есть ли что сказать» принимает РЕЕСТР, а не сравнение отпечатков.
+        #
+        # Прежняя схема строила карточку безусловно и отбрасывала её на выходе, сравнивая отпечаток
+        # карты с прошлым. Замер 2026-07-28: **64 подавления на 11 отправок**, то есть 85% работы в
+        # корзину. Но дороже расхода была ДУБЛИРОВАННАЯ ЛОГИКА: реестр уже знает, что зона сменила
+        # статус (он сам её и переводит), а арбитр выводил это заново из строк сообщения. Копия
+        # знания разъезжалась с оригиналом дважды за день — на неустойчивости корзины якоря и на
+        # чувствительности к дрожанию полос, — и оба раза давала ложные отправки.
+        #
+        # Теперь повод — накопленные переходы (`created` / `confirmed` / `worked` / `broken`).
+        # Очередь, а не флаг: между двумя карточками умещается ~10 тиков реестра.
         _setups = getattr(native.prizrak, "setups", None)
-        wait_fp = wait_card_fingerprint(_setups if isinstance(_setups, dict) else {})
+        events: list[dict[str, Any]] = []
+        try:
+            from hunt_core.prizrak.zone_registry import peek_events
+            from hunt_core.track.tracker import load_tracker_state
+
+            events = peek_events(load_tracker_state(), sym)
+        except Exception:  # noqa: BLE001 — реестр недоступен: падаем на прежний отпечаток
+            events = []
+        if events:
+            # Отпечаток по составу событий: он меняется ровно тогда, когда пришёл НОВЫЙ переход,
+            # и не двигается от дрожания карты. Прежний `mark_wait_sent` продолжает работать как
+            # был — меняется только то, ЧТО считается изменением.
+            wait_fp = "|".join(f"{e.get('zone_id')}:{e.get('event')}" for e in events)
+        else:
+            # Событий нет — сказать нечего. Ранний возврат вместо «построить и подавить»: это и
+            # есть снятие подпорки, ради которого схема переделана.
+            LOG.info("analyst_pinned_tg_skipped_wait", symbol=sym, action=action,
+                     reason="no_zone_events")
+            return None
         if not wait_card_ok(sym, wait_fp):
             LOG.info("analyst_pinned_tg_skipped_wait", symbol=sym, action=action,
                      reason="map_unchanged" if wait_fp else "no_zones")
@@ -236,8 +273,23 @@ async def send_analyst_change_telegram(
     if result.status == "sent":
         if wait_fp:
             mark_wait_sent(sym, wait_fp)
+        # Очередь переходов чистится ТОЛЬКО после подтверждённой отправки. Слить её раньше —
+        # например, при построении карточки — значит потерять повод, если Telegram ответит
+        # ошибкой: следующий цикл не увидит событий и промолчит о том, что уже произошло.
+        # Именно поэтому выше стоит `peek_events`, а не `drain_events`.
+        if events:
+            try:
+                from hunt_core.prizrak.zone_registry import drain_events
+                from hunt_core.track.tracker import load_tracker_state, save_tracker_state
+
+                _st = load_tracker_state()
+                drain_events(_st, sym)
+                save_tracker_state(_st)
+            except Exception:  # noqa: BLE001 — очистка очереди не должна ронять доставку
+                LOG.exception("zone_events_drain_failed", symbol=sym)
         LOG.info("analyst_pinned_tg_sent", symbol=sym, message_id=result.message_id,
-                 plane="deep", kind="wait" if wait_fp else action)
+                 plane="deep", kind="wait" if wait_fp else action,
+                 events=[e.get("event") for e in events] or None)
         return result.message_id
     LOG.warning("analyst_pinned_tg_failed", symbol=sym, status=result.status, reason=result.reason)
     return None
