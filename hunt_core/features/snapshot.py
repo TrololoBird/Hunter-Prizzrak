@@ -239,13 +239,51 @@ def btc_beta_1h(sym_work_1h: Any, btc_work_1h: Any, *, lookback: int = 48) -> fl
 
 
 
+# ── Учёт подстановок вместо отсутствующих значений ────────────────────────────
+# ⚠ ГЛАВНЫЙ носитель инварианта I-6 в этом дереве: `col()` возвращает `0.0`, когда значения
+# НЕТ. Замер 2026-07-31: **287 вызовов в 19 файлах, и НИ ОДИН не задаёт `default` явно** —
+# то есть везде действует ноль. Для процентиля это не «нейтрально», а крайнее показание:
+# живой прогон в тот же день дал `bb_width_pctile50 = None`, и наружу ушёл ноль, читаемый
+# как «полоса самая узкая за историю». Затронуты в т.ч. prizrak/assemble.py,
+# prizrak/confluence.py, maps/oi.py, runtime/native_producers.py.
+#
+# Прежняя редакция гасила это в `LOG.debug`, то есть в проде подстановка была НЕВИДИМА.
+# По директиве владельца 2026-07-31 («игнорирование, молчаливые ошибки, отсутствующие
+# данные, деградации НЕДОПУСТИМЫ») подстановка обязана быть слышна.
+#
+# Почему счётчик, а не warning на каждый вызов: `col()` зовётся сотни раз за тик, и алерт
+# на каждый повторил бы уже случившийся здесь инцидент — 95 сообщений за 20 ч, 39% канала
+# (см. _BLACKOUT_ALERT_COOLDOWN_S в runtime/cycle/_cycle_loop.py). Поэтому: считаем по имени
+# колонки и отдаём сводку наружу; молчания при этом нет — число всегда доступно.
+_SUBSTITUTIONS: dict[str, int] = {}
+
+
+def substitution_counts() -> dict[str, int]:
+    """Сколько раз какая колонка подставлялась дефолтом вместо реального значения.
+
+    Ноль записей = подстановок не было. Непустой словарь = ровно столько показаний в фичах
+    НЕ измерены, а назначены; читать как «столько-то дыр в данных», а не как шум.
+    """
+    return dict(_SUBSTITUTIONS)
+
+
+def reset_substitution_counts() -> None:
+    """Обнулить счётчик (вызывается в начале тика, чтобы сводка была по одному тику)."""
+    _SUBSTITUTIONS.clear()
+
+
 def col(df: Any, name: str, default: float = 0.0, *, idx: int = -1) -> float:
     if df is None or df.is_empty() or name not in df.columns:
+        _SUBSTITUTIONS[name] = _SUBSTITUTIONS.get(name, 0) + 1
         return default
     try:
         return float(df.item(idx, name))
     except (TypeError, ValueError, IndexError):
-        LOG.debug("col df.item failed idx=%s name=%s", idx, name, exc_info=True)
+        # WARNING, не debug: подстановка отсутствующего значения — это дыра в данных,
+        # а не диагностический шум. exc_info снят намеренно: тип исключения здесь ничего
+        # не добавляет (их ровно три), а полный трейс на сотнях вызовов забивал вывод.
+        LOG.warning("col_substituted_default", column=name, idx=idx, default=default)
+        _SUBSTITUTIONS[name] = _SUBSTITUTIONS.get(name, 0) + 1
         return default
 
 

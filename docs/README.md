@@ -29,7 +29,10 @@ behavior»: 6 из 8 его ссылок `file:line` указывали в пу�
 | [ai/rules/prohibited-apis.md](ai/rules/prohibited-apis.md) | **актуально** — канон бан-листа CCXT, enforced в pre-commit | 2026-07-17 |
 | [engine/sessions-and-windows.md](engine/sessions-and-windows.md) | **актуально** — вывод исследования, не описание кода | 2026-07-18 |
 | [engine/data-catalog.md](engine/data-catalog.md) | каталог данных; при расхождении прав `view/models.py` | 2026-07-18 |
-| [engine/ccxt-practitioner-notes.md](engine/ccxt-practitioner-notes.md) | заметки по библиотеке — почти не гниют | 2026-07-18 |
+| [engine/ccxt-practitioner-notes.md](engine/ccxt-practitioner-notes.md) | **актуально** — идиомы ccxt; все проверяемые утверждения сверены с 4.5.68 | 2026-07-31 |
+| [engine/exchange-apis-2026-07-31.md](engine/exchange-apis-2026-07-31.md) | **актуально** — лимиты/веса/WS-маршруты Binance + OKX/Bybit/Bitget, из онлайн-доков и замеров | 2026-07-31 |
+| [reference/exchange-api/README.md](reference/exchange-api/README.md) | **актуально** — индекс офлайн-каталога публичных API (15 файлов, 6864 стр.): таблица файлов + сводное «что не подключено», ранжированное под ПРИЗРАК | 2026-08-01 |
+| [reference/exchange-api/](reference/exchange-api/) (15 файлов) | **справочник**, только ПУБЛИЧНЫЕ поверхности Binance/OKX/Bybit/Bitget/CoinGecko/Crypto.com + ccxt. 9 из 15 ревизованы живыми запросами 2026-08-01, **6 — нет**; статус ревизии в шапке каждого файла | 2026-07-31 / 08-01 |
 | [engine/library-adoption.md](engine/library-adoption.md) | историческое обоснование выбора библиотек | 2026-07-18 |
 | [adr/0001-weight-governor-admission-control.md](adr/0001-weight-governor-admission-control.md) | **заменён** ADR-0002/0003; `market/weight_registry.py` удалён | 2026-07-12 |
 | [adr/0002-ccxt-native-data-engine.md](adr/0002-ccxt-native-data-engine.md) | **выполнено** (в тексте стоит «Proposed» — неверно) | 2026-07-18 |

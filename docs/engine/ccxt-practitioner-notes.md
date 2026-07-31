@@ -1,11 +1,19 @@
 # ccxt practitioner notes — internals a data engine must get right
 
-> **Статус: ЗАМЕТКИ ПО БИБЛИОТЕКЕ** (2026-07-18), сверено 2026-07-26. Про ccxt/ccxt.pro,
-> не про наш код, — поэтому почти не гниёт. Живые грабли, найденные ПОСЛЕ этих заметок,
-> лежат в памяти `engine-ccxt-crossvenue-gotchas` и `ccxt-version-floor-fstream`.
+> **Статус: ЗАМЕТКИ ПО БИБЛИОТЕКЕ** (2026-07-18), **сверено с онлайн-документацией и
+> установленным `ccxt 4.5.68` 2026-07-31** — все проверяемые утверждения подтвердились
+> (разбор сверки: [`exchange-apis-2026-07-31.md`](exchange-apis-2026-07-31.md) §6).
+> Про ccxt/ccxt.pro, не про наш код, — поэтому почти не гниёт.
+>
+> ⚠ Прежняя шапка отсылала к двум памятям (`engine-ccxt-crossvenue-gotchas`,
+> `ccxt-version-floor-fstream`) — **их нет на диске** (проверено 2026-07-31). Это I-8:
+> ссылка пережила носитель. Содержимое второй восстановлено ниже (§10) и в
+> `pyproject.toml` (пол `ccxt>=4.5.44`).
 
 Companion to [data-catalog.md](data-catalog.md). The *internals/idioms* (not the data structures),
 grounded in installed source `ccxt==4.5.59`. Cited line numbers are that version.
+**Лимиты, веса и WS-маршруты** (в этом файле их нет) — в
+[`exchange-apis-2026-07-31.md`](exchange-apis-2026-07-31.md).
 
 ## 1. Number & precision (most consequential)
 - `precisionMode` decides what `market['precision']['price']` MEANS: **`TICK_SIZE`** (all four venues) →
@@ -76,6 +84,28 @@ grounded in installed source `ccxt==4.5.59`. Cited line numbers are that version
 - `enableRateLimit=True` (set); Binance `calculate_rate_limiter_cost` scales by `byLimit` (klines
   1→10 by limit; depth 2→20) and charges heavier for unfiltered queries (`ticker/24hr` no-symbol = 40).
   `fetch_ohlcv(limit=1000)`=weight 5, `fetch_order_book(limit=1000)`=20. Leaky-bucket throttler.
+  ✅ Все шесть чисел перепроверены 2026-07-31 против официального дока Binance и дерева `api`
+  установленного 4.5.68 — совпадают точно (`klines byLimit [[99,1],[499,2],[1000,5],[10000,10]]`,
+  `depth [[50,2],[100,5],[500,10],[1000,20]]`, `ticker/24hr noSymbol=40`).
+- ⚠ **Стоимость в ccxt может отстать от биржи.** `historicalTrades` у Binance подорожал
+  **20 → 200** (changelog 2026-07-29), а ccxt 4.5.68 всё ещё держит `cost: 20` — троттлер
+  недосчитывает в 10×. У нас эндпоинт не вызывается, но правило общее: `enableRateLimit`
+  защищает ровно настолько, насколько дерево `api` свежее биржи.
+
+## 10. Фьючерсный WS Binance разнесён по маршрутам (2026-04-23)
+- `urls['api']['ws']['future']` — это **база** (`wss://fstream.binance.com/ws`), а не
+  фактический URL: `get_ws_url()` переписывает её под категорию из `get_future_ws_category()`.
+  **`depth`/`rpiDepth`/`bookTicker`/`trade` → `/public/ws`, всё остальное → `/market/ws`.**
+  Читать `.urls` и делать вывод «ccxt сидит на легаси» — ложный след (проверено 2026-07-31).
+- **Пол `ccxt>=4.5.44`** (`pyproject.toml`) стоит именно за этим и **не понижается**: клиент
+  без маршрутизации теряет `kline`/`aggTrade`/`markPrice`/`forceOrder`, причём `SUBSCRIBE`
+  отвечает `{"result": null}` — успехом. Отказ **частичный**: `bookTicker`/`trade`/`depth`
+  относятся к `public` и продолжают идти, поэтому «сокет жив» — не доказательство.
+- ccxt раскладывает подписки: `streamLimits.future = 50` сокетов × `subscriptionLimitByStream
+  .future = 200` = 10 000; сверх — `BadRequest('reached the limit of subscriptions by stream')`.
+  `watch_*_for_symbols()` отдельно ограничен **≤200 символов за вызов**.
+- `watch_liquidations_for_symbols([])` (**пустой** список) → `!forceOrder@arr`; непустой →
+  `<symbol>@forceOrder` пер-символьно. Универсальный канал получается только на пустом списке.
 
 ---
 

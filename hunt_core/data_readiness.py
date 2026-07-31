@@ -15,6 +15,13 @@ if TYPE_CHECKING:
 
 from hunt_core.contract import MARKET_FIELD_CCXT_SOURCE
 
+# Что печатать оператору, когда поля нет в карте источников. Прежде здесь стояло
+# "see hunt/docs/CCXT.md" — файла с таким путём в дереве НЕТ (проверено 2026-08-01), то есть
+# диагностика отказа отправляла человека в пустоту ровно в момент разбора отказа. Честнее
+# сказать «источник не описан», чем подставить правдоподобный путь (I-6), и указать каталог,
+# который существует.
+_CCXT_SOURCE_UNKNOWN = "source not documented — see docs/reference/exchange-api/"
+
 # Positioning REST fields required before kline-only analysis under strict_data_quality.
 # Order-flow columns (depth_imbalance, microprice_bias, agg_trade_delta_30s) are gated
 # per strategy pool via assess_strategy_data_capability - not a global hard stop.
@@ -182,7 +189,7 @@ def assess_symbol_data_readiness(
         ]
         if book_missing:
             ccxt_sources = {
-                col: MARKET_FIELD_CCXT_SOURCE.get(col, "see hunt/docs/CCXT.md")
+                col: MARKET_FIELD_CCXT_SOURCE.get(col, _CCXT_SOURCE_UNKNOWN)
                 for col in book_missing
             }
             return DataReadinessResult(
@@ -203,7 +210,7 @@ def assess_symbol_data_readiness(
             ]
             if missing_live:
                 ccxt_sources = {
-                    f: MARKET_FIELD_CCXT_SOURCE.get(f, "see hunt/docs/CCXT.md")
+                    f: MARKET_FIELD_CCXT_SOURCE.get(f, _CCXT_SOURCE_UNKNOWN)
                     for f in missing_live
                 }
                 return DataReadinessResult(

@@ -41,6 +41,14 @@ dependencies = [
     "aiogram>=3.28.2,!=3.29.0",  # 3.29.0 yanked: severe slowdown parsing nested RichBlock entities
     "tenacity>=9.1.4",
     "structlog>=25.5.0",
+    # Windows-only, ~25 КБ. Без неё structlog.dev.ConsoleRenderer(colors=True) поднимает
+    # SystemError прямо в конструкторе, и `python -m hunt_core watch` не стартует ВООБЩЕ
+    # (замер 2026-07-31: трейс обрывался в structlog.dev._init_terminal на импорте
+    # runtime/state.py). Проект писался на macOS, где colorama не нужна, поэтому дефект
+    # не мог проявиться у автора. Фоллбэк на бесцветный вывод в runtime/logging.py оставлен
+    # как страховка и ГРОМКО объявляется, но зависимость здесь убирает саму деградацию —
+    # директива владельца 2026-07-31: деградации недопустимы.
+    "colorama>=0.4.6; sys_platform == 'win32'",
     "pydantic>=2.13.4,<2.14",
     # Hard floor 4.5.44: older ccxt silently loses kline/markPrice/forceOrder WS
     # after Binance's 2026-04-23 fstream split (docs/HUNTER_TARGET_SPEC.md).

@@ -2,7 +2,7 @@
 
 > Сверено с деревом **2026-07-31** (вырез модуля МАНИПУЛЯЦИИ).
 
-Standalone crypto-futures **signal-analytics** package — **один модуль**:
+Standalone crypto-futures **signal-analytics** package — **один модуль**, **мультибиржевые данные**:
 
 - **PRIZRAK / Deep** (`hunt_core/prizrak/`) — движок метода PrizrakTrade: накопление, уровни
   ПОК, ПП, ловушки, стоповый объём, МТФ-структура. Работает по пиннутым мажорам и `/signal SYM`;
@@ -15,10 +15,18 @@ Standalone crypto-futures **signal-analytics** package — **один модул
 Плоскость данных (`engine/` → `view/` → `features/`) и пост-эмиссионная полоса `track/`
 остались как были. `hunt_core/signals/` — скаффолдинг, а не позвоночник.
 
-- Public **Binance USDⓈ-M** через **CCXT/ccxt.pro** — весь рыночный план на CCXT, без сырого
-  Binance HTTP, без приватных вызовов. ⚠ **CoinGecko используется** — доп-факторы призрака
-  dominance (BTC.D/TOTAL3) и marketcap ходят в CoinGecko и **выключены по умолчанию**
-  (`prizrak/dominance_source.py`, `prizrak/marketcap_source.py`).
+- **МУЛЬТИБИРЖА, а не только Binance.** Binance USDⓈ-M — *первичная* венью (полный движок:
+  кадры, стакан, ликвидации, фандинг, OI). Поверх неё `engine/multi.py::MultiEngine` держит
+  по lite-клиенту ccxt.pro на **OKX, Bybit, Bitget** (`engine/exchanges.py::SECONDARY_VENUES`)
+  и считает кросс-венью сигналы, которые стратегия использует напрямую:
+  расхождение **фандинга**, расхождение **OI**, **long/short ratio**, **ликвидации**.
+  Всё публичное, через CCXT/ccxt.pro, без сырого HTTP и без приватных вызовов.
+- **CoinGecko** — доп-факторы призрака: dominance (BTC.D/TOTAL3) и marketcap
+  (`prizrak/dominance_source.py`, `prizrak/marketcap_source.py`), **выключены по умолчанию**.
+- **Crypto.com Exchange** — независимый оракул для `/live-verify` (через MCP, не через код):
+  другая биржа и другой код нужны, чтобы поймать ошибку в собственном транспорте.
+- ⚠ Кросс-венью **fail-loud**: устаревшая или отсутствующая венью читается как `None`,
+  расхождение считается только по свежим — фабрикации значения нет (инвариант I-6).
 - **Telegram** — только ручные сигналы. Ордеров нет, балансов нет, приватной авторизации нет.
 - Канонический пакет: **`hunt_core/`**, запуск `python -m hunt_core`.
 

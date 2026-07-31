@@ -1,14 +1,22 @@
 """Batch tick JSONL + feature parquet lake + tracker flush off hot path (P9)."""
 from __future__ import annotations
 
+import contextlib
+import os
 import threading
 from pathlib import Path
 from typing import Any
 
 import polars as pl
+import structlog
 
 from hunt_core import serde
 from hunt_core.paths import LAKE_PARQUET, SIGNAL_STATE, TICK_JSONL
+
+# ⚠ Логгера в этом модуле не было ВООБЩЕ (аудит 2026-07-31), и это не мелочь: здесь живут
+# два пути, которые молча уничтожали данные — слияние parquet в FeatureLakeWriter.close и
+# слияние состояния трекера в flush_tracker_state. Сообщить о сбое было физически нечем.
+_LOG = structlog.get_logger("hunt_core.data.lake")
 
 
 class LakeDataError(RuntimeError):
@@ -103,7 +111,26 @@ def _merge_tracker_state(on_disk: dict[str, Any], buffered: dict[str, Any]) -> d
     return merged
 
 
+class TrackerFlushAborted(RuntimeError):
+    """Слияние перед записью невозможно — запись отменена, чтобы не затереть диск."""
+
+
 def flush_tracker_state() -> bool:
+    """Слить буфер с диском и записать. При нечитаемом диске — НЕ писать и поднять ошибку.
+
+    ⚠ Правка 2026-07-31 (директива «молчаливые ошибки недопустимы»). Прежняя редакция при
+    сбое чтения ставила `on_disk = {}`, и это ломало ровно тот механизм, ради которого
+    функция написана: `_merge_tracker_state` на пустом диске схлопывается до буфера
+    (см. его же ветку `if not on_disk: return buffered`), после чего `write_text` затирал
+    файл. То есть защита от гонки писателей превращалась в гарантированное затирание
+    `closed_history`, `followup_sent` и чужих `signals` — и функция при этом возвращала
+    `True`, «флаш успешен».
+
+    Ветка достижима только при `path.is_file()`, поэтому `{}` означало не «пусто», а
+    «не смогли прочитать»: неизвестное выдано за факт (I-6). Триггер реалистичен —
+    запись неатомарна (нет tmp+rename), так что оборванный флаш даёт `JSONDecodeError`,
+    а конкурентный доступ на Windows — `PermissionError`.
+    """
     global _tracker_flush
     if _tracker_flush is None:
         return False
@@ -112,10 +139,27 @@ def flush_tracker_state() -> bool:
     if path.is_file():
         try:
             on_disk = serde.loads(path.read_text(encoding="utf-8"))
-        except (OSError, serde.JSONDecodeError):
-            on_disk = {}
+        # ValueError, а не serde.JSONDecodeError: обрыв записи посреди кириллицы даёт
+        # UnicodeDecodeError (⊂ ValueError, но ⊄ JSONDecodeError) — см. тот же разбор в
+        # track/tracker.py::load_tracker_state.
+        except (OSError, ValueError) as exc:
+            _tracker_flush = None
+            raise TrackerFlushAborted(
+                f"{path} не читается ({exc!r}) — слияние невозможно. Запись ОТМЕНЕНА: "
+                f"иначе буфер затёр бы историю на диске. Разобрать файл вручную."
+            ) from exc
         state = _merge_tracker_state(on_disk, state)
-    path.write_text(serde.dumps_str(state, indent=True), encoding="utf-8")
+    # Атомарно (tmp + os.replace) — это ВТОРОЙ писатель того же файла, что и
+    # track/tracker.py::save_tracker_state; неатомарная запись здесь давала бы рваные
+    # чтения даже после починки первого.
+    tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}")
+    try:
+        tmp.write_text(serde.dumps_str(state, indent=True), encoding="utf-8")
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
     _tracker_flush = None
     return True
 
@@ -169,6 +213,20 @@ class FeatureLakeWriter:
             self._buf.setdefault(key, []).append(row)
 
     def close(self) -> None:
+        """Слить буфер в parquet. Партиция, которую не удалось прочитать, НЕ затирается.
+
+        ⚠ Правка 2026-07-31 (директива «молчаливые ошибки недопустимы»). Прежняя редакция
+        гасила сбой `read_parquet`/`concat` в `pass`, а следующей строкой БЕЗУСЛОВНО делала
+        `write_parquet` по тому же пути — то есть одна нечитаемая или несовместимая по схеме
+        партиция стирала всю историю фич символа/ТФ, заменяя её десятками строк текущего
+        буфера. Полностью бесшумно: `close()` возвращает `None` и в обоих случаях выглядел
+        успешным, а `read_features`/`query_features`/`query_baseline_stats` затем отдавали
+        обрезанный набор как полноценный факт.
+
+        Теперь сбой чтения означает: буфер пишется РЯДОМ (`<файл>.orphan-<n>.parquet`),
+        исходная партиция остаётся нетронутой, и об этом кричит лог. Данные не теряются
+        ни с одной стороны, а расхождение видно и разбирается вручную.
+        """
         with self._lock:
             pending = dict(self._buf)
             self._buf.clear()
@@ -182,8 +240,19 @@ class FeatureLakeWriter:
                 try:
                     old = pl.read_parquet(path)
                     new_df = pl.concat([old, new_df], how="diagonal_relaxed")
-                except DEFENSIVE_EXC:
-                    pass
+                except DEFENSIVE_EXC as exc:
+                    orphan = path.with_suffix(f".orphan-{len(rows)}.parquet")
+                    _LOG.error(
+                        "feature_lake_merge_failed",
+                        path=str(path),
+                        orphan=str(orphan),
+                        symbol=symbol,
+                        tf=tf,
+                        buffered_rows=len(rows),
+                        err=repr(exc),
+                    )
+                    new_df.write_parquet(orphan)
+                    continue
             new_df.write_parquet(path)
 
 

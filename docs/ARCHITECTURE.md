@@ -14,9 +14,18 @@ Read it before restructuring anything.
 
 ## 1. What this is
 
-A standalone crypto-futures **signal-analytics** product. Reads public Binance USDⓈ-M
-market data via CCXT (ccxt.pro), engineers features with Polars, and delivers **manual**
-signals to Telegram. No auto-trading, no private auth.
+A standalone crypto-futures **signal-analytics** product. Engineers features with Polars and
+delivers **manual** signals to Telegram. No auto-trading, no private auth.
+
+**Данные мультибиржевые.** Binance USDⓈ-M — первичная венью (полный движок: кадры, стакан,
+ликвидации, фандинг, OI). `engine/multi.py::MultiEngine` добавляет lite-клиентов ccxt.pro на
+**OKX / Bybit / Bitget** и считает кросс-венью расхождения фандинга и OI, long/short ratio и
+ликвидации. Отдельно: **CoinGecko** (dominance/marketcap, по умолчанию выкл.) и
+**Crypto.com** как независимый оракул проверки (`/live-verify`, через MCP). Всё публичное,
+через CCXT/ccxt.pro. Описывать продукт как «Binance-only» — фактическая ошибка.
+
+**Кросс-венью fail-loud:** устаревшая или отсутствующая венью читается как `None`, и
+расхождение считается только по свежим источникам — фабрикации значения нет (I-6).
 
 One strategy (§2) runs on top of the **data plane** (`engine/` → `view/` → `features/`) and
 the **post-emission lane** (`track/`). `signals/` is scaffolding, not a spine — see its own

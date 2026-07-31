@@ -320,9 +320,12 @@ def is_crypto_symbol(symbol: str) -> bool:
 async def fetch_ticker_rows(exchange: Any) -> list[dict[str, float | str]]:
     """Fetch + normalize the whole-universe 24h tickers off the engine's ccxt exchange (fail-loud ``[]``).
 
-    The single universe-wide REST batch (weight ~40) the scanner funnel, prescan and regime
-    calibration all rank against. Delegates the raw call to :func:`hunt_core.engine.rest.fetch_all_tickers`
-    (which returns ``{}`` on failure) and projects it via :func:`normalize_ticker_rows`.
+    The single universe-wide REST batch (**weight 40** — ``ticker/24hr`` with ``noSymbol=40``) that the
+    cross-sectional market regime ranks against. Delegates the raw call to
+    :func:`hunt_core.engine.rest.fetch_all_tickers` (which returns ``{}`` on failure) and projects it
+    via :func:`normalize_ticker_rows`.
+
+    ⚠ «Воронка сканера и prescan» из прежней редакции удалены 2026-07-31 вместе с модулем.
     """
     from hunt_core.engine.rest import fetch_all_tickers
 

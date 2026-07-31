@@ -18,7 +18,13 @@ never a fabricated value, so a divergence is only computed from fresh venues):
   Notional is computed (``contracts × contractSize × price``) — never trusted from the payload.
 
 Each secondary's optional signal is capability-gated at :meth:`start` (``has`` + listed markets), so
-an unsupported venue is silently skipped rather than polled-and-failed every tick.
+an unsupported venue is skipped rather than polled-and-failed every tick. ⚠ **Пропуск объявляется,
+а не молчит** — прежняя редакция этой шапки писала «silently skipped», и это было неверно дважды:
+код логирует и отказ загрузки рынков (``engine_secondary_load_failed`` с venue и ошибкой), и
+итоговую карту возможностей (``multi_engine_started`` с ``caps``). Формулировка занижала
+собственную дисциплину кода и узаконивала молчание как норму — при директиве владельца
+2026-07-31 «игнорирование, молчаливые ошибки, отсутствующие данные, деградации НЕДОПУСТИМЫ».
+Сверено с :meth:`start` 2026-07-31.
 """
 from __future__ import annotations
 
