@@ -5,6 +5,12 @@
 > обращений `row[...]` больше нет. 6 из 38 путей в тексте указывают на файлы, снесённые
 > тем же переходом (`domain/settings.py`, `features/frame.py`, `market/live_price.py`,
 > `scanner/{fetch,universe}.py`) — это карта ДО переезда, читать как историю.
+>
+> ⚠ **2026-07-31: раздел «NATIVE-REWRITE BLUEPRINT — MANIPULATIONS module» (с `:461`)
+> описывает УДАЛЁННЫЙ код.** Модуль `hunt_core/scanner/` и `deliver/manipulation_delivery.py`
+> вырезаны целиком; все пути в том разделе битые. Текст оставлен как есть — ADR фиксирует
+> принятое тогда решение, и переписывать его задним числом значит терять запись. Читать
+> только как историю, не как карту дерева.
 
 Architecture LAW (memory engine-native-modules-from-scratch): engine stays NATIVE on documented libs;
 modules rebuilt FROM SCRATCH on the engine's native contract (NOT the deprecated engine_adapters/).

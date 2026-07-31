@@ -7,16 +7,19 @@
 `= "in_entry_zone"` ровно дважды, `test_indicator_reference_values` пинил `adx[0] == 0.0`
 как «never null»), а контаминация леджера на 3423 строки БЫЛА ВЫЗВАНА тестами.
 
-Но две проверки живой прогон не делает по построению — они про ГРАФ ИМПОРТОВ, а не про
-поведение. Их сюда и перенесли:
+Но одну проверку живой прогон не делает по построению — она про ГРАФ ИМПОРТОВ, а не про
+поведение. Её сюда и перенесли:
 
-1. **Граница модулей.** Ни один `research/backtest_*.py` не имеет права импортировать
-   `hunt_core.prizrak`: бэктест покрывает ТОЛЬКО манипуляции, и прогон после правки призрака
-   вернёт то же число — это отсутствие измерения, выданное за «регрессий нет». И два модуля
-   не имеют права импортировать друг друга.
-2. **Достижимость.** Каждый модуль `hunt_core/` обязан быть достижим по относительным
-   импортам от точки входа. Недостижимый модуль неотличим от мёртвого кода, а покрытие и
-   vulture его не ловят (замер 2026-07-26: 1913 строк, не исполнявшихся ни разу).
+**Достижимость.** Каждый модуль `hunt_core/` обязан быть достижим по относительным
+импортам от точки входа. Недостижимый модуль неотличим от мёртвого кода, а покрытие и
+vulture его не ловят (замер 2026-07-26: 1913 строк, не исполнявшихся ни разу).
+
+⚠ Проверка «граница модулей» снята 2026-07-31 вместе с модулем МАНИПУЛЯЦИИ. Она следила,
+что `research/backtest_*.py` не тянет призрака и что два модуля не импортируют друг друга;
+модуль остался ОДИН, границы больше нет, и проверка выродилась в тавтологию. Гейт, которому
+нечего запрещать, не гейт — он лишь создаёт видимость контроля. Сама достижимость свою
+работу сделала при вырезе: поймала `data/baseline_store.py`, ставший писателем без читателей
+(единственным читателем был `scanner/detect/expansion_readiness.py`).
 
 Запуск:
     uv run python scripts/check_structure.py
@@ -29,10 +32,7 @@ import pathlib
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-RESEARCH = ROOT / "research"
 CORE = ROOT / "hunt_core"
-# Подстроки, означающие «файл дотягивается до пути детекта/доставки манипуляций».
-_MANIP_MARKERS = ("advance_manipulation_scales", "manipulation_delivery")
 _ENTRYPOINTS = ("_cli.py", "__main__.py")
 
 
@@ -58,25 +58,6 @@ def _imports(path: pathlib.Path) -> set[str]:
             for alias in node.names:
                 out.add(f"{base}.{alias.name}" if base else alias.name)
     return out
-
-
-def check_module_boundary() -> list[str]:
-    """Бэктест не трогает призрака; модули не импортируют друг друга."""
-    bad: list[str] = []
-    backtests = sorted(RESEARCH.glob("backtest_*.py"))
-    if not backtests:
-        bad.append("research/backtest_*.py не найдено — граница проверяется вхолостую")
-    for path in backtests:
-        src = path.read_text(encoding="utf-8")
-        if "hunt_core.prizrak" in src:
-            bad.append(f"{path.name}: импортирует hunt_core.prizrak — бэктест покрывает ТОЛЬКО манипуляции")
-        if not any(m in src for m in _MANIP_MARKERS):
-            bad.append(f"{path.name}: не дотягивается до пути манипуляций ({_MANIP_MARKERS})")
-    for mod, foreign in (("prizrak", "hunt_core.scanner"), ("scanner", "hunt_core.prizrak")):
-        for path in (CORE / mod).rglob("*.py"):
-            if foreign in path.read_text(encoding="utf-8"):
-                bad.append(f"{path.relative_to(ROOT)}: импортирует {foreign} — модули независимы")
-    return bad
 
 
 def check_reachability() -> list[str]:
@@ -118,17 +99,13 @@ def check_reachability() -> list[str]:
 
 
 def main() -> int:
-    problems = check_module_boundary()
     reach = check_reachability()
-    print(f"граница модулей: {'OK' if not problems else f'{len(problems)} нарушений'}")
-    for p in problems:
-        print(f"  ✗ {p}")
-    print(f"достижимость:    {'OK' if not reach else f'{len(reach)} недостижимых'}")
+    print(f"достижимость: {'OK' if not reach else f'{len(reach)} недостижимых'}")
     for r in reach[:20]:
         print(f"  ✗ {r}")
     if len(reach) > 20:
         print(f"  … ещё {len(reach) - 20}")
-    return 1 if (problems or reach) else 0
+    return 1 if reach else 0
 
 
 if __name__ == "__main__":

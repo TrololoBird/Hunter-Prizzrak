@@ -11,34 +11,36 @@ Guidance for Claude Code (claude.ai/code) working in this repository.
 Crypto-futures **signal-analytics**. Reads public Binance USDⓈ-M via CCXT, Polars feature engine.
 **NOT a trading bot.** No orders, no balances, no private API keys.
 
-## Два модуля — НЕ ПУТАТЬ (читать до любой правки логики)
-Здесь живут ДВЕ независимые стратегии. Общего у них — только водопровод данных
-(`engine/`, `view/`, `features/`). **Не переносить между ними геометрию, ТФ, фильтры, гейты,
-пороги и источники истины.** Первый вопрос перед правкой: *в каком я модуле?*
+## Один модуль — ПРИЗРАК (модуль МАНИПУЛЯЦИИ вырезан 2026-07-31)
+Здесь живёт ОДНА стратегия — метод PrizrakTrade.
 
-| | **ПРИЗРАК** | **МАНИПУЛЯЦИИ** |
-|---|---|---|
-| Код | `hunt_core/prizrak/` (+ `prizrak/engines/`, `prizrak/pipeline/`) → `runtime/analyst_assembly.py`, `deliver/_sections.py`, `prizrak/format_post.py` | `hunt_core/scanner/` (`detect/patterns.py::advance_manipulation_scales`) → `deliver/manipulation_delivery.py` |
-| Истина | PDF «Мини Курс по трейдингу от PrizrakTrade» (69 стр.) — первичен; `research/prizrak_corpus/` разборы вторичны, до перепроверки не переопределяют PDF | `.txt` транскрипты + `research/manipulations_corpus/` |
-| Игра | уровни/накопление/ПОК, непрерывно, RR 1к3 | редкий ММ памп/дамп 20–180%, ~5–6/мес |
-| Стоп | за структуру с запасом 1–3% (стр.33) | ШИРОКИЙ: за экстремум ВСЕЙ манипуляции + 0.3×ATR clamp [3%,5%]; добор/пересиживание ⚠️ **см. ниже — не решено** (`patterns.py`, `manipulation_delivery.py::_stop_buffer`) |
-| Гейт эмиссии | **бэктеста НЕТ** — мерить на живых данных | `research/backtest_*.py` (скилл `/backtest-gate`) |
+| | **ПРИЗРАК** |
+|---|---|
+| Код | `hunt_core/prizrak/` (+ `prizrak/engines/`, `prizrak/pipeline/`) → `runtime/analyst_assembly.py`, `deliver/_sections.py`, `prizrak/format_post.py` |
+| Истина | PDF «Мини Курс по трейдингу от PrizrakTrade» (69 стр.) — первичен; `research/prizrak_corpus/` разборы вторичны, до перепроверки не переопределяют PDF |
+| Игра | уровни/накопление/ПОК, непрерывно, RR 1к3 |
+| Стоп | за структуру с запасом 1–3% (стр.33) |
+| Гейт эмиссии | **бэктеста НЕТ** — мерить на живых данных |
 
-⚠️ **«Добор/пересиживание» — НЕ установленный факт, а одно из двух прочтений.** Транскрипты
-(слова автора) описывают широкий стоп с добором и пересиживанием. Заземлённые разборы в
-`research/manipulations_corpus/` на тех же монетах утверждают обратное: «LONG-edge существует
-ТОЛЬКО на памп-ноге с жёстким выходом; удержание = −65…−96%» и «пересиживание первого импульса
-= смертельно». **Но это не измерение, а вывод при допущении «стоп за импульсным максимумом,
-добора нет»** — допущение вводит сам разбор. Измерен там только путь цены, и он совместим с
-обоими прочтениями: у JCT цель **была взята** (0.00324 touched), но путь прошёл через **+52.7%
-против позиции**. Под узким стопом это стоп-аут, под широким с добором — переживаемо.
-Что решит: прогнать обе риск-модели по одним событиям и сравнить исход. Пока не сделано —
-не цитировать ни одну сторону как установленную. (зафиксировано 2026-07-26)
+**Что удалено 2026-07-31 (решение владельца).** `hunt_core/scanner/` (детект памп/дампов,
+воронка вселенной `prescan`), `deliver/manipulation_delivery.py`, все `research/backtest_*.py`
+и `research/discovery/`, `research/manipulations_corpus/`, скиллы `/backtest-gate` и
+`/ingest-manipulation-video`, правило `.claude/rules/manipulations.md`, методология
+`docs/MANIPULATION_METHODOLOGY*.md`, секция конфига `[hunter]`. **Не воскрешать** — как и
+`.cursor/rules/` с `copilot-instructions.md` до них.
 
-**Бэктест покрывает ТОЛЬКО манипуляции.** Все 6 `research/backtest_*.py` импортируют
-`advance_manipulation_scales`; `hunt_core/prizrak/` не импортирует **ни один**. Прогон после
-правки призрака вернёт то же число — это не «регрессий нет», это **отсутствие измерения**.
-Граница закреплена `scripts/check_structure.py`.
+⚠️ **Два имени пережили вырез, и оба НЕ принадлежат сканеру** — проверено по графу импортов,
+а не по названию:
+- `toolkit/manipulation_fusion.py` + `_native.py` — это ФАКТОР карточки призрака
+  (`runtime/native_assembly.py::assemble_native_analyst`, `toolkit/forecast.py`). Сканер его
+  не импортировал никогда.
+- `deliver/digest.py::AdvisoryDigest` — per-tick пакет главного тика. Рядом в том же файле жил
+  плановый pump/dump-дайджест (`DigestScheduler`), и вот он снят.
+
+Заодно вырез вскрыл мёртвое, которое держалось только на сканере: `data/baseline_store.py`
+(единственный читатель — `scanner/detect/expansion_readiness.py`), `params/store.py::
+hunter_thresholds` и `prescan_thresholds`, два prescan-аудита в `diagnostics/universe_audit.py`.
+Все они проходили vulture, потому что лежали в `__all__`, — проверять надо ДОСТИЖИМОСТЬ.
 
 ## Архитектура: `watch` — это независимые полосы, а не один конвейер
 Главное, чего не видно ни из одного файла: **главный тик НЕ шлёт новые сигналы.** Он собирает
@@ -47,8 +49,6 @@ Crypto-futures **signal-analytics**. Reads public Binance USDⓈ-M via CCXT, Pol
 ```
 _cli.py::main  (watch; pid-lock data/watch.pid)
   → runtime/cycle/_cycle_loop.py::run_loop                          ← оркестратор
-      ├─ manipulation_task   _manipulation_scan_loop, 300s → deliver_manipulation_setups
-      │                                                  [МАНИПУЛЯЦИИ: детект+доставка в одном вызове]
       ├─ deep_task           analyst_assembly.py::analyst_pinned_loop        [ПРИЗРАК]
       │                        HUNT_DEEP_PINNED_INTERVAL, default 300s, пол 30s
       ├─ tg_task             runtime/telegram_commands.py  (/signal)
@@ -58,7 +58,6 @@ _cli.py::main  (watch; pid-lock data/watch.pid)
       │                        (перевзводится на heartbeat.beat(); rate-limit sleep ЭТО прогресс)
       └─ MAIN TICK  `while not should_stop()` каждые --interval (default 30)
             ├─ refresh_market_regime          REGIME_REFRESH_S = 4h   (regime/market_regime.py)
-            ├─ prescan                        SCAN_INTERVAL_S = 900   (domain/config.py)
             ├─ tick-rotate                    TICK_ROTATE_INTERVAL_S = 600
             └─ _cycle_tick.py::run_tick
                   warm-set = rt.multi.primary.tracked_symbols()   ← ТОЛЬКО прогретые движком
@@ -85,16 +84,11 @@ _cli.py::main  (watch; pid-lock data/watch.pid)
 Анти-спам — одноразовые флаги + матч зон по близости якоря (карта пересчитывается каждый тик и
 дрожит; ключ по координатам плодил бы «новую» зону каждые 60s).
 
-**Где сходятся две стратегии:** нигде до эмиссии. Отдельные таймеры, отдельные фетчи
-(сканер читает свои кадры через `scanner/feed.py::EngineScannerFeed` поверх движка, мимо warm-set
-главного тика), отдельные форматтеры, отдельные гейты. Общего ровно два —
-**`track/tracker.py::register_signal_open`** (общий `paths.SIGNAL_STATE`) и общий
-`TelegramBroadcaster` (общий dedup + rate-limit). **Общей строки-словаря нет.**
-
-⚠️ `hunt_core/signals/` — **не** общий позвоночник, вопреки прежнему докстрингу: `lifecycle`
-читает `row["prizrak_summary"]`, оба вызова из `runtime/emitter.py` захардкожены `module=1`,
-а `module=2` молча подавил бы строку сканера. Скаффолдинг, а не абстракция; диагноз записан в
-его собственном `signals/__init__.py`.
+⚠️ `hunt_core/signals/` — **не** позвоночник, вопреки прежнему докстрингу: `lifecycle`
+читает `row["prizrak_summary"]`, оба вызова из `runtime/emitter.py` захардкожены `module=1`.
+Скаффолдинг, а не абстракция; диагноз записан в его собственном `signals/__init__.py`.
+После выреза второго модуля жёсткий `module=1` перестал быть дефектом — но и абстракцией
+`signals/` от этого не стал.
 
 ## Ответственность каталогов (сверено 2026-07-26)
 - **`engine/`** — ccxt.pro плоскость данных: REST+WS, мульти-венью, вес/лимиты, свежесть,
@@ -129,8 +123,7 @@ _cli.py::main  (watch; pid-lock data/watch.pid)
 - **`levels/`** — ⚠ **не геометрия сетапов**, вопреки прежнему описанию: после чистки
   2026-07-26 здесь 92 строки — только пол дистанции стопа (`long_min_sl_dist_pct` /
   `short_min_sl_dist_pct`) для единственного потребителя `confluence/mtf.py`.
-  **Геометрию сетапов считает `prizrak/` (`setups.py`, `grid.py`), полосу манипуляций —
-  `scanner/detect/patterns.py`.**
+  **Геометрию сетапов считает `prizrak/` (`setups.py`, `grid.py`).**
 - **`toolkit/`** — stateless-хелперы (с 2026-07-26 проверяется mypy, blanket-override снят)
 - **`domain/`** — настройки и схемы (`config.py` — интервалы) · **`params/store.py`** — калибровка
   гейтов + пер-символьные оверрайды · **`regime/market_regime.py`** — кросс-секционный режим рынка
@@ -156,8 +149,8 @@ _cli.py::main  (watch; pid-lock data/watch.pid)
 Стандартное для стека (`uv sync`, `ruff check`, `mypy`) — из `pyproject.toml`.
 ⚠ **`pytest` здесь БОЛЬШЕ НЕТ** — каталог `tests/` удалён 2026-07-27, см. «Проверка».
 ```bash
-uv run python -m hunt_core watch --once --no-telegram   # smoke — см. ⚠️ ниже, сканер НЕ проверяет
-uv run python scripts/check_structure.py                # граница модулей + достижимость
+uv run python -m hunt_core watch --once --no-telegram   # smoke — теперь полный (модуль один)
+uv run python scripts/check_structure.py                # достижимость каждого модуля
 uv run python -m hunt_core.engine BTC/USDT:USDT         # вторая точка входа — см. ниже
 ```
 `python -m hunt_core.engine` — **вторая точка входа**, отдельная от `watch`. Отвечает на вопрос,
@@ -209,7 +202,6 @@ uv run python -m hunt_core.engine BTC/USDT:USDT         # вторая точк�
 - `scripts/verify_signal_geometry.py` — геометрия ЭМИССИИ (R:R пересчитывается независимо)
 - `scripts/verify_liq_map.py` — карта ликвидаций против эталона Coinglass
 - `scripts/verify_zone_handoff.py` — передача зоны из zone_watch в трекер
-- `scripts/verify_scanner_vs_channel.py` — сканер против постов автора
 - `scripts/score_vs_razbor.py` — recall против уровней автора из `research/prizrak_corpus/`
 
 Тест допустим ТОЛЬКО как фиксация дефекта, **измеренного на живых данных**, и обязан гонять код
@@ -217,22 +209,21 @@ uv run python -m hunt_core.engine BTC/USDT:USDT         # вторая точк�
 константами (был `tests/test_maps_liq_window.py`, удалён), зелёный всегда и слеп ровно к тому,
 ради чего написан.
 
-## `.claude/rules/` — граница модулей как механика загрузки, а не проза
-Правило «не путать ПРИЗРАК и МАНИПУЛЯЦИИ» матчится на оба модуля (словарь общий), поэтому знание
-о границе перенесено в правила **с привязкой к путям** — они грузятся только когда правишь
-соответствующие файлы, а не в каждой сессии:
+## `.claude/rules/` — знание с привязкой к путям, а не проза
+Правила грузятся только когда правишь соответствующие файлы, а не в каждой сессии:
 `prizrak.md` (`hunt_core/prizrak/**`, `runtime/analyst_assembly.py`, `deliver/_sections.py`) ·
-`manipulations.md` (`hunt_core/scanner/**`, `deliver/manipulation_delivery.py`,
-`research/backtest_*.py`) · `engine-data-plane.md` (`engine/**`, `view/**`, `diagnostics/**`).
+`engine-data-plane.md` (`engine/**`, `view/**`, `diagnostics/**`).
 Правила без `paths` грузились бы всегда — это не то, что нужно; проверяй frontmatter при правке.
+`manipulations.md` удалён 2026-07-31 вместе с модулем.
 
-## Agent instruction files — только два
-`CLAUDE.md` (Claude Code) и `AGENTS.md` (opencode). Больше на этом репозитории никто не работает.
-Оба ссылаются на канон `docs/ai/rules/prohibited-apis.md`, а не дублируют его.
+## Agent instruction file — только один
+`CLAUDE.md`. Он ссылается на канон `docs/ai/rules/prohibited-apis.md`, а не дублирует его.
 
-Удалено 2026-07-17: `.cursor/rules/` и `.github/copilot-instructions.md` + гард дрейфа, который
-держал copilot-копию бан-листа в синхроне. Copilot не ходит по ссылкам — поэтому ему нужен был
-инлайн-дубль, и этот дубль надо было сопровождать. Читателя у него не было. **Не воскрешать.**
+Удалено 2026-07-31: `AGENTS.md`. Он обслуживал opencode, которым здесь больше не работают, а
+Claude Code его не читает вообще — то есть файл сопровождался без единого читателя. Прецедент
+тот же, что 2026-07-17, когда ушли `.cursor/rules/` и `.github/copilot-instructions.md` с гардом
+дрейфа: инлайн-дубль бан-листа нужно было держать в синхроне, а читателя у него не было.
+**Не воскрешать ни то, ни другое.**
 
 ## Config
 `config.defaults.toml` = truth; `config.toml` overlays. Trap: some documented keys are
@@ -265,8 +256,8 @@ I-1..I-6 живут в [`docs/HUNTER_TARGET_SPEC.md`](docs/HUNTER_TARGET_SPEC.md
   Три вывода, которые дороже списка:
   1. **Шкала может врать так же, как ключ.** `_MAX_PREDUMP` делил на 6 при потолке 4 — два фактора
      (`sweep_reclaim`, `leg_gain`) читали ключи без продюсера, и `score_predump` физически не мог
-     превысить 66.7. Знаменатель исправлен на 4.0: это **меняет числа**, пороги полосы манипуляций
-     поверх новой шкалы надо перемерить, а не переносить.
+     превысить 66.7. Знаменатель исправлен на 4.0: это **меняет числа**, и `manipulation_fusion`
+     остался фактором карточки призрака — пороги поверх новой шкалы надо перемерить, а не переносить.
   2. **Сирота бывает и в конфиге, с обеих сторон.** Свип `[tracker]` нашёл 4 ФАНТОМНЫЕ РУЧКИ (код
      читает `tr.get("atr_trail_risk_fraction", …)` — записать негде, всегда побеждает инлайн-дефолт)
      и 2 ключа БЕЗ ЧИТАТЕЛЯ. Проверялось `tests/test_config_keys_wired.py` (удалён вместе с каталогом) — теперь только замером.
@@ -339,8 +330,15 @@ pre-commit (`.pre-commit-config.yaml`) — ровно три хука: ruff `--f
 conf 80) · `scripts/check_prohibited_apis.py` (приватные CCXT-вызовы). Гарда copilot-дрейфа
 **больше нет** — он снят вместе с самим файлом 2026-07-17, скрипт об этом пишет прямо в докстринге.
 CI (`.github/workflows/ci.yml`) добавляет к этому mypy, `pip-audit` (CVE в зависимостях) и
-`scripts/check_structure.py` — граница призрак↔манипуляции плюс достижимость каждого модуля
-от точки входа.
+`scripts/check_structure.py` — достижимость каждого модуля от точки входа. Проверка границы
+призрак↔манипуляции снята 2026-07-31: модуль остался один, запрещать нечего.
+
+⚠ **Гейты не поймали удаление живого модуля.** При вырезе `deliver/digest.py` был снесён целиком,
+хотя главный тик импортирует из него `get_advisory_digest`. ruff, mypy, vulture и
+`check_structure` прошли ЗЕЛЁНЫМИ — mypy молчал из-за `ignore_missing_imports = true`
+(`pyproject.toml`), остальные такое не ловят по построению. Поймал только живой прогон
+`watch --once`, упав на `ModuleNotFoundError`. Это и есть цена директивы «проверять на живых
+данных» в одном факте: зелёный набор гейтов здесь не доказывает, что бот стартует.
 
 ## ⚠️ Тестов НЕТ — проверка только на живых данных (решение владельца, 2026-07-27)
 Каталог `tests/` (158 файлов) удалён целиком, `pytest` убран из CI и зависимостей. Основание —
@@ -405,8 +403,9 @@ TOML edit "doesn't take effect").
 критически. Ещё 11 каталогов здесь были битыми симлинками на снесённый `.opencode/` и удалены:
 скилл, который не загружается, неотличим от скилла, которого нет.
 
-Перед коммитом в hunt_core: `/phantom-key-scan`; правки эмиссии сканера: `/backtest-gate`;
+Перед коммитом в hunt_core: `/phantom-key-scan`;
 **после любого прогона `watch` и любой правки цены/кадров/уровней/свежести — `/live-verify`.**
+Скиллы `/backtest-gate` и `/ingest-manipulation-video` удалены 2026-07-31 вместе с модулем.
 CCXT Python — `~/.claude/skills/ccxt-python/SKILL.md`.
 
 ### `/live-verify` — независимый оракул (добавлен 2026-07-26)
@@ -427,4 +426,8 @@ CCXT Python — `~/.claude/skills/ccxt-python/SKILL.md`.
 ⚠ Часть MCP-серверов (github, linear, notion, slack, datadog, honeycomb, …) требует OAuth и в
 неинтерактивной сессии не поднимается — авторизовать их можно только из интерактивного `claude`.
 
-Full project context in `AGENTS.md` (последняя правка 2026-07-12 — тоже проверять).
+## Windows
+Проект писался на macOS, и это оставило дефекты, видимые только здесь. Исправлены 2026-07-31:
+хуки `.claude/settings.json` смотрели в `.venv/bin/python` (на Windows — `.venv/Scripts/`),
+`hook_ruff_fix.sh` — в `.venv/bin/ruff`, а `runtime/logging.py` требовал `colorama` и ронял
+`watch` ещё на импорте. Раскладка venv различается по платформам — не хардкодить `bin/`.

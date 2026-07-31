@@ -42,9 +42,6 @@ UNIVERSAL_DEFAULTS: dict[str, Any] = {
         "forming_min_score": 45.0,
         "min_risk_reward": 1.15,
     },
-    "hunter": {
-        "pump_extreme_pct": 15.0,
-    },
     "tracker": {
         "tp1_partial_fix_pct_normal": 50.0,
         "tp1_partial_fix_pct_hot": 80.0,
@@ -295,52 +292,6 @@ def basis_thresholds(symbol: str = "") -> dict[str, float]:
         if isinstance(v, (int, float)):
             out[k] = float(v)
     return out
-
-
-def hunter_thresholds() -> dict[str, float | int]:
-    """Unified [scanner] config — single source with config.defaults.toml."""
-    sc = universal_section("hunter")
-    return {
-        "min_quote_volume_usd": float(sc.get("min_quote_volume_usd", 10_000_000)),
-        "min_open_interest_usd": float(sc.get("min_open_interest_usd", 500_000)),
-        "min_listing_age_days": int(sc.get("min_listing_age_days", 7)),
-        "max_recent_volatility_pct": float(sc.get("max_recent_volatility_pct", 80.0)),
-        "min_change_pct_for_hot": float(sc.get("min_change_pct_for_hot", 3.0)),
-        "max_hot_coins": int(sc.get("max_hot_coins", 10)),
-        "pump_extreme_pct": float(sc.get("pump_extreme_pct", 15.0)),
-        "range_hot_pct": float(sc.get("range_hot_pct", 8.0)),
-        "pos_near_high": float(sc.get("pos_near_high", 0.85)),
-        "pos_near_low": float(sc.get("pos_near_low", 0.25)),
-        "score_watch": float(sc.get("score_watch", 45.0)),
-        "score_priority": float(sc.get("score_priority", 60.0)),
-        "scan_interval_s": int(sc.get("scan_interval_s", 900)),
-        # 30 → 50: widen the scan funnel so more volume-passing candidates reach the
-        # structural manipulation detector. The whole [hunter] section is now forwarded
-        # under key "hunter" (domain/config.py), so this — like every key here — reads
-        # the TOML value; the literal is the fallback if the section is absent.
-        "watchlist_limit": int(sc.get("watchlist_limit", 50)),
-    }
-
-
-def prescan_thresholds() -> dict[str, float | int]:
-    """Lite prescan cadence (D1) — debounce 60–120s, merge into Full-tier slots.
-
-    NOTE: the "watch" section is NOT forwarded from config.defaults.toml
-    (domain/config.py::load_config_defaults_toml has no [watch] branch), so the
-    inline fallbacks below are the effective values; the TOML [watch.prescan]
-    block is doc-only. Not wired deliberately — these thresholds gate which
-    prescan outliers merge into Full-tier slots (signal-emission path), so any
-    wiring must go through the backtest gate.
-    """
-    ps = universal_section("watch").get("prescan")
-    ps = ps if isinstance(ps, dict) else {}
-    debounce = float(ps.get("debounce_s", 90))
-    debounce = max(60.0, min(120.0, debounce))
-    return {
-        "debounce_s": debounce,
-        "merge_cap": int(ps.get("merge_cap", 12)),
-        "max_change_pct_for_merge": float(ps.get("max_change_pct_for_merge", 8.0)),
-    }
 
 
 def orderflow_use_nq(symbol: str = "") -> bool:

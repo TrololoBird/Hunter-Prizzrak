@@ -1,15 +1,14 @@
 # ARCHITECTURE — design & rationale
 
-> **Статус: §2 АКТУАЛЬНО · §1/3/4/5/6 переписаны 2026-07-26 по дереву.**
-> Прежняя редакция (2026-07-16) описывала снесённый транспорт: `market/` как CCXT-клиент,
+> **Статус: §2 переписан 2026-07-31 (вырез модуля МАНИПУЛЯЦИИ) · §1/3/4/5/6 — 2026-07-26.**
+> Редакция 2026-07-16 описывала снесённый транспорт: `market/` как CCXT-клиент,
 > `signals/` как общий позвоночник, `data/frame_cache.py` как контракт устойчивости — всё
-> это умерло 2026-07-19 в `5ba0fea`. **§2 (две стратегии) не трогалось: оно выведено из
-> файлов пользователя, а не из кода, и остаётся верным.**
+> это умерло 2026-07-19 в `5ba0fea`.
 > Для вопросов «как устроен рантайм СЕГОДНЯ» первичен код и `CLAUDE.md`, не этот файл.
 
-This document states **what the system is**, **the two strategies it runs and how they
-differ**, **the module boundaries**, **the operational resilience contract**, and **how a
-change is proven good**. Read it before restructuring anything.
+This document states **what the system is**, **the strategy it runs**, **the module
+boundaries**, **the operational resilience contract**, and **how a change is proven good**.
+Read it before restructuring anything.
 
 ---
 
@@ -19,88 +18,41 @@ A standalone crypto-futures **signal-analytics** product. Reads public Binance U
 market data via CCXT (ccxt.pro), engineers features with Polars, and delivers **manual**
 signals to Telegram. No auto-trading, no private auth.
 
-Two independent strategies share only the **data plane** (`engine/` → `view/` → `features/`)
-and the **post-emission lane** (`track/`), and never cross-import. They do **not** share a
-signal spine: `signals/` is scaffolding (`module=2` is unreachable — see its own
-`__init__.py`), and there is no shared row-dict since the ADR-0004 rewrite.
+One strategy (§2) runs on top of the **data plane** (`engine/` → `view/` → `features/`) and
+the **post-emission lane** (`track/`). `signals/` is scaffolding, not a spine — see its own
+`__init__.py`; there is no shared row-dict since the ADR-0004 rewrite.
 
-## 2. The two strategies — DO NOT CONFUSE THEM
+## 2. The strategy — PRIZRAK
 
-The single most important design invariant, and the difference is **fundamental and
-philosophical — not merely a stop parameter**. They come from **different source documents**
-(the user's files are the source of truth, over code comments and over SPEC docs) and are
-**two different games with different edges, frequencies, psychologies and asset universes**.
-Imposing one's logic on the other (frequency, stop, entry, target) is a recurring, expensive
-mistake — and is currently *why the scanner mis-fires* (§5).
+Since 2026-07-31 the project runs **one** strategy: the PrizrakTrade method
+(`hunt_core/prizrak/`). Levels, накопление, ПОК/ПП, ловушки, стоповый объём, МТФ-structure;
+continuous play on pinned majors and on-demand `/signal SYM`; stop **за структуру с запасом
+1–3%** (стр. 33 of the course PDF); RR 1к3.
 
-### 2.1 The essential difference
+**Source of truth:** the PDF «Мини Курс по трейдингу от PrizrakTrade» (69 pp.) is primary;
+the grounded разборы in `research/prizrak_corpus/` are secondary and do not override the PDF
+until re-verified. The user's files outrank code comments and SPEC docs.
 
-- **PRIZRAK is a complete, systematic METHODOLOGY for reading any instrument via
-  structure.** The PDF is a full curriculum (словарь → таймфрейм → накопление → уровни
-  BUY/SELL ПОК → стоповый объём → ловушки → ПП → фигуры → индикаторы). The edge is
-  **mechanical**: institutional накопления leave ПОК levels that price *respects*, so you
-  trade level→level with confluence and defined risk. It is **reactive, continuous,
-  high-frequency, RR-first** (золотой стандарт 1к3), works on BTC/majors/any liquid coin,
-  every day, modest per-trade targets. "How to trade in general."
+**Emission gate:** there is **no backtest** — measure on live data
+(`scripts/verify_*.py`, `scripts/score_vs_razbor.py`, and a `watch` run with log review).
 
-- **МАНИПУЛЯЦИИ is a rare, opportunistic PLAY for one narrow class of engineered events.**
-  Not "how to trade" — how to catch a market-maker's pump/dump of **20–40%+ (крупные до
-  60–180%)**. The trader is explicit: *«Никакая стратегия вам такую доходность никогда не
-  покажет. Только манипуляции»* and *«штук пять-шесть в месяц»*. The edge is
-  **behavioural/liquidity**: a крупный игрок *engineers* the move — выносит всех, снимает
-  ликвидность, ликвидирует толпу, фиксирует позиции — in a *repeatable, anticipatable* way.
-  You read **intent**, take the **opposite side of the liquidated crowd**, and therefore
-  accept being briefly in the red (**пересиживание**) with a wide stop + **добор/усреднение**.
-  **It is FAST, not среднесрок: «от пары часов до 2-3 дней».** The whole 20–40%+ move plays
-  out inside a few days — you sit through the dip, average in, then it runs.
-  **Trade mechanics (from the transcript):** first take-profit at a **+20% price move** →
-  there you bank a partial and **move the stop to entry (breakeven), NOT to TP1** → the
-  runner rides on to the deep 40%+ pool. "How to catch one specific, huge, engineered move."
+### 2.1 What was removed, and why this section shrank
 
-### 2.2 Full contrast
+The MANIPULATION strategy (`hunt_core/scanner/` — engineered pump/dumps of 20–180%, ~5–6 per
+month, WIDE stop) was cut on the owner's decision. With it went the universe funnel
+(`prescan`), `deliver/manipulation_delivery.py`, all `research/backtest_*.py`, the
+manipulation corpus, and the `[hunter]` config section. **Do not resurrect.**
 
-| dimension | **PRIZRAK** (Deep, `prizrak/`) | **МАНИПУЛЯЦИИ** (Scanner, `scanner/`) |
-|---|---|---|
-| Source of truth | PDF «Мини Курс от PrizrakTrade» | the two transcript `.txt` files |
-| Nature | complete systematic methodology | one narrow opportunistic play |
-| Edge | mechanical — price respects ПОК levels | behavioural — MM engineers a repeatable манипуляция |
-| Stance | **reactive** to a level/structure | **predictive** of where the MM drives price |
-| Crowd relation | trades *with* structure | trades *against* the trapped/liquidated crowd |
-| **Frequency** | **high / continuous**, any liquid coin | **trader hand-picks ~5–6/mo on watched coins**; across 600+ coins the detector fires often — selective PER SYMBOL, not globally rare |
-| Selectivity | every valid level is tradeable | only specific formations qualify (§2.3) |
-| Asset universe | BTC/majors + any liquid perp | specific profiles: заскамленные one-candle dumps, coins в нисходящем канале обновляющие минимумы |
-| **Stop** | **за структуру с запасом 1–3%** (стр.33) — behind накопление/тень-свечи/стоповый | **WIDE**, за экстремум манипуляции с запасом |
-| Drawdown | exit to БУ if wrong (defined risk) | **пересиживание** — expect & hold brief red on purpose, average in |
-| Money mgmt | 50% at TP → БУ → добор at levels | **добор/усреднение** in the dip → bank 50% at **+20% move** → stop to **entry (BE)** → runner to deep pool |
-| **Target** | next structural level, **RR 1к3** | the **whole move: 20–40%+ (крупные до 60–180%)** |
-| Horizon | intraday → swing | **FAST: «от пары часов до 2-3 дней»**, ride the whole pump/dump |
-| Runs in | analyst path (`assemble_analyst_tick`): pinned + `/signal` | fast `watch` tick + `_manipulation_scan_loop`, non-pinned universe |
+This section used to be the document's longest and was labelled "the single most important
+design invariant" — the two strategies had different edges, frequencies, psychologies and
+asset universes, and imposing one's logic on the other was the recurring expensive mistake.
+That class of mistake is now structurally impossible: there is nothing to confuse it with.
 
-### 2.3 The only formations манипуляции trades (from the transcripts)
-
-Longs (`2026-07-02*.txt`): **(1)** aggressive pump поглощён одной свечой → боковик → deep
-long у низа / on слом нисходящей; **(2)** восходящий канал → манипуляция вниз → нисходящий
-канал → боковик → **закреп выше предыдущего максимума** (needs бычьи объёмы, else «цена
-может пойти дальше вниз»); **(3)** длинный нисходящий канал обновляющий минимумы →
-накопление ликвидности → long. Short (`IMG_2700*.txt`, GTC): восходящий канал → wait for the
-**финальный** свип максимумов **когда выше уже нет ликвидности** → частичный шорт → LTF
-подтверждение разворота → ride the dump. Everything else is NOT a manipulation setup.
-
-**Architectural consequence:** the scanner must be **selective PER SYMBOL** — only the
-clean engineered formations of §2.3 qualify, not every zone like Prizrak. But "~5–6 per
-month" is the trader's PERSONAL take-cadence on the handful of coins THEY watch, NOT a
-universe detection rate: across the 600+ coins we sweep, engineered pump/dumps happen
-every day, several times over — something is always being manipulated somewhere. So the
-detector legitimately fires often; the gate is the QUALITY of each individual setup
-(clean formation, sweep depth, pump magnitude), NEVER a cap on signals-per-month. §6
-already removed an earlier global-frequency "selectivity gate" for exactly this reason —
-it was the wrong lever. See §5.
-
-**⚠ The word «манипуляция» is overloaded — do not conflate:** (1) the **STRATEGY** here =
-an engineered pump/dump of **20+%, reaching 60–180%** (`scanner/`, the `.txt` transcripts);
-(2) a generic word Prizrak sometimes drops in a level разбор for a **small local прокол/свип/
-сквиз at a level** — ordinary level-trading vocabulary, NOT this strategy. A small squeeze at
-a level is not the 60–180% play. Keep them separate in code, tests, and docs.
+⚠ **One residue is worth knowing.** The word «манипуляция» stays in the codebase in
+`toolkit/manipulation_fusion.py` — but that is a **factor of the Prizrak card**
+(`runtime/native_assembly.py`), not the deleted module. The scanner never imported it.
+Likewise `deliver/digest.py::AdvisoryDigest` is the per-tick batch of the main tick; only
+the scheduled pump/dump digest that lived beside it was removed.
 
 ## 3. Module map (сверено 2026-07-26)
 
@@ -112,25 +64,22 @@ hunt_core/
               runtime.py (MarketRuntime = MultiEngine + cross-venue)
   prizrak/    Deep engine (PRIZRAK strategy). Decision authority for pinned + /signal.
               build_prizrak_signals() → 0..N candidates (+ engines/, pipeline/).
-  scanner/    Manipulation detector (МАНИПУЛЯЦИИ). detect/patterns.py::
-              advance_manipulation_scales (A/A3/C long, B short), per-symbol state;
-              reads frames via feed.py::EngineScannerFeed on the engine.
   features/   Polars indicators — prepare.py::prepare_symbol, factors.py::build_factor_panel
   maps/       orderbook / liquidations / volume-profile / OI / cross-venue walls
   market/     ⚠ NOT transport anymore — symbols.py (id↔unified), symbol_gate.py,
               tick_registry.py (tick size), network.py (egress + proxy preflight)
-  data/       persistence only — lake.py, tick_jsonl.py, baseline_store.py, universe.py
-  signals/    ⚠ scaffolding, NOT a spine — module=2 unreachable (see signals/__init__.py)
-  deliver/    Telegram formatting + delivery (per-strategy renderers) + broadcaster
+  data/       persistence only — lake.py, tick_jsonl.py, universe.py
+  signals/    ⚠ scaffolding, NOT a spine (see signals/__init__.py)
+  deliver/    Telegram formatting + delivery + broadcaster + delivery_support.py
   diagnostics/ data-plane audits + universe_health (operator signal)
   runtime/    cycle loop, analyst assembly, NATIVE assembly/producers, telegram commands
   track/ domain/ params/ regime/ levels/ toolkit/ confluence/
-research/backtest_scanner.py   faithful ladder-aware manipulation backtest
 ```
 
-Invariant: **Deep and Scanner never import each other** (I-1; pinned by
-`tests/test_module_boundary.py`). There is no shared spine to route logic through —
-if two lanes need the same primitive it goes to `toolkit/` or `levels/`, not `signals/`.
+Invariant I-1 («Deep and Scanner never import each other») сложился 2026-07-31 вместе со
+сканером — запрещать нечего. Что осталось живым из его духа: общий примитив идёт в
+`toolkit/` или `levels/`, но **не** в `signals/`. Проверка границы снята из
+`scripts/check_structure.py`; достижимость модулей от точки входа там осталась.
 
 ## 4. Data-plane resilience contract (added after the 2026-07-11 incident)
 
@@ -181,39 +130,23 @@ Future work (specified, not yet built): proxy **failover** — ротация з
   настоящий код на живом CCXT: `scripts/verify_zone_geometry.py`,
   `verify_signal_geometry.py`, `verify_liq_map.py`, `verify_zone_handoff.py`,
   `score_vs_razbor.py`.
-- **Manipulations**: `research/backtest_scanner.py` — a no-lookahead forward replay that
-  drives the real detector and evaluates it with the **faithful FAST-play** risk model:
-  wide stop, добор/усреднение in the dip, bank 50% at a **fixed +20% move**, stop to
-  **entry (BE)**, runner to the deep 40%+ pool, **short horizon (2–5 days — the play is
-  hours-to-days, NOT weeks)**. A detector change MUST be run through it before/after.
-  `research/audit_horizon.py` cross-checks that the forward window isn't manufacturing
-  timeouts. Current honest status (dataset_v9, 45 symbols, corrected mechanics): **−21R,
-  win=0** — the +20% first-take IS reached (21 scratches) but no runner completes the deep
-  pool, and timeouts (formations that don't move) + wide-stop losses dominate. Splitting
-  the universe does not rescue it (low-cap coins −15R, stocks/majors −6R), so the remaining
-  suspect is **detector fidelity**, not the risk model. NOTE: dataset_v9 is a poor
-  manipulation universe — it is full of tokenized stocks (AMZN/GOOGL/COIN…) and mid-cap
-  majors that do not fit the profile (low-cap, scammed, making new lows); a representative
-  dataset is needed before trusting absolute R.
-- **Always**: `ruff check .` + `mypy hunt_core` + `pytest` + a `watch --once --no-telegram`
-  smoke run before considering a change done. ⚠ **Этот smoke НЕ проверяет сканер**:
-  `--no-telegram` прячет `deliver_manipulation_setups` за флагом отправки, а эта функция
-  делает и детект. Призрак деградирует корректно; манипуляции глохнут целиком.
+- **Always**: `ruff check .` + `mypy hunt_core` + `vulture` + `check_prohibited_apis.py` +
+  `check_structure.py`, и **обязательно** прогон `watch --once --no-telegram`. Оговорка
+  «smoke не проверяет сканер» снята вместе со сканером — теперь этот прогон покрывает всё,
+  что есть.
+  ⚠ **Зелёные гейты не доказывают, что бот стартует.** Замер 2026-07-31: при вырезе модуля
+  был удалён `deliver/digest.py`, из которого главный тик импортирует `get_advisory_digest`;
+  ruff, mypy, vulture и `check_structure` прошли зелёными (mypy молчал из-за
+  `ignore_missing_imports = true`), а поймал только живой прогон — `ModuleNotFoundError`.
+  `pytest` в списке больше нет: каталог `tests/` удалён 2026-07-27.
 
 ## 6. Known debt / next architectural moves
 
-1. **Detector fidelity is the open problem (§2, §5).** With the risk model now corrected
-   (fast horizon, +20% first-take, stop→entry, добор), the scanner is −21R / win=0 on
-   dataset_v9: the +20% take is reached (21 scratches) but no runner completes the deep
-   pool, and non-moving formations (timeouts) + wide-stop losses dominate. This is a
-   DETECTION problem — the patterns are firing on setups that chop or get stopped, not the
-   clean 20–40%+ engineered moves of §2.3 — not a risk-model or "over-firing frequency"
-   problem. (An earlier version of this doc claimed "over-fires 12.4/symbol/month, ~60–100×"
-   and prescribed a selectivity gate; that figure used a wrong ~8-day window — the real
-   cadence is ~2.3/coin/month over the 41-day 1h span — and a magnitude-threshold gate was
-   the wrong lever. Both were removed.) Next: audit A/A3/B/C against the transcript
-   formations (entry timing, the §2.3 sequence) AND test on a REPRESENTATIVE universe —
-   dataset_v9 is full of tokenized stocks/majors that don't fit the manipulation profile.
+1. **Долг «detector fidelity» закрыт вырезом.** Он был первым пунктом этого списка: сканер
+   давал −21R / win=0 на dataset_v9, и открытым вопросом была верность детекта. Модуль
+   удалён 2026-07-31 — задача снята вместе с ним, а не решена. Если стратегию когда-нибудь
+   возвращают, начинать придётся с представительной вселенной: dataset_v9 состоял из
+   токенизированных акций и мажоров, не подходящих под профиль.
 2. **`orchestrator.py` — 2633 строки** (замер 2026-07-26; прежняя редакция писала «~1650»,
    файл вырос на 60% и долг стал БОЛЬШЕ, а не меньше). Генераторы кандидатов
    (`_zone_candidate`, `_forward_*`, `_pp_candidate`, `_trap_flip_candidate`, stop-volume)

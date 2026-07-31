@@ -137,7 +137,6 @@ async def run_tick(
     ticker_by_sym: dict[str, dict[str, Any]] | None = None,
     pump_store: Any | None = None,
     cross_ex_cache: dict[str, dict[str, Any]] | None = None,
-    prescan_outlier_by_sym: dict[str, dict[str, Any]] | None = None,
     symbol_state: SymbolStateStore | None = None,
     feature_lake: FeatureLakeWriter | None = None,
 ) -> list[dict[str, Any]]:
@@ -171,8 +170,8 @@ async def run_tick(
     try:
         # The tick assembles ONLY the engine warm-set (pinned + any on-demand /signal coin). A
         # non-pinned coin is on-demand — warmed just-in-time by the /signal query path, never
-        # continuously WS-streamed (ADR-0004 §1.6 + the "non-pinned = on-demand" model); prescan
-        # outliers stay OUT (Module 2 scans them on its own REST-tail). Open signals on non-pinned
+        # continuously WS-streamed (ADR-0004 §1.6 + the "non-pinned = on-demand" model).
+        # Open signals on non-pinned
         # symbols are NOT bulk-warmed here: adding ~N trackers' WS subscriptions at once triggers a
         # Binance 1006 close-storm at scale — they are tracked instead by the REST safety nets below
         # (reconcile_active_from_ticker + _reconcile_orphan_signals). After this scope every ticked
@@ -300,8 +299,6 @@ async def run_tick(
                     lifecycle=neutral_lc,
                     mtf_dict=mtf_confluence_to_dict(mtf) if mtf is not None else None,
                 )
-                if prescan_outlier_by_sym and compact in prescan_outlier_by_sym:
-                    persist["prescan_outlier"] = prescan_outlier_by_sym[compact]
                 rows.append(persist)
 
                 kline_events = await _reconcile_inwatch_active(

@@ -8,23 +8,11 @@
 # [bot]/[bot.network] (см. load_settings() в hunt_core/domain/config.py) —
 # любые другие секции в config.toml не читаются.
 
-[hunter]
-min_quote_volume_usd = 10_000_000
-min_open_interest_usd = 500_000
-min_listing_age_days = 7
-max_recent_volatility_pct = 80.0
-min_change_pct_for_hot = 3.0
-max_hot_coins = 10
-pump_extreme_pct = 15.0
-range_hot_pct = 8.0
-pos_near_high = 0.85
-pos_near_low = 0.25
-score_watch = 45.0
-score_priority = 60.0
-scan_interval_s = 900
-# Now wired: domain/config.py forwards the whole [hunter] section, so this (and every
-# key above) is read by params/store.py::hunter_thresholds() via universal_section.
-watchlist_limit = 50
+# Секция [hunter] снята 2026-07-31 вместе с модулем МАНИПУЛЯЦИИ: это была конфигурация
+# воронки вселенной сканера (пороги ликвидности, score_watch/priority, watchlist_limit,
+# scan_interval_s). Её единственный читатель `params/store.py::hunter_thresholds()` остался
+# без вызывающих после выреза и удалён — по правилу шапки «ТОЛЬКО ключи, у которых есть
+# читатель» секция обязана была уйти следом.
 
 [confirm.short]
 # REPORTING ONLY — /signals gaps, stats cards (gate/_report.py). Does NOT set setup.confirmed.

@@ -52,8 +52,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PROJECT_DIR}/.venv/bin/python",
-            "args": ["${CLAUDE_PROJECT_DIR}/scripts/guard_edit.py"],
+            "command": "uv",
+            "args": [
+              "run", "--no-sync", "--project", "${CLAUDE_PROJECT_DIR}",
+              "python", "${CLAUDE_PROJECT_DIR}/scripts/guard_edit.py"
+            ],
             "statusMessage": "guard: prohibited APIs"
           }
         ]
@@ -66,14 +69,18 @@
           {
             "type": "command",
             "if": "Edit(**/*.py)",
-            "command": "${CLAUDE_PROJECT_DIR}/scripts/hook_ruff_fix.sh",
+            "command": "bash",
+            "args": ["${CLAUDE_PROJECT_DIR}/scripts/hook_ruff_fix.sh"],
             "statusMessage": "ruff --fix (F401 report-only: auto-removing unused imports races paired edits)"
           },
           {
             "type": "command",
             "if": "Edit(hunt_core/**/*.py)",
-            "command": "${CLAUDE_PROJECT_DIR}/.venv/bin/python",
-            "args": ["-m", "mypy", "--no-error-summary", "hunt_core"],
+            "command": "uv",
+            "args": [
+              "run", "--no-sync", "--project", "${CLAUDE_PROJECT_DIR}",
+              "python", "-m", "mypy", "--no-error-summary", "hunt_core"
+            ],
             "asyncRewake": true,
             "timeout": 180,
             "statusMessage": "mypy (background)"
@@ -86,7 +93,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PROJECT_DIR}/scripts/hook_session_context.sh",
+            "command": "bash",
+            "args": ["${CLAUDE_PROJECT_DIR}/scripts/hook_session_context.sh"],
             "timeout": 15,
             "statusMessage": "session: live-run state"
           }

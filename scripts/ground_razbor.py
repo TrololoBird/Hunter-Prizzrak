@@ -4,7 +4,7 @@
 Fetches public OHLCV for the instrument discussed in a разбор and checks the narrator's
 claims against what actually happened: was the level touched, did the target hit, how far
 did price travel after the video. Turns "автор сказал" into a verified case study — and a
-labeled outcome for calibrating hunt_core/scanner.
+labeled outcome for calibrating hunt_core/prizrak.
 
 Public data only (``fetch_ohlcv``) — never any private/trading CCXT method (see
 docs/ai/rules/prohibited-apis.md). No pandas; Polars only.

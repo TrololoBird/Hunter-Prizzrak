@@ -3,6 +3,7 @@ from __future__ import annotations
 
 
 
+import importlib.util
 import logging
 import logging.handlers
 import os
@@ -34,9 +35,28 @@ def _rotating_file_handler() -> logging.Handler | None:
 # dict; rich then recurses effectively forever rendering it, so a single
 # LOG.exception (e.g. during a Binance 429/418 storm) freezes the whole watcher.
 # plain_traceback formats a bounded, text-only traceback with no rich/locals render.
+def _colors_supported() -> bool:
+    """Можно ли КРАСИТЬ вывод, а не «хотим ли» — на Windows это не одно и то же.
+
+    structlog красит через colorama и без неё на Windows поднимает `SystemError` прямо в
+    конструкторе `ConsoleRenderer`. Замер 2026-07-31: `python -m hunt_core watch --once`
+    не стартовал НИ РАЗУ — трейс обрывался в `structlog.dev._init_terminal` на импорте
+    `runtime/state.py`, то есть до единой строки логики бота. Проект писался на macOS, где
+    colorama не нужна, поэтому у автора дефект проявиться не мог.
+
+    Цвет — украшение, и ронять из-за него весь рантайм нельзя: при недоступности молча
+    отключаем, логи остаются читаемыми. Ставить colorama в зависимости ради этого не
+    требуется — она нужна только если цвет действительно хотят.
+    """
+    if os.name != "nt":
+        return True
+    return importlib.util.find_spec("colorama") is not None
+
+
 def _console_renderer(*, colors: bool = True) -> structlog.types.Processor:
     return structlog.dev.ConsoleRenderer(
-        colors=colors, exception_formatter=structlog.dev.plain_traceback
+        colors=colors and _colors_supported(),
+        exception_formatter=structlog.dev.plain_traceback,
     )
 
 
