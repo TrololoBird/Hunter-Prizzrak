@@ -26,6 +26,7 @@ from hunt_core.deliver.digest import get_advisory_digest
 from hunt_core.deliver.telegram import TelegramBroadcaster
 from hunt_core.engine import metrics
 from hunt_core.errors import defensive_exc_types
+from hunt_core.features.snapshot import reset_substitution_counts, substitution_counts
 from hunt_core.features.feature_engine import (
     FeatureExtractError,
     build_feature_vector_native,
@@ -163,6 +164,11 @@ async def run_tick(
 
     state = _load_state()
     tracker_state = load_tracker_state()
+    # Счётчик подстановок дефолтов (`features/snapshot.py::col`) обнуляется НА ТИК, чтобы
+    # сводка ниже читалась как «столько дыр в данных было в ЭТОМ тике», а не нарастающим
+    # итогом с момента запуска. Без этого вызова счётчик копился бесконечно, а его
+    # докстрока утверждала «вызывается в начале тика» — вызывающего не существовало.
+    reset_substitution_counts()
     now = clock.now_utc()
     exchange = rt.multi.primary.exchange
     rows: list[dict[str, Any]] = []
@@ -232,6 +238,19 @@ async def run_tick(
                 elapsed_s=snap_elapsed,
                 ready=ready_n,
                 not_ready=len(ordered) - ready_n,
+            )
+        # Дыры в данных за этот тик. `col()` подставляет дефолт вместо отсутствующего
+        # значения сотни раз за тик, и warning на каждый вызов уже устраивал здесь флуд
+        # (95 сообщений за 20 ч, 39% канала). Поэтому подстановки СЧИТАЮТСЯ по имени
+        # колонки, а наружу идёт одна строка — но идти она обязана: без неё счётчик был
+        # ровно тем, против чего написан, — тихой деградацией (директива владельца
+        # 2026-07-31). Пусто — не логируем: нулевая строка каждый тик обесценила бы сигнал.
+        subs = substitution_counts()
+        if subs:
+            LOG.warning(
+                "tick_default_substitutions",
+                total=sum(subs.values()),
+                columns=dict(sorted(subs.items(), key=lambda kv: -kv[1])[:10]),
             )
 
         for symbol in ordered:

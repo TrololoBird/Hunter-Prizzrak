@@ -366,10 +366,30 @@ class Engine:
             # ПОДНИМАЕТ темп к `/futures/data` примерно с 9 до 50 запросов/мин — при бюджете
             # 1000/5 мин = 200/мин это 25%, и защита от -1003 (`_BAN_UNTIL_MS`) остаётся.
             sem = asyncio.Semaphore(params.POSITIONING_CONCURRENCY)
-            await asyncio.gather(
-                *(self._poll_symbol_positioning(ex, s, bound, sem) for s in list(self._symbols)),
-                return_exceptions=False,
+            # ⚠ `return_exceptions=True`, а НЕ False. С False один таймаут по одному символу
+            # рвал `gather` целиком, и остальные корутины отменялись — то есть ОДНА
+            # временная сетевая ошибка оставляла БЕЗ позиционирования всю вселенную, а не
+            # один символ. Планы уходили в `not_ready` массово, и это выглядело как блэкаут
+            # данных, хотя биржа была жива.
+            # Молчания при этом нет (директива владельца 2026-07-31): каждый отказ
+            # логируется поимённо ниже. Тихо проглотить исключение здесь было бы I-6.
+            walk = list(self._symbols)
+            results = await asyncio.gather(
+                *(self._poll_symbol_positioning(ex, s, bound, sem) for s in walk),
+                return_exceptions=True,
             )
+            failed = [
+                (sym, res)
+                for sym, res in zip(walk, results, strict=False)
+                if isinstance(res, BaseException)
+            ]
+            if failed:
+                LOG.warning(
+                    "engine_positioning_symbol_failures",
+                    failed=len(failed),
+                    total=len(walk),
+                    sample=[f"{s}: {type(e).__name__}" for s, e in failed[:5]],
+                )
             walk_s = time.monotonic() - cycle_started
             # ⚠ Скользящий МАКСИМУМ обхода, а не последнее значение. Бонд, посчитанный в конце
             # цикла k, охраняет промежуток между k+1 и k+2 — то есть отстаёт на цикл. При запасе

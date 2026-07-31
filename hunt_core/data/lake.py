@@ -188,10 +188,36 @@ def flush_map_lake() -> int:
         return 0
 
 def flush_lake() -> None:
-    flush_map_lake()
-    flush_tick_buffer()
-    flush_tracker_state()
-    flush_cooldown_state()
+    """Сбросить на диск все четыре буфера — каждый ПЫТАЕТСЯ, отказ поднимается наверх.
+
+    ⚠ Прежняя редакция звала четыре функции подряд без защиты, и это давало дефект,
+    противоположный тому, на который он похож. `flush_tracker_state` намеренно бросает
+    ``TrackerFlushAborted`` (fail-loud: битое состояние трекера НЕ должно молча стать
+    ``{}`` — ровно этим болел старый код). Но исключение из третьего вызова означало,
+    что ЧЕТВЁРТЫЙ, ``flush_cooldown_state``, не выполнялся вообще — то есть проблема
+    трекера тихо съедала сброс кулдаунов, и это уже настоящая молчаливая потеря.
+
+    Поэтому: выполняем все четыре, копим отказы, и только потом поднимаем первый.
+    Fail-loud сохранён (вызывающий по-прежнему получает исключение), но один сбойный
+    буфер больше не отменяет остальные три.
+
+    Ревью-бот предлагал обратное — ловить ``TrackerFlushAborted`` и продолжать с логом.
+    Это вернуло бы подмену битого состояния на пустое, то есть инвариант I-6.
+    """
+    failures: list[tuple[str, BaseException]] = []
+    for name, fn in (
+        ("map_lake", flush_map_lake),
+        ("tick_buffer", flush_tick_buffer),
+        ("tracker_state", flush_tracker_state),
+        ("cooldown_state", flush_cooldown_state),
+    ):
+        try:
+            fn()
+        except Exception as exc:  # noqa: BLE001 — фиксируем и поднимаем ниже, не глотаем
+            _LOG.error("lake_flush_failed", buffer=name, err=str(exc))
+            failures.append((name, exc))
+    if failures:
+        raise failures[0][1]
 
 
 def _parquet_path(symbol: str, tf: str) -> Path:
