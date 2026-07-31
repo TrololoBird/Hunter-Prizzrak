@@ -1,0 +1,88 @@
+{
+  "_ЧТО_ЭТО": "ПРЕДЛОЖЕНИЕ, а не рабочий файл. Claude Code его НЕ читает. Правку .claude/settings.json заблокировал классификатор — этот файл управляет правами самого агента, и расширять их себе он не должен. Перенесите нужные блоки в .claude/settings.json вручную, если согласны.",
+  "_КАК_ПРИМЕНИТЬ": "Открыть .claude/settings.json и: (1) в permissions.allow дописать блоки venv-Scripts и gh-read; (2) создать секцию permissions.ask целиком; (3) в permissions.deny дописать блок gh/git. Ничего существующего не удалять.",
+
+  "_1_ПОЧЕМУ_venv_Scripts": "В текущем allow 10 правил ссылаются на .venv/bin/... — это POSIX-раскладка. На Windows путь .venv/Scripts/..., поэтому эти правила НЕ срабатывают никогда и вы получаете лишний запрос на каждый ruff/mypy/pytest. Тот же класс, что уже чинили в hooks (CLAUDE.md, раздел Windows). Старые строки НЕ удалять — они нужны, если дерево когда-нибудь запустят под macOS/Linux.",
+  "permissions.allow += (venv Scripts)": [
+    "Bash(.venv/Scripts/python.exe*)",
+    "Bash(.venv/Scripts/pytest*)",
+    "Bash(.venv/Scripts/ruff*)",
+    "Bash(.venv/Scripts/mypy*)",
+    "Bash(.venv/Scripts/pre-commit*)",
+    "Bash(.venv/Scripts/vulture*)"
+  ],
+
+  "_2_ПОЧЕМУ_gh_read": "Только чтение: список/просмотр PR, issues, прогонов CI, релизов, меток, поиск. Ничего не меняет на GitHub, поэтому без подтверждения. Именно это даёт разбирать упавший CI и смотреть состояние репозитория без запроса на каждую команду.",
+  "permissions.allow += (gh read-only)": [
+    "Bash(gh auth status*)",
+    "Bash(gh repo view*)",
+    "Bash(gh pr list*)",
+    "Bash(gh pr view*)",
+    "Bash(gh pr diff*)",
+    "Bash(gh pr status*)",
+    "Bash(gh pr checks*)",
+    "Bash(gh issue list*)",
+    "Bash(gh issue view*)",
+    "Bash(gh issue status*)",
+    "Bash(gh run list*)",
+    "Bash(gh run view*)",
+    "Bash(gh run watch*)",
+    "Bash(gh workflow list*)",
+    "Bash(gh workflow view*)",
+    "Bash(gh release list*)",
+    "Bash(gh release view*)",
+    "Bash(gh label list*)",
+    "Bash(gh search*)",
+    "Bash(gh status*)"
+  ],
+
+  "_3_ПОЧЕМУ_ask": "Всё, что видно снаружи или необратимо: создать/слить/закрыть PR, завести issue, запустить workflow, запушить. Спрашивать — правильно: это действия от вашего имени в публичном репозитории. gh api сюда же, потому что через -X POST он умеет писать что угодно.",
+  "permissions.ask (создать секцию)": [
+    "Bash(git push*)",
+    "Bash(gh pr create*)",
+    "Bash(gh pr merge*)",
+    "Bash(gh pr close*)",
+    "Bash(gh pr reopen*)",
+    "Bash(gh pr comment*)",
+    "Bash(gh pr review*)",
+    "Bash(gh pr edit*)",
+    "Bash(gh pr ready*)",
+    "Bash(gh issue create*)",
+    "Bash(gh issue close*)",
+    "Bash(gh issue reopen*)",
+    "Bash(gh issue comment*)",
+    "Bash(gh issue edit*)",
+    "Bash(gh release create*)",
+    "Bash(gh workflow run*)",
+    "Bash(gh workflow enable*)",
+    "Bash(gh workflow disable*)",
+    "Bash(gh run rerun*)",
+    "Bash(gh run cancel*)",
+    "Bash(gh repo create*)",
+    "Bash(gh repo edit*)",
+    "Bash(gh repo fork*)",
+    "Bash(gh label create*)",
+    "Bash(gh label delete*)",
+    "Bash(gh api*)",
+    "Bash(gh gist*)"
+  ],
+
+  "_4_ПОЧЕМУ_deny": "САМОЕ ВАЖНОЕ ЗДЕСЬ — `gh auth token`. Он ПЕЧАТАЕТ ваш токен в stdout, то есть утащил бы его прямо мне в контекст и в транскрипт сессии. Запрет держит токен в Windows Credential Manager, где я его не вижу — ровно ради этого и выбран вход через браузер, а не через файл с PAT. Остальное — необратимое (удаление репозитория/релиза, force-push) и работа с секретами и ключами: агенту там делать нечего ни при каких обстоятельствах.",
+  "permissions.deny += (gh/git)": [
+    "Bash(gh auth token*)",
+    "Bash(gh auth logout*)",
+    "Bash(gh auth refresh*)",
+    "Bash(gh repo delete*)",
+    "Bash(gh repo archive*)",
+    "Bash(gh release delete*)",
+    "Bash(gh secret*)",
+    "Bash(gh variable*)",
+    "Bash(gh ssh-key*)",
+    "Bash(gh gpg-key*)",
+    "Bash(gh alias*)",
+    "Bash(git push --force*)",
+    "Bash(git push -f*)"
+  ],
+
+  "_5_ЗАМЕЧАНИЕ": "deny всегда сильнее allow, поэтому порядок блоков значения не имеет. Если какая-то gh-команда не попала ни в один список — она просто спросит подтверждение, это безопасный дефолт."
+}

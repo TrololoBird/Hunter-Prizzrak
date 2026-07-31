@@ -1,0 +1,168 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(uv lock*)",
+      "Bash(uv sync*)",
+      "Bash(uv pip *)",
+      "Bash(uv run *)",
+      "Bash(uv venv*)",
+      "Bash(uv tree*)",
+
+      "Bash(.venv/bin/python -m pytest*)",
+      "Bash(.venv/bin/python -m ruff*)",
+      "Bash(.venv/bin/python -m mypy*)",
+      "Bash(.venv/bin/python -m compileall*)",
+      "Bash(.venv/bin/python -m vulture*)",
+      "Bash(.venv/bin/pytest*)",
+      "Bash(.venv/bin/ruff*)",
+      "Bash(.venv/bin/mypy*)",
+      "Bash(.venv/bin/pre-commit*)",
+      "Bash(.venv/bin/python scripts/dead_symbol_sweep.py*)",
+      "Bash(.venv/bin/python scripts/check_prohibited_apis.py*)",
+
+      "Bash(.venv/Scripts/python.exe*)",
+      "Bash(.venv/Scripts/pytest*)",
+      "Bash(.venv/Scripts/ruff*)",
+      "Bash(.venv/Scripts/mypy*)",
+      "Bash(.venv/Scripts/pre-commit*)",
+      "Bash(.venv/Scripts/vulture*)",
+
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git show*)",
+      "Bash(git blame*)",
+      "Bash(git add*)",
+      "Bash(git restore*)",
+      "Bash(git reset*)",
+      "Bash(git stash*)",
+      "Bash(git commit*)",
+      "Bash(git push*)",
+      "Bash(git pull*)",
+      "Bash(git fetch*)",
+      "Bash(git branch*)",
+      "Bash(git checkout*)",
+      "Bash(git switch*)",
+      "Bash(git merge*)",
+      "Bash(git rebase*)",
+      "Bash(git cherry-pick*)",
+      "Bash(git revert*)",
+      "Bash(git tag*)",
+      "Bash(git remote*)",
+      "Bash(git config*)",
+
+      "Bash(gh auth status*)",
+      "Bash(gh repo view*)",
+      "Bash(gh repo clone*)",
+      "Bash(gh repo set-default*)",
+      "Bash(gh pr *)",
+      "Bash(gh issue *)",
+      "Bash(gh run *)",
+      "Bash(gh workflow *)",
+      "Bash(gh release list*)",
+      "Bash(gh release view*)",
+      "Bash(gh release create*)",
+      "Bash(gh release upload*)",
+      "Bash(gh label *)",
+      "Bash(gh search *)",
+      "Bash(gh status*)",
+      "Bash(gh cache *)",
+      "Bash(gh browse --no-browser*)",
+
+      "Bash(rg *)",
+      "Bash(ls *)",
+      "Bash(wc *)",
+      "Bash(jq *)",
+
+      "Agent(phantom-key-auditor)",
+      "Agent(ccxt-safety-reviewer)",
+      "Agent(no-lookahead-reviewer)",
+      "Agent(config-drift-auditor)",
+      "Agent(Explore)"
+    ],
+    "ask": [
+      "Bash(gh api*)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Edit(./.env)",
+      "Edit(./.env.*)",
+
+      "Bash(gh auth token*)",
+      "Bash(gh auth logout*)",
+      "Bash(gh secret*)",
+      "Bash(gh variable*)",
+      "Bash(gh ssh-key*)",
+      "Bash(gh gpg-key*)",
+      "Bash(gh repo delete*)",
+      "Bash(gh repo archive*)",
+      "Bash(gh repo rename*)",
+      "Bash(gh release delete*)",
+
+      "Bash(git push --force*)",
+      "Bash(git push -f *)",
+      "Bash(git push --mirror*)",
+      "Bash(git push --delete*)",
+      "Bash(git filter-branch*)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv",
+            "args": [
+              "run", "--no-sync", "--project", "${CLAUDE_PROJECT_DIR}",
+              "python", "${CLAUDE_PROJECT_DIR}/scripts/guard_edit.py"
+            ],
+            "statusMessage": "guard: prohibited APIs"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "if": "Edit(**/*.py)",
+            "command": "bash",
+            "args": ["${CLAUDE_PROJECT_DIR}/scripts/hook_ruff_fix.sh"],
+            "statusMessage": "ruff --fix (F401 report-only: auto-removing unused imports races paired edits)"
+          },
+          {
+            "type": "command",
+            "if": "Edit(hunt_core/**/*.py)",
+            "command": "uv",
+            "args": [
+              "run", "--no-sync", "--project", "${CLAUDE_PROJECT_DIR}",
+              "python", "-m", "mypy", "--no-error-summary", "hunt_core"
+            ],
+            "asyncRewake": true,
+            "timeout": 180,
+            "statusMessage": "mypy (background)"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash",
+            "args": ["${CLAUDE_PROJECT_DIR}/scripts/hook_session_context.sh"],
+            "timeout": 15,
+            "statusMessage": "session: live-run state"
+          }
+        ]
+      }
+    ]
+  }
+}
