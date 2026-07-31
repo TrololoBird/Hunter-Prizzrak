@@ -45,7 +45,7 @@ echo   ============================================================
 echo.
 
 REM ---- 2. winget ------------------------------------------------------------
-echo   [1/5] App Installer / winget
+echo   [1/7] App Installer / winget
 where winget >nul 2>&1
 if %errorLevel% equ 0 (
     echo         uzhe est - propuskayu
@@ -58,7 +58,7 @@ if %errorLevel% equ 0 (
 
 REM ---- 3. gh CLI obshchesistemno --------------------------------------------
 echo.
-echo   [2/5] gh CLI (obshchesistemno)
+echo   [2/7] gh CLI (obshchesistemno)
 set "MSIURL=https://github.com/cli/cli/releases/download/v2.97.0/gh_2.97.0_windows_amd64.msi"
 set "MSIOUT=%TEMP%\gh_2.97.0_windows_amd64.msi"
 set "GHSIZE=15183872"
@@ -85,7 +85,7 @@ del /q "%MSIOUT%" 2>nul
 REM ---- 4. nastroyki Claude Code ---------------------------------------------
 :SETTINGS
 echo.
-echo   [3/5] Nastroyki Claude Code (polnaya avtomatizaciya GitHub)
+echo   [3/7] Nastroyki Claude Code (polnaya avtomatizaciya GitHub)
 set "SRC=%REPO%\scripts\claude-settings-full-auto.json"
 set "DST=%REPO%\.claude\settings.json"
 
@@ -112,7 +112,7 @@ echo         ustanovleno: .claude\settings.json
 REM ---- 5. avtorizaciya GitHub -----------------------------------------------
 :AUTH
 echo.
-echo   [4/5] Avtorizaciya GitHub
+echo   [4/7] Avtorizaciya GitHub
 set "GH=gh"
 where gh >nul 2>&1 || set "GH=%LOCALAPPDATA%\Programs\gh\bin\gh.exe"
 if not exist "%GH%" if "%GH%" neq "gh" (
@@ -130,10 +130,60 @@ if %errorLevel% equ 0 (
 )
 
 echo.
-echo   [5/5] Privyazka git k avtorizacii
+echo   [5/7] Privyazka git k avtorizacii
 "%GH%" auth setup-git
 echo.
 "%GH%" auth status
+
+REM ---- 6. nastroyki samoy Windows -------------------------------------------
+REM  Kazhdyy punkt nizhe - po IZMERENNOY probleme, a ne po obshchemu sovetu.
+REM  Chto proveryali i NE trogaem: Defender real-time zashchita uzhe VYKLYUCHENA
+REM  (isklyucheniya ne nuzhny); chasy zdorovy (sdvig +138 ms, w32time Running/
+REM  Automatic); bash-hooki s CRLF rabotayut - git-bash terpit \r.
+:WINSETTINGS
+echo.
+echo   [6/7] Nastroyki Windows
+
+REM  6a. KODIROVKA. Izmereno: python stdout = cp1251, i lyuboy skript, pechatayushchiy
+REM      simvoly vrode galochki, padaet s UnicodeEncodeError. V dokumentacii proekta
+REM      takie znachki povsyudu. PYTHONUTF8=1 (PEP 540) chinit polnostyu - provereno.
+REM      V Python 3.15 etot rezhim stanet defoltnym, tak chto eto ne kostyl.
+echo         6a. PYTHONUTF8=1 (cp1251 lomal vyvod)
+setx PYTHONUTF8 1 /M >nul 2>&1
+if %errorLevel% equ 0 (echo             ustanovleno) else (echo             [!] ne udalos)
+
+REM  6b. SON. Izmereno: STANDBYIDLE AC = 1200 sek = 20 minut. Proekt rasschitan na
+REM      NEPRERYVNYY `watch` s tikom 30 sek - pri zasypanii on prosto umiraet.
+REM      Menyaem TOLKO pitanie ot seti. Ot batarei son ostavlyaem: eto pravilno.
+echo         6b. Son ot SETI - otklyuchit (ot batarei ostavlyaem)
+powercfg /change standby-timeout-ac 0 >nul 2>&1
+powercfg /change hibernate-timeout-ac 0 >nul 2>&1
+powercfg /change disk-timeout-ac 0 >nul 2>&1
+echo             standby/hibernate/disk ot seti = nikogda
+
+REM  6c. DLINNYE PUTI. Seychas samyy dlinnyy put v dereve 122 simvola pri limite 260,
+REM      tak chto eto STRAHOVKA na rost .venv, a ne lechenie. Stoit odnu stroku.
+echo         6c. Dlinnye puti (^>260 simvolov)
+reg add "HKLM\SYSTEM\CurrentControlSet\Control\FileSystem" /v LongPathsEnabled /t REG_DWORD /d 1 /f >nul 2>&1
+git config --global core.longpaths true >nul 2>&1
+echo             vklyucheno v reestre i v git
+
+REM  6d. Odnorazovaya sinhronizaciya chasov. Sluzhba zdorova, no proekt uzhe imel
+REM      incident so sdvigom 43.4 sek (forming-bar otdavalsya kak zakrytyy 72%% vremeni).
+echo         6d. Sinhronizaciya chasov
+w32tm /resync /nowait >nul 2>&1
+echo             zapros otpravlen
+
+REM ---- 7. uborka -------------------------------------------------------------
+echo.
+echo   [7/7] Uborka
+set "STALE=%REPO%\.claude\settings.gh-proposal.json"
+if exist "%STALE%" (
+    del /q "%STALE%"
+    echo         udalen ustarevshiy chernovik settings.gh-proposal.json
+) else (
+    echo         nechego udalyat
+)
 
 :DONE
 echo.
@@ -141,11 +191,11 @@ echo   ============================================================
 echo     GOTOVO
 echo   ============================================================
 echo.
-echo   Zakroyte i otkroyte Claude Code, chtoby on podhvatil novye
-echo   nastroyki i PATH.
+echo   VAZHNO: zakroyte i otkroyte Claude Code I terminal - inache
+echo   novye PATH i PYTHONUTF8 ne podhvatyatsya.
 echo.
 echo   Token lezhit v Windows Credential Manager. Agentu on ne viden:
-echo   komanda `gh auth token` yavno zapreshchena v nastroykah.
+echo   komanda "gh auth token" yavno zapreshchena v nastroykah.
 echo.
 popd
 pause
