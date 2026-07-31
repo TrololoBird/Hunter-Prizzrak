@@ -213,7 +213,12 @@ def flush_lake() -> None:
     ):
         try:
             fn()
-        except Exception as exc:  # noqa: BLE001 — фиксируем и поднимаем ниже, не глотаем
+        # Широкий except намеренно: любой отказ буфера фиксируем и поднимаем ПОСЛЕ цикла,
+        # чтобы соседние три успели отработать. Не глотаем — см. докстроку выше.
+        # `# noqa: BLE001` здесь НЕ ставится: правило не включено (pyproject: extend-select
+        # только TID251), поэтому подавление было бы мёртвым. В дереве таких мёртвых noqa
+        # уже 44 в 20 файлах — отдельный долг, не тащим его сюда.
+        except Exception as exc:
             _LOG.error("lake_flush_failed", buffer=name, err=str(exc))
             failures.append((name, exc))
     if failures:
