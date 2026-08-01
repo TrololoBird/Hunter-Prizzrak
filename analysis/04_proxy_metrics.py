@@ -90,8 +90,12 @@ def compute() -> dict:
             candidates_with_path = build.get("candidates_with_path", 0)
             total = skipped + candidates_with_path
             m["degradation_rate"] = round(skipped / total, 4) if total else 0.0
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 — метрика необязательна, отчёт важнее
+            # ⚠ Ирония места: молча терялась именно `degradation_rate` — метрика ДЕГРАДАЦИИ.
+            # В отчёте она осталась бы `None`, что читается как «деградаций не мерили», а не
+            # как «замер сломался». Значение по-прежнему не подставляется (I-6: лучше `None`,
+            # чем выдуманное число), но причина теперь названа.
+            print(f"  ВНИМАНИЕ: degradation_rate не посчитан из {build_stats_path.name}: {exc!r}")
 
     return m
 
