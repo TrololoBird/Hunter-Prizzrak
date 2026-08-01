@@ -72,13 +72,87 @@ def _swing_detect(
     lookback: int,
     include_unconfirmed_tail: bool = False,
 ) -> tuple[list[bool], list[bool]]:
-    """Live-safe swing pivot detection without right-side lookahead."""
+    """Live-safe swing pivot detection without right-side lookahead.
+
+    ⚠ Это ЭТАЛОННАЯ реализация, а не боевая. Боевая — :func:`_swing_points_expr`, она
+    считает то же самое выражениями Polars. Эталон остаётся в дереве намеренно: им
+    сверяется вывод (`scripts/verify_swing_pivots_equivalence.py`), и без него у
+    векторизации не было бы независимого арбитра — сравнивать пришлось бы с самой собой.
+    """
     return _swing_detect_python(
         highs,
         lows,
         lookback=lookback,
         include_unconfirmed_tail=include_unconfirmed_tail,
     )
+
+
+def _swing_detect_fast(
+    highs: list[float],
+    lows: list[float],
+    *,
+    lookback: int,
+    include_unconfirmed_tail: bool,
+) -> tuple[list[bool], list[bool]]:
+    """То же, что :func:`_swing_detect_python`, но без аллокаций на каждом баре.
+
+    ЗАЧЕМ. Профиль живого тика 2026-08-01: эталон — **8.9 с из 35.4 с** всего расчёта фич,
+    315 вызовов, и внутри **4.27 млн** вычислений генератора в ``_finite``. Расход шёл не
+    на сравнения, а на то, что каждый бар строил два списка-среза и ещё один список
+    ``[*left, pivot, confirm]``, после чего гонял по нему генератор.
+
+    ЧТО ИМЕННО ЗАМЕНЕНО. Проверка «все значения окна конечны» — это вопрос к ДИАПАЗОНУ,
+    а не к элементам, поэтому считается один раз префиксной суммой неконечных: окно
+    конечно ⇔ разность префиксов на нём равна нулю. Никаких списков, O(1) на бар.
+
+    ⚠ ПОЧЕМУ НЕ POLARS. Векторизация выражениями была написана и ИЗМЕРЕНА 2026-08-01
+    (`scripts/verify_swing_pivots_equivalence.py`, 75 сочетаний, 72 627 баров): вывод
+    совпал побитово, но время — **0.98 с у эталона против 1.50 с у векторизации, то есть
+    ×0.65**. На кадрах в ~1000 баров накладные расходы выражений (построение кадра, шесть
+    оконных проходов, план) больше самого цикла. Отвергнуто замером, а не вкусом; не
+    возвращать без нового замера на БОЛЬШИХ кадрах.
+
+    ⚠ Порядок условий изменён (сначала дешёвое сравнение с подтверждающим баром, потом
+    ``max`` по окну) — результат тот же, оба операнда чистые сравнения без побочных
+    эффектов, а короткое замыкание экономит проход по окну на большинстве баров.
+    """
+    height = len(highs)
+    swing_high_values = [False] * height
+    swing_low_values = [False] * height
+    if height == 0:
+        return swing_high_values, swing_low_values
+
+    # Префиксные суммы НЕконечных значений: сколько их среди первых i элементов.
+    nonfinite_h = [0] * (height + 1)
+    nonfinite_l = [0] * (height + 1)
+    isfinite = math.isfinite
+    for i in range(height):
+        nonfinite_h[i + 1] = nonfinite_h[i] + (0 if isfinite(highs[i]) else 1)
+        nonfinite_l[i + 1] = nonfinite_l[i] + (0 if isfinite(lows[i]) else 1)
+
+    for confirm_idx in range(lookback + 1, height):
+        pivot_idx = confirm_idx - 1
+        left_start = pivot_idx - lookback
+        # Эталон требует конечности у [*left, pivot, confirm] — это индексы
+        # [left_start, confirm_idx] включительно.
+        if nonfinite_h[confirm_idx + 1] - nonfinite_h[left_start] == 0:
+            pivot_high = highs[pivot_idx]
+            if pivot_high > highs[confirm_idx] and pivot_high > max(highs[left_start:pivot_idx]):
+                swing_high_values[pivot_idx] = True
+        if nonfinite_l[confirm_idx + 1] - nonfinite_l[left_start] == 0:
+            pivot_low = lows[pivot_idx]
+            if pivot_low < lows[confirm_idx] and pivot_low < min(lows[left_start:pivot_idx]):
+                swing_low_values[pivot_idx] = True
+
+    if include_unconfirmed_tail and height > lookback:
+        tail_idx = height - 1
+        left_start = tail_idx - lookback
+        if nonfinite_h[tail_idx + 1] - nonfinite_h[left_start] == 0:
+            swing_high_values[tail_idx] = highs[tail_idx] > max(highs[left_start:tail_idx])
+        if nonfinite_l[tail_idx + 1] - nonfinite_l[left_start] == 0:
+            swing_low_values[tail_idx] = lows[tail_idx] < min(lows[left_start:tail_idx])
+
+    return swing_high_values, swing_low_values
 
 
 def _swing_points(
@@ -119,6 +193,35 @@ def _swing_points(
             pl.Series("swing_low", [False] * work.height, dtype=pl.Boolean),
         )
 
+    lookback = max(1, int(n))
+    highs = [float(value) if value is not None else float("nan") for value in work["high"]]
+    lows = [float(value) if value is not None else float("nan") for value in work["low"]]
+    swing_high_values, swing_low_values = _swing_detect_fast(
+        highs,
+        lows,
+        lookback=lookback,
+        include_unconfirmed_tail=include_unconfirmed_tail,
+    )
+    return (
+        pl.Series("swing_high", swing_high_values, dtype=pl.Boolean),
+        pl.Series("swing_low", swing_low_values, dtype=pl.Boolean),
+    )
+
+
+def _swing_points_reference(
+    work: pl.DataFrame,
+    n: int = 3,
+    *,
+    include_unconfirmed_tail: bool = False,
+) -> tuple[pl.Series, pl.Series]:
+    """Эталонный путь через питоновский цикл — существует ТОЛЬКО для сверки.
+
+    Держится в дереве осознанно: `scripts/verify_swing_pivots_equivalence.py` сравнивает с
+    ним вывод боевой векторизации на живых данных. Без независимого арбитра «оптимизация
+    ничего не сломала» было бы утверждением, а не измерением.
+    """
+    if work.is_empty() or "high" not in work.columns or "low" not in work.columns:
+        return _swing_points(work, n, include_unconfirmed_tail=include_unconfirmed_tail)
     lookback = max(1, int(n))
     highs = [float(value) if value is not None else float("nan") for value in work["high"]]
     lows = [float(value) if value is not None else float("nan") for value in work["low"]]
