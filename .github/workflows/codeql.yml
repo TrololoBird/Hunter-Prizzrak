@@ -1,0 +1,63 @@
+# CodeQL — статический анализ безопасности. Бесплатен для публичных репозиториев.
+#
+# ЧЕСТНО ОБ ОЖИДАНИЯХ: это НЕ замена ревью и не поймает дефекты, которыми болен именно
+# этот проект (фантомный ключ, окно без замера, поле без продюсера) — они не про
+# безопасность, а про смысл. CodeQL здесь берётся ради двух вещей:
+#   1. hardcoded credentials. Проект по инварианту НЕ ДОЛЖЕН содержать ключей вообще
+#      (docs/ai/rules/prohibited-apis.md), и это ровно тот класс, который CodeQL ловит
+#      надёжно. Уже включённый secret scanning ловит утечку в коммите; CodeQL — код,
+#      который собирает секрет из кусков и потому push protection обходит.
+#   2. небезопасная десериализация и работа с путями — в проекте есть ingest JSONL
+#      (data/jsonl_io.py, data/lake.py) и распаковка архивов планируется.
+#
+# `schedule` важнее `push`: база запросов CodeQL пополняется, и тот же код через месяц
+# может дать находку, которой не было при коммите. Без расписания это не всплывёт никогда.
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Понедельник 04:17 UTC. Не круглый час — GitHub на :00 перегружен и очередь длиннее.
+    - cron: "17 4 * * 1"
+
+# Явно read-only по умолчанию: workflow ничего не пишет в репозиторий, кроме результатов
+# анализа. Без этого блока токен получает права по настройкам репозитория, то есть больше
+# необходимого.
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze Python
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      security-events: write   # публикация результатов в Security → Code scanning
+      actions: read
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: python
+          # security-extended даёт больше правил ценой шума. Берём его сознательно:
+          # у проекта нет тестов (удалены 2026-07-27 by design), поэтому любой
+          # дополнительный автоматический источник сигнала здесь дороже, чем в проекте
+          # с покрытием.
+          queries: security-extended
+
+      # Python не компилируется — autobuild не нужен, но и не мешает: он просто
+      # определит зависимости для более точного анализа потоков данных.
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:python"

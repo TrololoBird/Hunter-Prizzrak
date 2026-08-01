@@ -1,0 +1,52 @@
+# Dependabot — обновление зависимостей.
+#
+# ⚠ ЭКОСИСТЕМА `uv`, А НЕ `pip`. Проект ставится `uv sync --locked` (см. ci.yml), то есть
+# истина — `uv.lock`, а не потолки из pyproject. Экосистема `pip` лок-файл не понимает и
+# оставила бы его расходиться с pyproject; CI с `--locked` падал бы на каждом PR Dependabot.
+#
+# ПОЧЕМУ ЭТО БЕЗОПАСНО ВКЛЮЧАТЬ ИМЕННО СЕЙЧАС. Владелец кода не читает и PR не ревьюит.
+# Раньше автоматический бамп был бы прямым риском — в CLAUDE.md записан случай, когда
+# ruff подтянулся с 0.15.22 до 0.16.0 и положил **14 коммитов подряд** красными. Но с
+# 2026-08-01 ветка `main` защищена и требует зелёный `lint-and-test`, поэтому сломанный
+# PR Dependabot физически НЕ МОЖЕТ влиться. Гейтом стал CI, а не внимание человека.
+#
+# СТРАТЕГИЯ КОНСЕРВАТИВНАЯ. `increase-if-necessary` поднимает нижнюю границу в
+# pyproject ТОЛЬКО когда без этого не обойтись. Это важно: тамошние floor'ы несут
+# обоснования (`ccxt>=4.5.44` — из-за разделения fstream 2026-04-23; `polars-talib>=0.1.6`
+# — из-за расхождения ADX на 100% баров), и переписывать их пачкой значит осиротить
+# комментарии рядом.
+version: 2
+updates:
+  # --- Python-зависимости -----------------------------------------------------------
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    versioning-strategy: "increase-if-necessary"
+    open-pull-requests-limit: 3
+    # Один PR на всё вместо десятка: у владельца нет возможности разбирать их поштучно,
+    # а CI всё равно проверяет набор целиком.
+    groups:
+      python-deps:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    # Major-версии — отдельными PR и осознанно: у этого проекта major почти всегда
+    # означает смену семантики (ccxt переименовывает поля, polars меняет Expression API).
+    commit-message:
+      prefix: "deps"
+      include: "scope"
+
+  # --- GitHub Actions ---------------------------------------------------------------
+  # Дёшево и с высокой отдачей: устаревшие/уязвимые actions — самая частая дыра в CI,
+  # а сломать они могут только сам CI, не продукт.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 2
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"
+      include: "scope"
