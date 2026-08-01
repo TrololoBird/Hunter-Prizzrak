@@ -199,8 +199,19 @@ def _management_plan(direction: Literal["long", "short"]) -> list[str]:
     thing only for a flat traded edge-to-edge. This plan is attached to every setup_kind
     (``_base_summary``), including pp_break/trap_flip/figure_pennant_6touch, where стр.19
     (a флет rule) does not literally apply. No code branches on these strings, but they
-    ARE rendered into the Telegram card (build.py:502-505) — they are advice a human
-    acts on, so a wrong one misinforms rather than sits inert.
+    are rendered into the Telegram card — they are advice a human acts on, so a wrong one
+    misinforms rather than sits inert.
+
+    ⚠ РЕНДЕР БЫЛ ПОТЕРЯН И ВОССТАНОВЛЕН 2026-08-01. Прежняя редакция этой докстроки
+    ссылалась на «build.py:502-505» — на НОМЕР СТРОКИ в чужом файле. Ссылка сгнила ровно
+    так, как описывает инвариант I-8, и вместе с ней сгнило утверждение: свип по
+    `hunt_core/deliver/**` и `prizrak/format_post.py` дал НОЛЬ читателей ключа
+    `management_plan`. То есть вся половина метода, которая про ВЕДЕНИЕ позиции, считалась
+    и выбрасывалась, а карточка несла только вход, стоп и цели.
+
+    Потребитель теперь один и назван символом: ``prizrak/format_post.py::_active_signal_block``
+    (блок «🧭 ведение», печатается только у эмитированного сетапа). Ссылка двусторонняя —
+    там стоит обратная на эту функцию.
     """
     back = "нижней границе" if direction == "long" else "верхней границе"
     return [
