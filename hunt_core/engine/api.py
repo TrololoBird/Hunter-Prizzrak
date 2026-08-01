@@ -127,8 +127,8 @@ class Engine:
         self._ingest.start(self._symbols, self._timeframes)
         self._watchdog = Watchdog(
             self._ingest.last_frame_ms,
-            on_silent=self._ingest.reconnect,
-            on_rotate=self._ingest.reconnect,
+            on_silent=self._reconnect_and_reseed,
+            on_rotate=self._reconnect_and_reseed,
             venue=str(getattr(self._ingest.exchange, "id", "binance")),
         )
         self._bg.append(asyncio.create_task(self._watchdog.run(), name="engine_watchdog"))
@@ -190,6 +190,41 @@ class Engine:
                     ratio=None if cad.bound_ratio is None else round(cad.bound_ratio, 2),
                     samples=cad.samples,
                 )
+
+    async def _reconnect_and_reseed(self) -> None:
+        """Переподключиться И пересеять кадры из REST — иначе в серии остаётся дыра.
+
+        ⚠ САМЫЙ ДОРОГОЙ КЛАСС ИНЦИДЕНТОВ ЗДЕСЬ — не потеря точки, а ОТРАВЛЕНИЕ КАДРА.
+        ``Ingest.reconnect`` поднимает подписки заново, но кадры не трогает, а
+        ``SymbolState.merge_frame`` дописывает хвост по единственному условию
+        ``bar[0] > tail`` — без проверки шага. Если разрыв длился дольше пары баров, WS
+        возобновляется и приклеивает НОВЫЙ хвост к СТАРОМУ телу, оставив дыру в середине.
+
+        Дальше вся геометрия метода — уровни, накопление, ПОК — считается по разорванной
+        серии, при этом ``not_ready`` чист, а штамп свеж: ни один прибор дыру не видит.
+        Это сигнатура инцидента, ради которого в проекте вообще завели fail-loud
+        (память ``stale-htf-cache-trap``).
+
+        Лечение уже написано и просто не было вызвано: ``_seed`` тянет kline-планы через
+        REST ровно так же, как на старте. Пересев идёт ПОСЛЕ подъёма подписок, поэтому
+        ``merge_frame`` дольше дописывает к целому кадру, а не к обрубку.
+
+        Отказ пересева не должен мешать переподключению: связь уже восстановлена, и без
+        пересева система работает хуже, но работает. Молчать при этом нельзя — дыра
+        останется, и знать об этом надо.
+        """
+        await self._ingest.reconnect()
+        try:
+            await self._seed()
+        except Exception as exc:  # noqa: BLE001 — пересев не имеет права отменить реконнект
+            LOG.error(
+                "engine_reseed_after_reconnect_failed",
+                error=repr(exc),
+                note="кадры могли остаться с дырой в середине; геометрия по ним "
+                     "недостоверна до следующего успешного пересева",
+            )
+            return
+        LOG.info("engine_reseeded_after_reconnect", symbols=len(self._symbols))
 
     async def _sample_loop_lag(self) -> None:
         """Мерить, насколько event loop не успевает, и ругаться, когда он встаёт.
