@@ -199,7 +199,12 @@ async def run_tick(
                 LOG.warning("watch_symbol_timeout", symbol=sym, timeout_s=symbol_timeout_s)
                 return sym, _error_row(sym, "symbol_tick_timeout", now), None
             except defensive_exc_types(asyncio.IncompleteReadError) as exc:
-                LOG.warning("dump_symbol_failed", symbol=sym, error=repr(exc))
+                # ⚠ `exc_info` здесь ОБЯЗАТЕЛЕН, а не «для отладки». Символ вылетает из тика
+                # целиком, то есть это отказ, а не деградация; без трассы сообщение
+                # `ValueError('max() iterable argument is empty')` не указывает НИ НА ЧТО —
+                # `max()` в дереве призрака десятки. Живой прогон 2026-08-01 дал 7 таких
+                # отказов по XAUUSDT/XAGUSDT, и найти место по логу было нельзя.
+                LOG.warning("dump_symbol_failed", symbol=sym, error=repr(exc), exc_info=exc)
                 return sym, _error_row(sym, repr(exc), now), None
             if nav is None:
                 return sym, _error_row(sym, "not_ready", now), None

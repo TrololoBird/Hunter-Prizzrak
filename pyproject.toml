@@ -107,7 +107,24 @@ force-exclude = true
 ignore = ["E402", "E741"]
 # TID251 (banned-api) mechanically enforces the "no pandas / no requests" rule that
 # previously lived only as prose in the AI instructions (docs/ai/rules/prohibited-apis.md).
-extend-select = ["TID251"]
+#
+# S110/S112 (`try`-`except`-`pass` и `try`-`except`-`continue`) механизируют главную
+# директиву владельца от 2026-07-31 — дословно: «игнорирование, молчаливые ошибки,
+# отсутствующие данные, деградации НЕ ДОПУСТИМЫ». До 2026-08-01 она жила только прозой
+# в CLAUDE.md, и проза, как там же и сказано, гниёт: файл утверждал, что проглоченных
+# исключений в дереве НЕ ОСТАЛОСЬ, а замер нашёл **18** (11 в hunt_core, 6 в scripts,
+# 1 в analysis — и это восемнадцатое поймал CI, потому что он гоняет `ruff check .`,
+# а локальная проверка шла по двум каталогам: охват проверки сам является утверждением).
+#
+# ⚠ Почему именно S110/S112, а не BLE001. BLE001 ругается на ЛЮБОЙ `except Exception`,
+# включая те, что честно логируют, — замер 2026-08-01: 115 мест, из них 49 уже помечены
+# осознанно. Это не директива, это шум. Директива запрещает не широкий перехват, а
+# ПРОГЛАТЫВАНИЕ — ровно то, что ловят S110/S112. Их 17, и все закрыты.
+#
+# Что делать при срабатывании: не глушить `noqa`, а добавить строку лога. Если деградация
+# действительно допустима — она обязана сказать о себе (образец: `runtime/logging.py::
+# _colors_supported` — цвет выключается, но печатает почему).
+extend-select = ["TID251", "S110", "S112"]
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 "pandas".msg = "No pandas — use the Polars Expression API / LazyFrame. See docs/ai/rules/prohibited-apis.md."

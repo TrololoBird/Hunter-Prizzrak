@@ -27,12 +27,17 @@ from typing import Any
 
 import ccxt.async_support as ccxt
 
+from _verify_common import report_skipped, verdict_scope
+
 from hunt_core.prizrak.config import PrizrakConfig
 from hunt_core.prizrak.orchestrator import build_prizrak_signals
 
 CFG = PrizrakConfig.load()
 TFS = ("5m", "15m", "1h", "4h", "1d", "1w")
 FAIL: list[str] = []
+# Пары символ/ТФ, которые не удалось загрузить. Печатаются в итоге РЯДОМ с вердиктом:
+# «нарушений не найдено» на неполном покрытии — утверждение шире сделанного.
+SKIPPED: list[str] = []
 # Курс стр.33: стоп за структуру с запасом 1–3%. Верхняя граница взята с полем на ATR-clamp,
 # нижняя — это «прямо за лоем», рисковый вариант, который курс называет, но не советует.
 _STOP_BUF_MIN, _STOP_BUF_MAX = 0.5, 6.0
@@ -139,7 +144,13 @@ async def main(symbols: list[str]) -> None:
             for tf in TFS:
                 try:
                     o = await ex.fetch_ohlcv(sym, tf, limit=500)
-                except Exception:
+                except Exception as exc:  # noqa: BLE001 — недоступный ТФ не приговор прогону
+                    # ⚠ Пропуск ОБЯЗАН быть виден в итоге. Верификатор, молча уронивший
+                    # половину пар символ/ТФ, печатает «нарушений нет» — и это утверждение
+                    # шире сделанного ровно на то, что он пропустил. Класс тот же, что у
+                    # тихой деградации в боевом коде, только последствие хуже: здесь
+                    # молчание выдаёт СЕРТИФИКАТ.
+                    SKIPPED.append(f"{sym}/{tf}: {exc.__class__.__name__}")
                     continue
                 step = ex.parse_timeframe(tf) * 1000
                 raw[tf] = [b for b in o if int(b[0]) + step <= now]  # I-5
@@ -159,12 +170,13 @@ async def main(symbols: list[str]) -> None:
     finally:
         await ex.close()
     print(f"\nпроверено сигналов: {n_sig}")
+    report_skipped(SKIPPED)
     if FAIL:
         print(f"\n❌ НАРУШЕНИЙ: {len(FAIL)}")
         for f in FAIL:
             print("   ", f)
     else:
-        print("\n✅ нарушений геометрии эмиссии не найдено")
+        print(f"\n✅ нарушений геометрии эмиссии не найдено{verdict_scope(SKIPPED)}")
 
 
 if __name__ == "__main__":

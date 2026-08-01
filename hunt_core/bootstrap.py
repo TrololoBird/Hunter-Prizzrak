@@ -48,14 +48,20 @@ def bootstrap() -> Path:
 def _init_telemetry() -> None:
     """Initialise opt-in OpenTelemetry tracing (no-op unless ``HUNT_OTEL`` is set).
 
-    Kept defensive: telemetry must never be able to break process startup.
+    Kept defensive: telemetry must never be able to break process startup — но отказ
+    обязан быть слышен. Прежняя редакция глотала его в ``pass``: телеметрия молча не
+    поднималась, и узнать об этом было нечем, кроме пустых трасс. Директива владельца
+    2026-07-31 запрещает ровно это («деградации НЕ ДОПУСТИМЫ» — молча).
+
+    Печать идёт в ``stderr``, а не в ``structlog``: точка вызова — ``bootstrap``, до
+    настройки логирования, и обращение к логгеру здесь само может бросить.
     """
     try:
         from hunt_core.runtime.telemetry import init_telemetry
 
         init_telemetry("hunt_core")
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 — старт процесса важнее телеметрии
+        print(f"[bootstrap] телеметрия не поднялась, трассы будут пусты: {exc!r}", file=sys.stderr)
 
 
 def require_feature_stack() -> None:

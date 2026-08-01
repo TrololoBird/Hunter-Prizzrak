@@ -45,6 +45,34 @@ _F = TypeVar("_F", bound=Callable[..., Any])
 _ACTIVE: bool = False
 _TRACER: Any = None
 
+# Отказы разметки спанов, о которых УЖЕ сообщено на уровне warning.
+_REPORTED_SPAN_FAULTS: set[str] = set()
+
+
+def _report_span_fault(what: str, exc: BaseException) -> None:
+    """Сообщить об отказе разметки спана — первый раз громко, дальше тихо.
+
+    ⚠ Здесь встречаются два требования, и оба настоящие. Директива владельца запрещает
+    молчаливую деградацию: если OTel сконфигурирован криво, атрибуты не прикрепляются
+    НИКОГДА, спаны выходят безымянными по содержимому, и узнать об этом было нечем —
+    стояло голое ``pass``. Но точка вызова — горячая (спан на тик), и warning на каждый
+    вызов сам стал бы отказом: лог утонет.
+
+    Отсюда разовость. Первый отказ каждого вида — warning, остальные — debug. Состояние
+    процессное, счётчик не нужен: чинится это конфигурацией, а не подсчётом.
+    """
+    key = f"{what}:{exc.__class__.__name__}"
+    if key in _REPORTED_SPAN_FAULTS:
+        _LOG.debug("telemetry_span_fault", what=what, error=repr(exc))
+        return
+    _REPORTED_SPAN_FAULTS.add(key)
+    _LOG.warning(
+        "telemetry_span_fault_first",
+        what=what,
+        error=repr(exc),
+        note="разметка спанов не работает; трассы будут без контекста (повторы — на debug)",
+    )
+
 
 def _enabled_flag() -> bool:
     """Return whether ``HUNT_OTEL`` requests instrumentation.
@@ -180,8 +208,11 @@ def span(name: str, **attributes: Any) -> Iterator[Any]:
                 from opentelemetry.trace import Status, StatusCode
 
                 sp.set_status(Status(StatusCode.ERROR, str(exc)))
-            except Exception:  # pragma: no cover
-                pass
+            except Exception as mark_exc:  # noqa: BLE001 — исходное исключение важнее разметки
+                # Само исключение НЕ теряется — `raise` ниже поднимает его дальше. Теряется
+                # только пометка спана, поэтому здесь не место ронять процесс. Но и молчать
+                # нельзя: если разметка отказывает, трассы соврут об успехе.
+                _report_span_fault("record_exception", mark_exc)
             raise
 
 
@@ -200,8 +231,8 @@ def set_attributes(mapping: Mapping[str, Any]) -> None:
         for key, value in mapping.items():
             if value is not None:
                 sp.set_attribute(key, value)
-    except Exception:  # pragma: no cover
-        pass
+    except Exception as exc:  # noqa: BLE001 — разметка спана не должна ронять вызывающего
+        _report_span_fault("set_attributes", exc)
 
 
 def traced(name: str | None = None) -> Callable[[_F], _F]:

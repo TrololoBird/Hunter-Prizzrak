@@ -107,6 +107,13 @@ WEIGHT_WARN_FRACTION: float = 0.75
 # бан -1003 (история: 53 бана за сутки 2026-07-28).
 POSITIONING_CONCURRENCY: int = 6
 
+# Как часто датчик задержки цикла (`api.py::_sample_loop_lag`) просит короткий сон.
+# 0.5 с — компромисс: достаточно часто, чтобы поймать блокировку короче секунды, и
+# достаточно редко, чтобы сам датчик не был заметной нагрузкой (два пробуждения в секунду
+# против сотен кадров WS). Значение НЕ является порогом: порог берётся из `FRESH_BBO_S`,
+# потому что отставание начинает портить данные ровно на самом коротком бонде.
+LOOP_LAG_SAMPLE_S: float = 0.5
+
 # --- Per-plane freshness bounds (Plane.read) ---
 FRESH_BBO_S: float = 5.0  # LIVE age 0.4s + DOC bookTicker real-time
 FRESH_DEPTH_S: float = 5.0  # LIVE age 0.4s, ttl_hint 5s
@@ -165,10 +172,34 @@ def fresh_kline_s(interval_s: float) -> float:
     return interval_s + _KLINE_EMISSION_LAG_S
 
 
-# --- Connection limits — DOC Binance USDⓈ-M futures ---
-MAX_STREAMS_PER_CONN: int = 1024
-MAX_SUBSCRIBE_PER_S: int = 5
-SHARD_STREAMS: int = 200  # practical shard size (PROJECT unicorn-binance)
+# --- Лимиты WS-соединения: ЗАМЕР ВМЕСТО ТРЁХ ФАНТОМНЫХ РУЧЕК ------------------------------
+#
+# Здесь стояли `MAX_STREAMS_PER_CONN = 1024`, `MAX_SUBSCRIBE_PER_S = 5`, `SHARD_STREAMS = 200`.
+# Числа верные (сверены с `docs/reference/exchange-api/binance-usdm-websocket.md`, ревизия
+# 2026-08-01), но у каждого было РОВНО ОДНО вхождение в дереве — собственное объявление.
+# Ноль читателей: они выглядели настройкой, не ограничивая ничего. Это класс I-7 в чистом
+# виде, и «на всякий случай» его не оправдывает — ручка, которая не крутится, вводит в
+# заблуждение ровно того, кто придёт её крутить.
+#
+# ЗАМЕР 2026-08-01 (`scripts/measure_subscribe_burst.py`, перехват `Client.send` у ccxt 4.5.68):
+#
+#   символов   кадров SUBSCRIBE   имён потоков   ПИК на СОЕДИНЕНИЕ, кадров/с   соединений
+#         3           31               37                  ~4                     11
+#        10           94              121                   5                     25
+#
+# Лимит биржи — **10 входящих сообщений/с НА СОЕДИНЕНИЕ**. При боевых 7 символах запас
+# двукратный, и он не сужается с ростом вселенной так, как кажется: ccxt разносит подписки
+# по соединениям (`streamLimits.future = 50` × `subscriptionLimitByStream.future = 200`),
+# поэтому длиннее становится ОЧЕРЕДЬ, а не плотность на сокет. Основную массу держит одно
+# соединение `/market/ws/0` (kline: 7 ТФ × N символов), и кадры туда уходят с шагом ~250 мс.
+#
+# ⚠ Считать пик по всем сокетам разом — ошибка: первая редакция измерителя так и сделала и
+# объявила превышение 14 > 10 там, где его нет (14 кадров ушли по 11 РАЗНЫМ соединениям).
+# Величина, которую ограничивает биржа, — только пер-соединенческая.
+#
+# Когда мерить заново: рост вселенной кратно (десятки символов), добавление таймфрейма,
+# смена мажора ccxt, любая правка `ingest.py::_watch_symbols`. Числа выше — не константа,
+# а точка отсчёта.
 
 # --- ⚠ MEASURE — no defensible constant; calibrate fail-loud from live, never hardcode ---
 # Two bounds have NO published/measured source and MUST be calibrated from our own live logs, not

@@ -163,12 +163,16 @@ async def main() -> None:
     ex = ccxtpro.binanceusdm({"options": {"defaultType": "swap"}, "enableRateLimit": True})
     await ex.load_markets()
     rows: list[dict] = []
+    skipped: list[str] = []
     try:
         for sym in _SYMBOLS:
             for tf in _TFS:
                 try:
                     bars = await ex.fetch_ohlcv(sym, tf, limit=500)
-                except Exception:  # noqa: BLE001 — недоступный ТФ не приговор замеру
+                except Exception as exc:  # noqa: BLE001 — недоступный ТФ не приговор замеру
+                    # Но знаменатель в итоге («N символов × M ТФ») печатается ПЛАНОВЫЙ,
+                    # а не фактический: без учёта пропусков он завышает охват замера.
+                    skipped.append(f"{sym}/{tf}: {exc.__class__.__name__}")
                     continue
                 if len(bars) < 60:
                     continue
@@ -192,12 +196,22 @@ async def main() -> None:
         print(line)
         out.append(line)
 
+    if skipped:
+        say(f"**ПОКРЫТИЕ НЕПОЛНОЕ** — не загружено пар символ/ТФ: {len(skipped)} "
+            f"из {len(_SYMBOLS) * len(_TFS)}")
+        for s in skipped[:20]:
+            say(f"  - {s}")
+        if len(skipped) > 20:
+            say(f"  - … и ещё {len(skipped) - 20}")
+        say()
+
     if not rows:
         say("зон не найдено — замерять нечего")
         return
 
+    loaded_pairs = len(_SYMBOLS) * len(_TFS) - len(skipped)
     say(f"настоящих зон промерено: **{len(rows)}** "
-        f"({len(_SYMBOLS)} символов × {len(_TFS)} ТФ, "
+        f"(пар символ/ТФ загружено {loaded_pairs} из {len(_SYMBOLS) * len(_TFS)}, "
         f"{len(_BUCKETS)}×{len(_ORIGINS)} профилей на зону)")
     say()
     say("Разброс в процентах от ШИРИНЫ ЗОНЫ (нормировка та же, что у `_poc_is_stable`):")

@@ -227,11 +227,32 @@ def depth_imbalance_by_zone(
             continue  # уровней в полосе нет — сказать нечего (I-6)
         out[key] = round((bid_n - ask_n) / total, 4)
         # Насколько далеко книга реально дотянулась — минимум из двух сторон, в % от mid.
-        reach = min(
-            (current_price - min(p for p, _ in in_bids)) / current_price * 100.0,
-            (max(p for p, _ in in_asks) - current_price) / current_price * 100.0,
+        #
+        # ⚠ ПОЛОСА БЫВАЕТ ОДНОСТОРОННЕЙ, и гейт `total <= 0` этого не ловит: при пустых
+        # `in_asks` и непустых `in_bids` сумма положительна, а `max(...)` по пустой стороне
+        # бросает `ValueError: max() iterable argument is empty`. Живой прогон 2026-08-01:
+        # 7 отказов по XAUUSDT/XAGUSDT за десять минут, и падал НЕ этот показатель, а
+        # `assemble_native_analyst` целиком — символ выпадал из тика полностью
+        # (`_cycle_tick.py::dump_symbol_failed`). Цена ошибки несоразмерна: справочное поле
+        # охвата роняло весь разбор символа.
+        #
+        # Пустая сторона — это НЕ «нет данных», а измеренный ноль: книга внутри полосы до
+        # этой стороны не дотянулась вовсе. Поэтому охват равен 0.0 честно, а не опускается
+        # (I-6 запрещает выдумывать значение, но здесь значение известно). Сам перекос при
+        # этом остаётся ±1.0 и осмыслен: вся ликвидность полосы на одной стороне — факт
+        # рынка, а не артефакт, и потребитель, читающий `None` как «нейтрально», не должен
+        # получить нейтрально там, где книга односторонняя.
+        bid_reach = (
+            (current_price - min(p for p, _ in in_bids)) / current_price * 100.0
+            if in_bids
+            else 0.0
         )
-        out[f"{key}_covered_pct"] = round(min(reach, z), 4)
+        ask_reach = (
+            (max(p for p, _ in in_asks) - current_price) / current_price * 100.0
+            if in_asks
+            else 0.0
+        )
+        out[f"{key}_covered_pct"] = round(min(bid_reach, ask_reach, z), 4)
     return out
 
 

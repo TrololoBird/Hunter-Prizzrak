@@ -84,12 +84,20 @@ def _read_cache(symbol: str) -> dict[str, Any] | None:
 
 
 def _write_cache(symbol: str, days: int, series: list[list[float]]) -> None:
+    """Сохранить серию капитализации. Отказ не фатален, но обязан быть слышен.
+
+    Кэш здесь не ускорение, а щит от лимита CoinGecko: если запись перестала проходить,
+    каждый вызов уходит в сеть, и бесплатный лимит выбирается вхолостую. Молчаливый
+    ``pass`` делал этот перерасход беспричинным на вид.
+    """
     try:
         MARKETCAP_CACHE.mkdir(parents=True, exist_ok=True)
         payload = {"fetched_ms": int(time.time() * 1000), "days": days, "series": series}
         _cache_path(symbol).write_text(serde.dumps_str(payload))
-    except Exception:
-        pass  # cache write is best-effort; never fatal
+    except Exception as exc:  # noqa: BLE001 — отказ кэша не должен ронять живой путь
+        log.warning(
+            "marketcap_cache_write_failed", symbol=symbol, path=str(MARKETCAP_CACHE), error=repr(exc)
+        )
 
 
 def _cache_fresh(entry: dict[str, Any], *, ttl_s: int) -> bool:

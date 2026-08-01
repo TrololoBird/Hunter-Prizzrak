@@ -52,11 +52,19 @@ def _read_snapshots() -> list[dict[str, Any]]:
 
 
 def _write_snapshots(snaps: list[dict[str, Any]]) -> None:
+    """Сохранить срезы доминации. Отказ не фатален, но и не бесследен.
+
+    ⚠ «best-effort» здесь стоит дороже, чем кажется: на этом кэше держится СЕРИЯ, а по
+    серии считается ``*_change_24h``. Если запись перестала проходить (нет прав, диск полон),
+    серия замирает, а изменение за 24 часа продолжает считаться — по устаревшей паре. Это
+    ровно тот дефект, который CLAUDE.md называет живым классом: «серия, которая перестала
+    пополняться». Молчаливый ``pass`` делал его ненаблюдаемым.
+    """
     try:
         DOMINANCE_CACHE.parent.mkdir(parents=True, exist_ok=True)
         DOMINANCE_CACHE.write_text(serde.dumps_str(snaps[-_MAX_SNAPSHOTS:]))
-    except Exception:
-        pass  # best-effort
+    except Exception as exc:  # noqa: BLE001 — отказ кэша не должен ронять живой путь
+        log.warning("dominance_cache_write_failed", path=str(DOMINANCE_CACHE), error=repr(exc))
 
 
 def _parse_global(payload: dict[str, Any]) -> dict[str, float] | None:
@@ -117,8 +125,11 @@ async def refresh_dominance(*, ttl_s: int = _DEFAULT_TTL_S) -> None:
         try:
             if (time.time() * 1000.0 - float(snaps[-1]["ts_ms"])) < ttl_s * 1000:
                 return
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 — битый штамп: считаем кэш просроченным
+            # Проваливаемся к запросу — это безопасная сторона. Но битый ``ts_ms`` означает,
+            # что TTL перестал работать и мы ходим в CoinGecko каждый тик: без записи такой
+            # перерасход лимита выглядел бы беспричинным.
+            log.warning("dominance_cache_ts_unreadable", error=repr(exc))
     try:
         import aiohttp
 
@@ -144,13 +155,21 @@ async def refresh_dominance(*, ttl_s: int = _DEFAULT_TTL_S) -> None:
 
 def _closest_around(snaps: list[dict[str, Any]], target_ms: float) -> dict[str, Any] | None:
     best, best_dt = None, None
+    unreadable = 0
     for s in snaps:
         try:
             dt = abs(float(s["ts_ms"]) - target_ms)
-        except Exception:
+        except Exception:  # noqa: BLE001 — битый срез не должен ронять поиск по остальным
+            unreadable += 1
             continue
         if best_dt is None or dt < best_dt:
             best, best_dt = s, dt
+    if unreadable:
+        # Пропуск среза здесь двигает ОТВЕТ: «ближайший» ищется среди уцелевших, и при
+        # массовой порче вернётся срез за пределами реального окна — а вызывающий получит
+        # его как валидную пару для change_24h. Пропорция важнее самого факта, поэтому
+        # печатается и знаменатель.
+        log.warning("dominance_snapshots_unreadable", unreadable=unreadable, total=len(snaps))
     if best is None or best_dt is None or best_dt > _WINDOW_TOL_MS:
         return None
     return best
@@ -185,16 +204,26 @@ def read_cached_changes_24h() -> dict[str, float] | None:
     # что ``format_post`` читал ключ ``eth_d_change_24h`` без единого продюсера: ветка была мертва
     # всегда, и ETH.D печатался голым уровнем рядом с BTC.D и стейблами, у которых дельта есть.
     # Именно ETH.D автор и проговаривает («догоняющее движение на разгрузке Доминации ETH»).
-    try:
-        if now.get("eth_d") is not None and prior.get("eth_d") is not None:
-            out["eth_d_change_24h"] = round(float(now["eth_d"]) - float(prior["eth_d"]), 4)
-    except (TypeError, ValueError):
-        pass
-    try:
-        if now.get("stable_cd") is not None and prior.get("stable_cd") is not None:
-            out["stable_cd_change_24h"] = round(float(now["stable_cd"]) - float(prior["stable_cd"]), 4)
-    except Exception:
-        pass
+    #
+    # ⚠ Отказ разбора здесь ОБЯЗАН быть слышен, и причина в истории именно этого ключа:
+    # ``eth_d_change_24h`` уже был мёртв — читатель есть, продюсера нет, — и заметили это
+    # не скоро. Молчаливый ``pass`` воспроизводит ровно то состояние, только теперь ещё и
+    # обратимо-незаметно: ключ то появляется, то нет, а карточка печатает голый уровень.
+    # Само отсутствие ключа — корректно по I-6 (лучше нет значения, чем выдуманное);
+    # некорректно было МОЛЧАНИЕ о причине.
+    for key, src in (("eth_d_change_24h", "eth_d"), ("stable_cd_change_24h", "stable_cd")):
+        if now.get(src) is None or prior.get(src) is None:
+            continue  # значения просто нет в срезе — это не отказ, а штатная неполнота
+        try:
+            out[key] = round(float(now[src]) - float(prior[src]), 4)
+        except (TypeError, ValueError) as exc:
+            log.warning(
+                "dominance_change_unparsable",
+                key=key,
+                now=repr(now.get(src))[:40],
+                prior=repr(prior.get(src))[:40],
+                error=repr(exc),
+            )
     return out
 
 

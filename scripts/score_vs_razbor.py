@@ -36,6 +36,8 @@ from typing import Any
 
 import ccxt.async_support as ccxt
 
+from _verify_common import report_skipped
+
 from hunt_core.prizrak.config import PrizrakConfig
 from hunt_core.engine.params import OHLCV_LIMIT
 from hunt_core.engine.spot import SpotEngine
@@ -47,6 +49,9 @@ CFG = PrizrakConfig.load()
 SIGNS: list[tuple[str, float]] = []
 QUALITY: dict[str, int] = {}
 TFS = ("5m", "15m", "1h", "4h", "1d", "1w")
+# Незагруженные пары символ/ТФ. Печатаются РЯДОМ с recall: метрика, полученная на неполном
+# наборе, несравнима с прошлым замером, и знать об этом надо до сравнения, а не после.
+SKIPPED: list[str] = []
 
 # Эталон: уровни, снятые С ГРАФИКОВ автора и сверенные по свечам в соответствующем .razbor.md.
 # Это не «примерно оттуда» — каждое число прочитано с его разметки (кромка бокса, подпись оси,
@@ -392,7 +397,13 @@ async def main() -> None:
                     # продовой глубине — как +0 зон. ОДИН И ТОТ ЖЕ КОД, РАЗНЫЙ ЗНАК; решение,
                     # принятое на голодных кадрах, относится не к тому, что исполняется.
                     o = await ex.fetch_ohlcv(sym, tf, limit=OHLCV_LIMIT)
-                except Exception:
+                except Exception as exc:  # noqa: BLE001 — недоступный ТФ не приговор прогону
+                    # ⚠ Здесь пропуск опаснее, чем в остальных верификаторах: этот скрипт
+                    # считает RECALL против размеченных уровней автора. Молча выпавший ТФ
+                    # уменьшает и числитель, и знаменатель по-разному, то есть искажает
+                    # саму метрику, а не только охват. Число сравнивают с прошлым замером —
+                    # значит рядом обязано стоять, на скольких парах оно получено.
+                    SKIPPED.append(f"{sym}/{tf}: {exc.__class__.__name__}")
                     continue
                 step = ex.parse_timeframe(tf) * 1000
                 raw[tf] = [b for b in o if int(b[0]) + step <= cutoff]
@@ -495,6 +506,9 @@ async def main() -> None:
             print(f"\nКАЧЕСТВО ПОПАДАНИЙ: {q}"
                   f"   (ШИРОКАЯ = накрыт полосой >{_INTEREST_ZONE_MAX_WIDTH_PCT:g}%, лимитку не поставить)")
             print(f"  локализовано точно: {tot_hit - wide}/{tot_lvl} = {(tot_hit - wide) / tot_lvl * 100:.0f}%")
+        report_skipped(SKIPPED)
+        if SKIPPED:
+            print("    recall ниже посчитан НА ЗАГРУЖЕННОЙ ЧАСТИ и с прошлым замером несравним")
         print(f"\n{'=' * 60}\nИТОГО recall {tot_hit}/{tot_lvl} = {tot_hit / tot_lvl * 100:.0f}%"
               f"   ·   зон напечатано: {tot_zones} (он публикует 2–4 на символ)")
 

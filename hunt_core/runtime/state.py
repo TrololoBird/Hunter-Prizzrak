@@ -277,6 +277,14 @@ def save_session_checkpoint(state: SymbolStateStore | None = None) -> Path | Non
     - ``session_checkpoint.pkl.gz`` — pickle for fast process recovery.
 
     Prefer JSON for cross-version compatibility; fall back to pickle for speed.
+
+    ⚠ **Публикация — только ``Path.replace``, никогда ``Path.rename``.** Это не стилевая
+    придирка: на POSIX ``rename`` перезаписывает цель молча, а на Windows ``os.rename``
+    бросает ``FileExistsError: [WinError 183]``, если файл уже есть. Проект писался на
+    macOS, поэтому дефект был невидим там и абсолютен здесь — живой прогон 2026-08-01 дал
+    ОБА сохранения упавшими, то есть чекпойнт не обновлялся НИ РАЗУ после первого создания,
+    и рестарт поднимал состояние произвольной давности. ``replace`` атомарен на обеих
+    платформах и перезаписывает.
     """
     store = state or current_symbol_state()
     data = _checkpoint_data(store)
@@ -289,7 +297,7 @@ def save_session_checkpoint(state: SymbolStateStore | None = None) -> Path | Non
     try:
         tmp = SESSION_DIR / "_checkpoint.json.tmp"
         tmp.write_text(serde.dumps_str(data, indent=True), encoding="utf-8")
-        tmp.rename(json_dst)
+        tmp.replace(json_dst)  # НЕ rename: на Windows он падает, если цель существует
         saved = json_dst
     except OSError:
         LOG.exception("session_checkpoint_json_save_failed")
@@ -303,7 +311,7 @@ def save_session_checkpoint(state: SymbolStateStore | None = None) -> Path | Non
         tmp = SESSION_DIR / "_checkpoint.pkl.tmp"
         with gzip.open(tmp, "wb") as f:
             pickle.dump(data, f)
-        tmp.rename(pkl_dst)
+        tmp.replace(pkl_dst)  # НЕ rename: см. предупреждение в докстроке
         saved = pkl_dst
     except OSError:
         LOG.exception("session_checkpoint_pickle_save_failed")

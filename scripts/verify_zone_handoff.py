@@ -24,6 +24,8 @@ import sys
 
 import ccxt.async_support as ccxt
 
+from _verify_common import report_skipped, verdict_scope
+
 from hunt_core.prizrak.config import PrizrakConfig
 from hunt_core.prizrak.setups import build_symbol_setups
 from hunt_core.prizrak.zone_watch import (
@@ -35,6 +37,8 @@ from hunt_core.prizrak.zone_watch import (
 
 CFG = PrizrakConfig.load()
 TFS = ("5m", "15m", "1h", "4h", "1d", "1w")
+# Незагруженные пары символ/ТФ — печатаются рядом с вердиктом (см. хвост main).
+SKIPPED: list[str] = []
 
 
 async def main(symbols: list[str]) -> None:
@@ -50,7 +54,10 @@ async def main(symbols: list[str]) -> None:
             for tf in TFS:
                 try:
                     o = await ex.fetch_ohlcv(sym, tf, limit=500)
-                except Exception:
+                except Exception as exc:  # noqa: BLE001 — недоступный ТФ не приговор прогону
+                    # Пропуск обязан дойти до итога: вердикт «гейт выносит осмысленный
+                    # вердикт» на половине данных — утверждение шире сделанного.
+                    SKIPPED.append(f"{sym}/{tf}: {exc.__class__.__name__}")
                     continue
                 step = ex.parse_timeframe(tf) * 1000
                 raw[tf] = [b for b in o if int(b[0]) + step <= now]  # I-5
@@ -102,6 +109,7 @@ async def main(symbols: list[str]) -> None:
 
     problems = [f"{s} {lab}: R:R {rr} прошёл при поле {CFG.min_rr}"
                 for s, lab, rr, _w in passed if rr < float(CFG.min_rr)]
+    report_skipped(SKIPPED)
     if problems:
         print(f"\n❌ ГЕЙТ ПРОПУСКАЕТ НИЖЕ ПОЛА: {len(problems)}")
         for p in problems:
@@ -109,7 +117,8 @@ async def main(symbols: list[str]) -> None:
     elif not passed:
         print("\n⚠️  гейт отклонил ВСЕ зоны — проверить, не зарезан ли путь целиком")
     else:
-        print("\n✅ гейт выносит осмысленный вердикт: всё прошедшее выше пола")
+        print(f"\n✅ гейт выносит осмысленный вердикт: всё прошедшее выше пола"
+              f"{verdict_scope(SKIPPED)}")
 
 
 if __name__ == "__main__":

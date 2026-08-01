@@ -66,11 +66,23 @@ def _load_wait_sent() -> dict[str, tuple[str, datetime]]:
     except Exception:  # noqa: BLE001 — нет файла / битый JSON: начинаем с чистой памяти
         return {}
     out: dict[str, tuple[str, datetime]] = {}
+    dropped: list[str] = []
     for sym, val in (raw or {}).items():
         try:
             out[str(sym).upper()] = (str(val["fp"]), datetime.fromisoformat(str(val["at"])))
-        except Exception:  # noqa: BLE001 — одна битая запись не должна ронять остальные
-            continue
+        except Exception as exc:  # noqa: BLE001 — одна битая запись не должна ронять остальные
+            # Битая запись пропускается, но НЕ молча: потеря памяти отправок означает
+            # повторный алерт по символу, и объяснить его потом будет нечем. Копим и
+            # рапортуем разом — построчный лог на массово битом файле сам стал бы шумом.
+            dropped.append(f"{sym}:{exc.__class__.__name__}")
+    if dropped:
+        LOG.warning(
+            "wait_sent_records_dropped",
+            count=len(dropped),
+            kept=len(out),
+            samples=dropped[:10],
+            path=str(_WAIT_STATE_PATH),
+        )
     return out
 
 
