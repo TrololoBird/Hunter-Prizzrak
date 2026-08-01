@@ -74,6 +74,7 @@
       "Bash(git remote*)",
       "Bash(git config*)",
 
+      "Bash(gh api*)",
       "Bash(gh auth status*)",
       "Bash(gh repo view*)",
       "Bash(gh repo clone*)",
@@ -103,10 +104,21 @@
       "Agent(config-drift-auditor)",
       "Agent(Explore)"
     ],
-    "ask": [
-      "Bash(gh api*)"
+    "_ПОЧЕМУ_ask_ПУСТ": [
+      "Здесь стояло 'Bash(gh api*)'. Правило ask СИЛЬНЕЕ defaultMode: bypassPermissions —",
+      "режим был включён, а вопросы всё равно приходили, и ровно на gh api (замер 2026-08-01:",
+      "диалог на `gh api repos/.../branches/main/protection`, при активном Bypass permissions).",
+      "Владелец потребовал полный доступ; ограничение СНЯТО, а не обойдено.",
+      "Разумность держит список deny ниже: он действует и в bypass-режиме, поэтому опасные",
+      "ветки gh api закрыты запретом, а не вопросом, который можно машинально прокликать."
     ],
+    "ask": [],
     "deny": [
+      "Bash(gh api * -X DELETE*)",
+      "Bash(gh api * --method DELETE*)",
+      "Bash(gh api */actions/secrets*)",
+      "Bash(gh api */actions/variables*)",
+      "Bash(gh api */keys*)",
       "Read(./.env)",
       "Read(./.env.*)",
       "Edit(./.env)",
