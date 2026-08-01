@@ -382,7 +382,11 @@ async def analyst_pinned_loop(
                 LOG.exception("analyst_pinned_loop_symbol_failed", symbol=sym)
 
         if send_telegram and broadcaster is not None and lifecycle_candidates:
-            from hunt_core.prizrak.arbiter import deep_cooldown_ok, mark_deep_sent
+            from hunt_core.prizrak.arbiter import (
+                deep_cooldown_ok,
+                mark_deep_sent,
+                observe_outcome_gates,
+            )
 
             queue = load_signal_queue()
             # Кулдаун применяется ДО выбора героя. Раньше схлопывание шло первым, а кулдаун
@@ -431,6 +435,16 @@ async def analyst_pinned_loop(
                 # Per-(symbol, setup_kind) cooldown so distinct theses on one symbol each get
                 # through, but the same thesis can't spam.
                 cooldown_key = f"{sym}:{kind}"
+                # ⚠ НАБЛЮДЕНИЕ, А НЕ ГЕЙТ. Пять гейтов по исходу в `track/_cooldowns.py`
+                # не подключены (все ссылки — импорт и `__all__`, вызовов ноль), поэтому
+                # единственный тормоз эмиссии — таймер `deep_cooldown_ok`, слепой к
+                # результату. Включить их «как есть» нельзя: пороги откалиброваны на
+                # 283 записях полосы МАНИПУЛЯЦИЙ, а `.claude/rules/prizrak.md` запрещает
+                # переносить сюда чужие пороги и гейты. Здесь считается вердикт и пишется
+                # в лог — чтобы к моменту, когда у призрака накопятся СВОИ закрытые сделки,
+                # было по чему калибровать. См. `prizrak/arbiter.py::observe_outcome_gates`.
+                observe_outcome_gates(sym, str(getattr(native.prizrak, "direction", "") or
+                                               (native.prizrak.summary or {}).get("action") or ""))
                 if deep_cooldown_ok(cooldown_key):
                     if await emitter.emit_deep(
                         broadcaster,
