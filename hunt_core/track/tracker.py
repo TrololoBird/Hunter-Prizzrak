@@ -748,6 +748,48 @@ def register_signal_open(
     if isinstance(book_walls, dict):
         signal["book_walls"] = book_walls
     signal["symbol"] = symbol.upper()
+
+    # ⚠ НЕ ЗАТИРАТЬ УЖЕ ОБЪЯВЛЕННУЮ СДЕЛКУ. Здесь стояло голое присваивание, и повторный
+    # вызов по ТОМУ ЖЕ `SYMBOL:direction` молча заменял запись живого сигнала: без
+    # `close_signal`, без архива в `closed_history`, без строки в логе. Сделка исчезала —
+    # её исход не попадал в статистику никогда, а follow-up по SL/TP начинали считаться от
+    # НОВОЙ геометрии, хотя в канал ушла старая.
+    #
+    # Гейты, стоявшие рядом, этот случай не закрывают: дедуп по `entry_message_id` ловит
+    # только повтор ОДНОЙ карточки, а блок выше закрывает ПРОТИВОПОЛОЖНОЕ направление.
+    # Совпадающее направление не проверял никто. `prizrak/zone_watch.py::_handoff` свой гард
+    # имеет (возвращает `"occupied"`), а путь эмиссии `runtime/emitter.py::_register_tracker`
+    # — нет; поэтому гард стоит ЗДЕСЬ, у единственной точки записи, а не у одного из двух
+    # вызывающих.
+    #
+    # Отказ, а не перезапись: сделка уже объявлена читателю, и подмена её геометрии на лету
+    # рассинхронизировала бы канал с трекером. Тот же выбор, что и у `_handoff`.
+    #
+    # ⚠ РАЗМЕН НАЗВАН ЧЕСТНО. Если сигнал завис незакрытым, отказ блокирует направление до
+    # его разрешения (`auto_resolve_active_signals`, TTL-пути). Прежнее поведение
+    # самоизлечивалось, но ценой уничтожения данных. Поэтому отказ ГРОМКИЙ и печатает
+    # возраст висящей записи: зависший сигнал становится видимым, а не превращается в
+    # тихую пробку.
+    existing = (state.get("signals") or {}).get(k)
+    if isinstance(existing, dict) and _is_signal_active(existing):
+        opened = str(existing.get("opened_at") or "")
+        age_h: float | None = None
+        try:
+            age_h = round((now - datetime.fromisoformat(opened)).total_seconds() / 3600.0, 1)
+        except (TypeError, ValueError):
+            age_h = None
+        _LOG.warning(
+            "register_signal_open_refused_occupied",
+            symbol=symbol.upper(),
+            direction=dir_l,
+            existing_status=existing.get("status"),
+            existing_opened_at=opened or None,
+            existing_age_h=age_h,
+            note="направление занято живой сделкой — перезапись стёрла бы её исход; "
+                 "если запись висит, её обязан снять auto_resolve/TTL, а не новый сигнал",
+        )
+        return
+
     state.setdefault("signals", {})[k] = signal
     record_confirm_burst(state, now=now)
 
