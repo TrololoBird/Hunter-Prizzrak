@@ -336,8 +336,21 @@ class Engine:
 
     # The complete /futures/data statistic set (implicit method, response key, plane) — same
     # {symbol, period, limit} shape. basis differs (pair + contractType) and is handled separately.
+    # ⚠ `oi_hist_5m` УБРАН 2026-08-01 — у него был ноль потребителей.
+    #
+    # Свип по дереву: имя `oi_hist_5m` встречалось РОВНО дважды — в этом кортеже и в
+    # комментарии ниже. Ни `view/models.py`, ни `features/**`, ни `maps/**` его не читали
+    # (совпадения в `maps/oi.py` — это `oi_history`, параметр функции, другое имя).
+    # Для сравнения у соседнего `taker_5m` четыре настоящих читателя.
+    #
+    # Цена была не нулевая: план опрашивался КАЖДЫЙ цикл позиционирования на КАЖДЫЙ символ
+    # и жёг бюджет `/futures/data` — семейства с отдельным лимитом 1000 запросов / 5 мин,
+    # которое не отдаёт заголовков веса и по которому уже был бан (53 бана за сутки
+    # 2026-07-28). Снятие убирает 1/5 запросов этого семейства — 7 запросов за цикл при
+    # семи символах, и линейно с ростом вселенной.
+    #
+    # Возвращать — только вместе с продюсером И читателем в одном коммите.
     _FUTURES_DATA_STATS: tuple[tuple[str, str, str], ...] = (
-        ("fapiDataGetOpenInterestHist", "sumOpenInterest", "oi_hist_5m"),
         ("fapiDataGetTakerlongshortRatio", "buySellRatio", "taker_5m"),
         ("fapiDataGetGlobalLongShortAccountRatio", "longShortRatio", "global_ls_5m"),
         ("fapiDataGetTopLongShortAccountRatio", "longShortRatio", "top_ls_acct_5m"),
