@@ -17,7 +17,7 @@ from typing import Any
 
 import structlog
 
-from hunt_core.engine import params
+from hunt_core.engine import metrics, params
 from hunt_core.engine.freshness import Bar
 
 # --- /futures/data ban backoff (Binance error -1003) ---------------------------------------------
@@ -245,6 +245,32 @@ async def fetch_futures_data_series(
     return out
 
 
+def _record_weight_after(exchange: Any) -> None:
+    """Опубликовать фактический расход IP-веса и предупредить при приближении к бюджету.
+
+    Порог 75% выбран НЕ на глаз: ccxt разрешает 1200 cost-units/мин (``rateLimit=50 мс``,
+    ``capacity=1`` ⇒ всплеска нет), то есть половину биржевых 2400. Значит штатный расход
+    не должен подходить к 1800 даже теоретически, и 75% — это уже сигнал, что либо считает
+    кто-то мимо троттлера, либо пора мерить всерьёз, а не поднимать потолок наугад.
+
+    Пустой результат — штатный путь, а не сбой: ``/futures/data/*`` заголовков не отдаёт
+    вовсе. Молчим (см. ``metrics.record_used_weight``).
+    """
+    try:
+        found = metrics.record_used_weight(exchange, venue=str(getattr(exchange, "id", "binance")))
+    except Exception as exc:  # noqa: BLE001 — телеметрия НЕ должна ронять путь данных
+        LOG.debug("used_weight_record_failed", err=str(exc))
+        return
+    minute = found.get("1m")
+    if minute is not None and minute >= int(params.WEIGHT_BUDGET_1M * params.WEIGHT_WARN_FRACTION):
+        LOG.warning(
+            "binance_weight_high",
+            used=minute,
+            budget=params.WEIGHT_BUDGET_1M,
+            pct=round(100.0 * minute / params.WEIGHT_BUDGET_1M, 1),
+        )
+
+
 async def fetch_all_tickers(exchange: Any) -> dict[str, dict[str, Any]]:
     """All-symbol 24h tickers via REST ``fetch_tickers`` — the one universe-wide REST batch.
 
@@ -263,6 +289,11 @@ async def fetch_all_tickers(exchange: Any) -> dict[str, dict[str, Any]]:
     except Exception as exc:  # noqa: BLE001
         LOG.warning("engine_fetch_all_tickers_failed", venue=getattr(exchange, "id", "?"), err=str(exc))
         return {}
+    # Снимаем ФАКТИЧЕСКИЙ расход веса. Это самый тяжёлый одиночный вызов в дереве (40), и
+    # он универсально-вселенский, поэтому лучшая точка замера: после него счётчик минуты
+    # заведомо ненулевой. До 2026-08-01 бюджет 2400/мин жил только как проза в комментариях,
+    # и первым известием о перерасходе был бан (53 за сутки 2026-07-28).
+    _record_weight_after(exchange)
     return {s: t for s, t in (tickers or {}).items() if isinstance(t, dict)}
 
 
