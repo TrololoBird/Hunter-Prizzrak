@@ -293,8 +293,41 @@ def col(df: Any, name: str, default: float = 0.0, *, idx: int = -1) -> float:
         # а не диагностический шум. exc_info снят намеренно: тип исключения здесь ничего
         # не добавляет (их ровно три), а полный трейс на сотнях вызовов забивал вывод.
         LOG.warning("col_substituted_default", column=name, idx=idx, default=default)
-        _SUBSTITUTIONS[name] = _SUBSTITUTIONS.get(name, 0) + 1
+        with _SUBSTITUTIONS_LOCK:  # ⚠ замок тут ОБЯЗАТЕЛЕН так же, как в ветке выше
+            _SUBSTITUTIONS[name] = _SUBSTITUTIONS.get(name, 0) + 1
         return default
+
+
+def col_opt(df: Any, name: str, *, idx: int = -1) -> float | None:
+    """Прочитать значение или честно вернуть ``None`` — БЕЗ подстановки числа.
+
+    ⚠ ЗАЧЕМ ОТДЕЛЬНАЯ ФУНКЦИЯ. :func:`col` по построению возвращает ``default`` (ноль),
+    когда значения нет, и комментарий выше объясняет, почему это опасно: для процентиля
+    ноль — не «нейтрально», а КРАЙНЕЕ показание, читаемое как «полоса самая узкая за всю
+    историю». Проверка `if name in df.columns` от этого не спасает: колонка бывает на
+    месте, а значение в ней ``null`` — так и происходит на прогретом хвосте
+    ``rolling_rank(window_size=50)``, где первые 50 баров пусты по построению.
+
+    Замер 2026-08-01, живой прогон: **31 подстановка** по `bb_width_pctile50` при том, что
+    колонка присутствовала во всех кадрах — то есть срабатывала именно вторая ветка.
+
+    Возвращает ``None``, и потребитель обязан этот ``None`` пронести (I-6), а не заменить
+    числом у себя. Счётчик здесь НЕ трогается: отсутствие значения, честно отданное как
+    ``None``, — это не подстановка, а корректная работа.
+    """
+    if df is None or df.is_empty() or name not in df.columns:
+        return None
+    try:
+        value = df.item(idx, name)
+    except (IndexError, ValueError):
+        return None
+    if value is None:
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) else None
 
 
 _col = col  # legacy name in split body
@@ -591,9 +624,14 @@ def tf_snapshot(
         "vwap_dev_atr": round(_col(df, "vwap_deviation_atr14", idx=idx), 2)
         if "vwap_deviation_atr14" in df.columns
         else None,
-        "bb_width_pctile": round(_col(df, "bb_width_pctile50", idx=idx), 3)
-        if "bb_width_pctile50" in df.columns
-        else None,
+        # ⚠ Через `col_opt`, а не `_col`: у процентиля ноль — не «нет данных», а крайнее
+        # показание («полоса самая узкая за 50 баров»). Прежняя проверка смотрела только на
+        # НАЛИЧИЕ колонки, а пусто бывает ЗНАЧЕНИЕ — на прогретом хвосте `rolling_rank`
+        # первые 50 баров null по построению. Живой прогон 2026-08-01 дал 31 такую
+        # подстановку при колонке, присутствовавшей во всех кадрах.
+        "bb_width_pctile": (
+            None if (_v := col_opt(df, "bb_width_pctile50", idx=idx)) is None else round(_v, 3)
+        ),
         "obv_rising": bool(_col(df, "obv", idx=idx) > _col(df, "obv_ema20", idx=idx))
         if "obv" in df.columns and "obv_ema20" in df.columns
         else None,
