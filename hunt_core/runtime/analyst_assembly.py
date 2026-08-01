@@ -8,6 +8,7 @@ calibration/diagnostics serializer (allowed disk format), not a transport for a 
 from __future__ import annotations
 
 import os
+import time
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -348,7 +349,10 @@ async def analyst_pinned_loop(
 
     interval = interval_s if interval_s is not None else analyst_pinned_interval_s()
     LOG.info("analyst_pinned_loop_start", symbols=list(PINNED_SYMBOLS), interval_s=interval)
+    # ⚠ Дедлайн берётся ДО обхода, а не после. Смотри пояснение у сна в конце цикла.
+    walk_started = 0.0
     while not should_stop():
+        walk_started = time.monotonic()
         v2cfg = load_analyst_config()
         emitter = SignalEmitter()
         lifecycle_candidates: list[tuple[NativeAnalystView, Any, str]] = []
@@ -442,8 +446,34 @@ async def analyst_pinned_loop(
                 except Exception:
                     LOG.exception("analyst_pinned_wait_card_failed",
                                   symbol=_compact_symbol(native.view.symbol))
+        # ⚠ СОН ДЕДЛАЙННЫЙ, А НЕ ФИКСИРОВАННЫЙ. Здесь стояло `sleep(max(30.0, interval))`
+        # ПОСЛЕ обхода, поэтому период = обход + interval, а не interval.
+        #
+        # ЗАМЕР (аудит 2026-08-01 по `data/analyst_ticks.jsonl`, 139 строк, 21 проход):
+        # медиана периода по символам **371.3–390.3 с** при заявленных 300 (BTC 374.3,
+        # XAU 390.3); медиана длительности обхода — **61.2 с** (min 41.9, max 175.4).
+        # Арифметика сходится: 61.2 + 300 = 361.2 ≈ измеренному. Разрыв 24–30% и растёт
+        # линейно с числом пиннутых символов, а кулдауны и `signal_queue_ttl_hours`
+        # калибруются против числа, которого нет.
+        #
+        # Этот же класс в проекте УЖЕ починен — `engine/api.py::_poll_positioning` спит
+        # `max(0, POLL_S - walk)` (правило `.claude/rules/engine-data-plane.md`, ловушка №1:
+        # «период складывается из такта И обхода»). Здесь применено то же лечение.
+        #
+        # Просрочка не глотается: если обход длиннее интервала, период задаёт обход, и об
+        # этом пишется в лог — иначе `interval_s` был бы величиной, которая не связывает,
+        # и никто бы этого не увидел.
+        walk_s = time.monotonic() - walk_started
+        pause = max(0.0, interval - walk_s)
+        if pause <= 0.0:
+            LOG.warning(
+                "analyst_pinned_interval_overrun",
+                walk_s=round(walk_s, 1),
+                interval_s=interval,
+                note="обход длиннее интервала — период эмиссии задаёт обход, а не настройка",
+            )
         try:
-            await asyncio.sleep(max(30.0, interval))
+            await asyncio.sleep(max(1.0, pause))
         except asyncio.CancelledError:
             break
     LOG.info("analyst_pinned_loop_stop")
