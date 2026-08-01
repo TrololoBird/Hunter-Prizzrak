@@ -7,6 +7,7 @@ and the deep/analyst loop call this instead of building a row. Fully typed, fail
 """
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any, NamedTuple
 
@@ -222,7 +223,29 @@ async def assemble_native_analyst(
             )}
         )
 
-    panel = compute_features(view)
+    # ⚠ В РАБОЧЕМ ПОТОКЕ, а не в цикле. `compute_features` — самый дорогой CPU-блок проекта
+    # и он ЧИСТЫЙ (`MarketView → FeaturePanel`, см. его докстроку), поэтому переносится
+    # целиком, без разбора на части.
+    #
+    # ЧТО ОН ЛОМАЛ. Профиль живого тика 2026-08-01: 35.4 с на 7 символов, то есть **5.05 с
+    # сплошного CPU на символ**, прямо в event loop. Пока он считается, ни один `watch_*` не
+    # может прочитать кадр — датчик `engine_event_loop_stalled` намерил провал **12.15 с**
+    # при самом коротком бонде 5 с. Отсюда вся картина прогона: `bbo` при медиане темпа 0.3 с
+    # даёт p90 20.6 с, планы объявляются протухшими, и `not_ready` = 2..5 из 7 символов
+    # КАЖДЫЙ тик. Причина не в бирже: она шлёт трижды в секунду.
+    #
+    # ПОЧЕМУ ЭТО РАБОТАЕТ. Polars отпускает GIL на время своих вычислений, поэтому поток
+    # снимает блокировку цикла и заодно занимает остальные ядра. Чисто питоновские участки
+    # (`features/pivots.py::_swing_detect_python` — 8.9 с профиля) GIL держат, но отдают его
+    # каждые `sys.setswitchinterval` (5 мс), а не через 12 секунд: цикл снова получает
+    # управление регулярно.
+    #
+    # ⚠ ПОТОКОБЕЗОПАСНОСТЬ ПРОВЕРЕНА, А НЕ ПРЕДПОЛОЖЕНА. Модульное состояние на этом пути:
+    # `features/prepare.py::_FRAME_CACHE` и `features/pivots.py::_SPEC_COLUMN_CACHE` — оба
+    # уже под `threading.Lock`; `features/snapshot.py::_SUBSTITUTIONS` замок получил здесь же
+    # (инкремент через `get`+`set` терял бы часть счёта, а занижающий счётчик дыр в данных
+    # хуже отсутствующего — он выглядит как измерение).
+    panel = await asyncio.to_thread(compute_features, view)
 
     trades = list((getattr(ex, "trades", {}) or {}).get(symbol) or [])
     cross_liq = rt.multi.cross_liquidations(symbol)
