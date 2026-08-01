@@ -80,20 +80,57 @@ def split_by_lane(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]
     return out
 
 
+def pollution_reason(row: dict[str, Any]) -> str | None:
+    """Почему запись не считается настоящим живым сигналом. ``None`` — считается.
+
+    ⚠ ЗАЧЕМ ПРИЧИНА, А НЕ ФЛАГ. Прежняя редакция возвращала только ``bool``, и отбраковка
+    была тотальной и молчаливой: `/stats` показывал пустой винрейт на здоровом прогоне,
+    что неотличимо от «сделок не было». Владелец, у которого это единственная обратная
+    связь, не мог отличить «стратегия не сработала» от «учёт сломан».
+
+    ⚠ ЧТО БЫЛО СЛОМАНО. Тест требовал ``score`` и ``fuel``. Оба поля пишет
+    `tracker.py::register_signal_open` из `setup["long_score"]` / `setup["long_fuel"]`, а
+    писал эти ключи в setup ВЫРЕЗАННЫЙ модуль сканера (удалён 2026-07-31). Проверено
+    свипом по дереву 2026-08-01: в `hunt_core/prizrak/**` и `hunt_core/runtime/**` ноль
+    вхождений `long_score`/`dump_score`/`long_fuel`/`dump_fuel`. Значит у КАЖДОГО сигнала
+    единственной оставшейся стратегии оба поля `None`, и КАЖДАЯ закрытая сделка
+    отбрасывалась. Подтверждено на живой записи: `data/signal_history.jsonl` — 0 из 1
+    строк несут `score`+`fuel`.
+
+    Это ровно класс «читатель без продюсера», который CLAUDE.md называет фирменным, — но
+    в самом дорогом месте: не в фиче, а в учёте результата.
+
+    ЧТО ПРОВЕРЯЕТСЯ ТЕПЕРЬ — поля, которые `register_signal_open` пишет ВСЕГДА и которых
+    у легаси/частичных архивных строк действительно нет: момент открытия, направление и
+    геометрия входа со стопом. Без них строку нельзя ни оценить, ни перевести в R
+    (инвариант I-10), поэтому исключение честное. Загрязнение тестовыми фикстурами при
+    этом закрыто НЕ здесь, а на записи — `outcomes.py::_refuse_production_write` (I-9).
+    """
+    if not row.get("opened_at"):
+        return "нет opened_at"
+    if not row.get("direction"):
+        return "нет direction"
+    if row.get("stop_loss") is None:
+        return "нет stop_loss — сделку нельзя перевести в R (I-10)"
+    has_entry = (
+        row.get("entry_lo") is not None
+        or row.get("entry_hi") is not None
+        or row.get("entry_zone")
+        or row.get("entry") is not None
+    )
+    if not has_entry:
+        return "нет геометрии входа"
+    return None
+
+
 def is_polluted(row: dict[str, Any]) -> bool:
     """Canonical 'not a genuine live signal' test, shared by every reporter.
 
-    A row is polluted (excluded from live win-rate) when it lacks the fields a
-    real tracker open always records: an open timestamp, a detector score, and a
-    fuel reading. Legacy/partial archive rows miss these and must never inflate
-    or deflate live WR. Keep this the single definition — tracker and
-    stats_report both import it so their n/WR reconcile.
+    Тонкая обёртка над :func:`pollution_reason` — единственное определение, чтобы `n`/WR
+    у трекера и у `stats_report` сходились. Причину отбраковки берите оттуда: она нужна,
+    когда отчёт вышел пустым и надо отличить «сделок не было» от «учёт сломан».
     """
-    return (
-        not row.get("opened_at")
-        or row.get("score") is None
-        or row.get("fuel") is None
-    )
+    return pollution_reason(row) is not None
 
 
 def genuine_closed(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -283,5 +320,6 @@ __all__ = [
     "lane_of",
     "outcome_archive_key",
     "outcome_kind",
+    "pollution_reason",
     "split_by_lane",
 ]
