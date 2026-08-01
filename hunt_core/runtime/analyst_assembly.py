@@ -29,16 +29,54 @@ if TYPE_CHECKING:
 LOG = structlog.get_logger("hunt.analyst_assembly")
 
 
+def _pinned_cfg(key: str) -> Any:
+    """Значение из секции ``[analyst.pinned]`` файла настроек. ``None`` — ключа нет.
+
+    ⚠ СЕКЦИЯ БЫЛА ФАНТОМНОЙ ЦЕЛИКОМ. `config.defaults.toml` объявляет `[analyst.pinned]`
+    с `interval_s`, `tg_on_change` и `tg_stale_hours`, а код читал ТОЛЬКО переменные
+    окружения. Свип 2026-08-01: у `tg_on_change` и `tg_stale_hours` ноль читателей во всём
+    дереве, `interval_s` читался как `HUNT_DEEP_PINNED_INTERVAL`. То есть правка TOML была
+    МОЛЧАЛИВЫМ no-op — ровно ловушка, о которой предупреждает CLAUDE.md («editing the TOML
+    silently no-ops»), и владелец, крутивший интервал в конфиге, не менял ничего.
+
+    Порядок теперь: TOML задаёт значение, переменная окружения ПЕРЕКРЫВАЕТ его (аварийный
+    рычаг оператора). Не наоборот: `config.defaults.toml` объявлен истиной, и он ей должен
+    быть.
+
+    ⚠ ЧЕРЕЗ ``config_section``, А НЕ ``load_config_defaults_toml``. Вторая — форвардер по
+    белому списку и отдаёт только ``{"gates", "tracker"}``; секции ``analyst`` в её выводе
+    НЕТ. Первая редакция этой правки читала именно её, и TOML продолжал игнорироваться —
+    поймал собственный контроль (подменил значение на 777, код видел 300), а не обзор кода.
+    """
+    try:
+        from hunt_core.domain.config import config_section
+
+        section = config_section("analyst", "pinned")
+    except Exception as exc:  # noqa: BLE001 — отсутствие конфига не должно ронять полосу
+        LOG.warning("analyst_pinned_cfg_unreadable", key=key, error=repr(exc))
+        return None
+    return section.get(key)
+
+
 def analyst_pinned_interval_s() -> float:
-    return float(os.getenv("HUNT_DEEP_PINNED_INTERVAL", "300") or 300)
+    env = os.getenv("HUNT_DEEP_PINNED_INTERVAL")
+    if env:
+        return float(env)
+    from_toml = _pinned_cfg("interval_s")
+    if from_toml is not None:
+        try:
+            return float(from_toml)
+        except (TypeError, ValueError):
+            LOG.warning("analyst_pinned_interval_unparsable", value=repr(from_toml)[:40])
+    return 300.0
 
 
 def deep_tg_on_change() -> bool:
-    return os.getenv("HUNT_DEEP_TG_ON_CHANGE", "1").strip().lower() not in {
-        "0",
-        "false",
-        "no",
-    }
+    env = os.getenv("HUNT_DEEP_TG_ON_CHANGE")
+    if env is not None:
+        return env.strip().lower() not in {"0", "false", "no"}
+    from_toml = _pinned_cfg("tg_on_change")
+    return True if from_toml is None else bool(from_toml)
 
 
 def _compact_symbol(symbol: str) -> str:

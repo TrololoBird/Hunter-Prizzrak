@@ -31,10 +31,24 @@ hunt_confirm = false
 # Deep /signal uses HUNT_FULL_PREPARE=1 + microstructure for these anchors.
 analyst = { BTCUSDT = true, ETHUSDT = true, SOLUSDT = true, XRPUSDT = true, XAUUSDT = true, XAGUSDT = true, PAXGUSDT = true }
 
+# Полоса эмиссии ПРИЗРАКа (`runtime/analyst_assembly.py::analyst_pinned_loop`).
+#
+# ⚠ ДО 2026-08-01 ЭТА СЕКЦИЯ БЫЛА ФАНТОМНОЙ ЦЕЛИКОМ: код читал только переменные
+# окружения, а правка TOML была молчаливым no-op. Свип показал ноль читателей у всех трёх
+# ключей. Теперь `interval_s` и `tg_on_change` читаются отсюда, а переменные окружения
+# (`HUNT_DEEP_PINNED_INTERVAL`, `HUNT_DEEP_TG_ON_CHANGE`) их ПЕРЕКРЫВАЮТ — аварийный рычаг.
+#
+# `tg_stale_hours` удалён: у него не было читателя ни в TOML, ни в окружении. Ключ, который
+# ничего не настраивает, вводит в заблуждение того, кто придёт его крутить.
+#
+# ⚠ ЧТО ЭТО ЗА ЧИСЛО. `interval_s` — ПАУЗА между обходами, а не период эмиссии. Обход семи
+# пиннутых символов сам занимает медиану 61.2 с (замер по `data/analyst_ticks.jsonl`,
+# 21 проход), поэтому до правки дедлайнного сна реальный период был 371–390 с при
+# заявленных 300. Сон теперь дедлайнный, но при обходе длиннее интервала период задаёт
+# ОБХОД — об этом пишется `analyst_pinned_interval_overrun`.
 [analyst.pinned]
 interval_s = 300
 tg_on_change = true
-tg_stale_hours = 4
 
 [analyst]
 enabled = true
