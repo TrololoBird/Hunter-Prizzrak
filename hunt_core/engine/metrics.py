@@ -18,6 +18,8 @@ a scraper/alert rule … closes the loop» — но HTTP-эндпоинта в �
 """
 from __future__ import annotations
 
+from typing import Any
+
 import structlog
 from prometheus_client import Counter, Gauge, start_http_server
 
@@ -64,6 +66,25 @@ PLANE_BOUND_RATIO = Gauge(
 )
 
 
+# Фактический расход IP-веса, прочитанный из заголовка ответа Binance.
+#
+# ⚠ ЗАЧЕМ. Бюджет 2400/мин существовал в проекте ТОЛЬКО как проза в четырёх комментариях
+# (`engine/api.py`, `exchanges.py`, `params.py`, `rest.py`), и ни одна строка кода его не
+# читала — при том что ccxt отдаёт `exchange.last_response_headers` (проверено 2026-08-01).
+# То есть первым известием о перерасходе был бан: 53 бана за сутки 2026-07-28.
+#
+# Это делает осмысленным разговор о потолке троттлера. Сейчас ccxt разрешает 1200 cost-units
+# в минуту (`rateLimit=50 мс`, capacity=1 ⇒ burst нет), то есть ПОЛОВИНУ биржевого бюджета.
+# Поднимать эту границу вслепую нельзя: без факта расхода это гадание. Сначала измерить.
+USED_WEIGHT = Gauge(
+    "hunter_binance_used_weight",
+    "Actual IP weight consumed, as reported by Binance in the X-MBX-USED-WEIGHT-* response "
+    "header. Label `interval` is the header suffix (e.g. 1m). Compare against the venue budget "
+    "(2400/min on USDs-M fapi) and against ccxt's own ceiling of 1200/min.",
+    ["venue", "interval"],
+)
+
+
 def _plane_type(plane: str) -> str:
     """Coarsen a plane name to its low-cardinality type (``kline.4h`` → ``kline``)."""
     return plane.split(".", 1)[0] if plane else "unknown"
@@ -71,6 +92,47 @@ def _plane_type(plane: str) -> str:
 
 def set_feed_silence(venue: str, seconds: float) -> None:
     FEED_SILENCE.labels(venue=venue).set(seconds)
+
+
+def record_used_weight(exchange: Any, *, venue: str = "binance") -> dict[str, int]:
+    """Снять фактический расход веса из заголовков последнего ответа ccxt.
+
+    Читает ``exchange.last_response_headers`` и публикует каждый заголовок вида
+    ``X-MBX-USED-WEIGHT-<interval>`` (например ``X-MBX-USED-WEIGHT-1M``) в метрику.
+    Возвращает то, что нашёл, — вызывающему для лога.
+
+    ⚠ **Пустой ответ — это ДАННЫЕ, а не сбой.** Семейство ``/futures/data/*`` не
+    возвращает ``X-MBX-USED-WEIGHT-*`` вообще (замер 2026-07-27: все шесть эндпоинтов
+    отдают HTTP 200 с нулём ``x-mbx``-заголовков, при том что ``/fapi/v1/klines`` отдаёт
+    used-weight). У него свой скрытый бюджет 1000 запросов / 5 мин, и адаптивный бэк-офф
+    по заголовкам там невозможен в принципе — его держит ``rest.py::_FD_GATE``.
+    Поэтому здесь НЕ логируется предупреждение на пустой словарь: это была бы ложная
+    тревога на штатном пути.
+
+    Ключи заголовков приводятся к нижнему регистру: aiohttp отдаёт
+    ``CIMultiDictProxy``, регистр не гарантирован, а сравнение по точному имени
+    ``X-MBX-USED-WEIGHT-1M`` уже ломалось в других проектах именно на этом.
+    """
+    headers = getattr(exchange, "last_response_headers", None) or {}
+    found: dict[str, int] = {}
+    try:
+        items = headers.items()
+    except AttributeError:
+        return found
+    for raw_key, raw_value in items:
+        key = str(raw_key).lower()
+        if not key.startswith("x-mbx-used-weight-"):
+            continue
+        interval = key.rsplit("-", 1)[-1]
+        try:
+            weight = int(str(raw_value).strip())
+        except (TypeError, ValueError):
+            # Заголовок пришёл, но не числом — это уже аномалия, о ней сообщаем.
+            LOG.warning("used_weight_header_unparsable", header=key, value=str(raw_value)[:40])
+            continue
+        USED_WEIGHT.labels(venue=venue, interval=interval).set(weight)
+        found[interval] = weight
+    return found
 
 
 def record_reconnect(venue: str, reason: str) -> None:
@@ -141,9 +203,11 @@ __all__ = [
     "HEALTHY_SYMBOLS",
     "PLANE_CADENCE",
     "PLANE_BOUND_RATIO",
+    "USED_WEIGHT",
     "set_feed_silence",
     "record_reconnect",
     "record_staleness_reject",
+    "record_used_weight",
     "set_healthy_symbols",
     "set_plane_cadence",
     "start_exporter",
