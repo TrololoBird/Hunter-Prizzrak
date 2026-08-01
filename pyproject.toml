@@ -22,7 +22,7 @@ dependencies = [
     # `scripts/verify_talib_parity.py` на ЖИВЫХ кадрах; прежняя редакция этого
     # комментария ссылалась на tests/test_indicator_reference_values.py и «500+ тестов»,
     # а каталог tests/ удалён 2026-07-27 (см. CLAUDE.md).
-    "polars>=1.42.1",
+    "polars>=1.43.1",
     "polars-ols>=0.3.5",   # compute_(rolling_)least_squares positional exprs, mode=, RollingKwargs(null_policy=)
     "polars_ta>=0.5.17",   # ТОЛЬКО .tdx/.wq — сурфейсы без канонического аналога в TA-Lib (KDJ/PSY/BIAS/EMV/DPO/BOLL, ts_rank/ts_delta/ts_corr)
     # polars-talib = ВЕНДОРЕННАЯ TA-Lib 0.4.0, битовая совместимость, внешняя C-библиотека
@@ -34,8 +34,8 @@ dependencies = [
     # Разбор: docs/audit/talib-parity-2026-07-27.md
     "polars-talib>=0.1.6",
     "polars-ds>=0.12.0",   # query_entropy / ks_2samp exprs used by features/research_plugins.py
-    "numpy>=2.4.6,<2.5",  # ceiling: numba (transitive via polars-ta) requires numpy<2.5 on py3.14; 2.5 forces a numba/llvmlite downgrade that fails to build
-    "aiohttp>=3.13.5,<4",
+    "numpy>=2.5.1,<2.6",  # ceiling: numba (transitive via polars-ta) requires numpy<2.5 on py3.14; 2.5 forces a numba/llvmlite downgrade that fails to build
+    "aiohttp>=3.14.3,<4",
     "aiohttp-socks>=0.10.1",
     "python-socks[asyncio]>=2.7.1",
     "aiogram>=3.28.2,!=3.29.0",  # 3.29.0 yanked: severe slowdown parsing nested RichBlock entities
@@ -53,7 +53,7 @@ dependencies = [
     # Hard floor 4.5.44: older ccxt silently loses kline/markPrice/forceOrder WS
     # after Binance's 2026-04-23 fstream split (docs/HUNTER_TARGET_SPEC.md).
     "ccxt>=4.5.44",
-    "prometheus-client>=0.25.0",
+    "prometheus-client>=0.26.0",
 ]
 
 [project.urls]
@@ -79,9 +79,9 @@ Repository = "https://github.com/TrololoBird/Crypto-Analytic-Signal-Bot"
 # Большая часть автофиксится, но BLE001/S110/S112 трогают обработку исключений — это правка
 # поведения, её нельзя делать заодно.
 # Поднимать потолок — отдельным коммитом, вместе с разбором находок новой версии.
-dev = ["ruff>=0.15.22,<0.16", "mypy>=2.3.0,<2.4"]
+dev = ["ruff>=0.16.0,<0.17", "mypy>=2.3.0,<2.4"]
 diagnostics = ["rich>=13.0"]
-monitoring = ["prometheus-client>=0.25", "prometheus-async>=26.0"]
+monitoring = ["prometheus-client>=0.26.0", "prometheus-async>=26.0"]
 otel = [
     "opentelemetry-sdk>=1.30",
     "opentelemetry-exporter-otlp-proto-http>=1.30",
@@ -132,7 +132,7 @@ exclude = ["_archive", "build", "dist"]
 
 [dependency-groups]
 dev = [
-    "pre-commit>=4.6.0",
+    "pre-commit>=4.6.1",
     "vulture>=2.16",
     # PYSEC-2026-3447 живёт в setuptools 82.0.1, чинится в 83.0.0. Пол в `[build-system].requires`
     # его НЕ закрывает: тот раздел описывает изолированное окружение СБОРКИ, а pip-audit проверяет
