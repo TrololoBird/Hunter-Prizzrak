@@ -40,10 +40,10 @@ jobs:
       contents: read
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@v4.37.3
         with:
           languages: python
           # security-extended даёт больше правил ценой шума. Берём его сознательно:
@@ -55,9 +55,9 @@ jobs:
       # Python не компилируется — autobuild не нужен, но и не мешает: он просто
       # определит зависимости для более точного анализа потоков данных.
       - name: Autobuild
-        uses: github/codeql-action/autobuild@v3
+        uses: github/codeql-action/autobuild@v4.37.3
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@v4.37.3
         with:
           category: "/language:python"
