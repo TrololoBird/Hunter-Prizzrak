@@ -26,6 +26,7 @@ from hunt_core.deliver.digest import get_advisory_digest
 from hunt_core.deliver.telegram import TelegramBroadcaster
 from hunt_core.engine import metrics
 from hunt_core.errors import defensive_exc_types
+from hunt_core.features.build import prepared_cache_stats
 from hunt_core.features.snapshot import reset_substitution_counts, substitution_counts
 from hunt_core.features.feature_engine import (
     FeatureExtractError,
@@ -257,6 +258,25 @@ async def run_tick(
                 total=sum(subs.values()),
                 columns=dict(sorted(subs.items(), key=lambda kv: -kv[1])[:10]),
             )
+
+        # ⚠ Кэш, о котором нельзя спросить, работает ли он, неотличим от кэша, который не
+        # работает. Ровно так осиротел `features/prepare.py::_FRAME_CACHE`: он есть, у него
+        # 1200 записей, замок и функция статистики — и ни одного живого вызова. Поэтому
+        # доля попаданий печатается КАЖДЫЙ тик, а не прячется в отладку.
+        #
+        # Как читать: доля должна расти к ~90% и падать волнами на закрытиях баров. Устойчиво
+        # низкая доля означает, что отпечаток кадра меняется без смены данных, то есть кэш
+        # существует, но не попадает никогда — и тик снова считает одно и то же.
+        cache = prepared_cache_stats()
+        looks = cache["hits"] + cache["misses"]
+        LOG.info(
+            "tick_prepared_cache",
+            hit_pct=round(cache["hits"] / looks * 100.0, 1) if looks else None,
+            hits=cache["hits"],
+            misses=cache["misses"],
+            slots=cache["slots"],
+            evictions=cache["evictions"],
+        )
 
         for symbol in ordered:
             err_row, nav = settled.get(symbol, (None, None))

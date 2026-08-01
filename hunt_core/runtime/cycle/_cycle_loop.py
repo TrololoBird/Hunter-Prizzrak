@@ -184,7 +184,15 @@ async def run_loop(
         from hunt_core.params.store import invalidate_calibration_cache
 
         invalidate_calibration_cache()
-        LOG.debug("hunt_calibration_rebuild_skipped", reason="module_unavailable")
+        # ⚠ Здесь стояло `LOG.debug("hunt_calibration_rebuild_skipped",
+        # reason="module_unavailable")` — НА ПУТИ УСПЕХА, сразу после удавшегося импорта и
+        # выполненного вызова. Оба утверждения были ложны: ничего не пропущено, модуль
+        # доступен (иначе строка бы не исполнилась). Это name-lie, фирменный класс дефектов
+        # проекта, и печатался он при КАЖДОМ старте.
+        #
+        # Ложь в логе дороже молчания: молчание заставляет посмотреть, ложь — посмотреть не
+        # туда. Разбор 2026-08-01 начался именно с попытки понять, какой модуль недоступен.
+        LOG.debug("hunt_calibration_cache_invalidated")
     except Exception:
         LOG.exception("hunt_calibration_rebuild_failed")
     try:

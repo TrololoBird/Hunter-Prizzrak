@@ -11,6 +11,9 @@ already produces the frames + per-TF summaries the tick and deliver layers read.
 """
 from __future__ import annotations
 
+import threading
+from collections import OrderedDict
+
 import polars as pl
 
 from hunt_core.features.models import (
@@ -49,6 +52,101 @@ _TF_TO_FIELD: dict[str, str] = {
 # («буду дополнительно следить за вот этой вот трендовой… мы должны ещё дать небольшую коррекцию,
 # уже будет тест трендовой»). На 15м/1ч/4ч этот объект у него не живёт.
 _RICH_TFS = frozenset({"15m", "1h", "4h", "1d"})
+
+# ─── Кэш подготовленных кадров: ОДИН слот на пару (символ, ТФ) ────────────────────────────
+#
+# ЗАЧЕМ. Тик крутится по стенным часам (`_cli.py`: `--interval`, дефолт 30 — голое число из
+# первого коммита, без замера), а фичи считаются на ЗАКРЫТЫХ барах (I-5). Пока новый бар не
+# закрылся, вход тот же — значит и выход тот же.
+#
+# ЗАМЕР 2026-08-01 (`scripts/measure_tick_redundancy.py`, 7 символов × 7 ТФ, 12 циклов по 30 с):
+#
+#     ТФ    изменилось   ожидание по номиналу
+#     1m       45.5%            50.00%
+#     5m        9.1%            10.00%
+#     15m       0.0%             3.33%
+#     1h..1w    0.0%          0.83%..0%
+#     ─────────────────────────────────────
+#     ИТОГО    7.8% осмысленной работы, 92.2% — пересчёт того же самого
+#
+# ⚠ ПОЧЕМУ НЕ LRU НА 1200, КОТОРЫЙ УЖЕ ЕСТЬ В `prepare.py`. Тот кэш (`_FRAME_CACHE`) обслуживает
+# `prepare_symbol` — путь, который этот модуль вытеснил, и живых вызовов у него НЕТ (проверено
+# по графу: единственные вызовы `_cached_prepare_frame` внутри самого `prepare.py`). Но дело не
+# только в этом: его ключ содержит время последнего бара, поэтому СТАРЫЙ КЛЮЧ НИКОГДА НЕ
+# ЗАПРАШИВАЕТСЯ ПОВТОРНО — он только уходит вперёд. LRU на 1200 записей при таком доступе
+# хранит 1199 мёртвых поколений: замер даёт 1.09 МБ на подготовленный кадр (980×149), то есть
+# **1.28 ГБ** в установившемся режиме. Правильная структура здесь — один слот на пару.
+#
+# Отпечаток — честный хэш содержимого, а не «высота + края»: `hash_rows().sum()` стоит 0.142 мс
+# против 410 мс подготовки кадра (0.03%), и снимает вопрос о правке в середине кадра при
+# пересеве. Экономить тут нечего, а ошибиться — можно.
+_PREPARED_MAX_SLOTS = 128  # 128 × 1.09 МБ ≈ 140 МБ потолок; живых слотов при 7 символах — 49
+_PreparedSlot = tuple[int, tuple[str, ...] | None, bool, pl.DataFrame, TfSummary | None]
+_PREPARED: OrderedDict[tuple[str, str], _PreparedSlot] = OrderedDict()
+_PREPARED_LOCK = threading.Lock()  # `compute_features` идёт в рабочем потоке, до 6 символов сразу
+_PREPARED_STATS: dict[str, int] = {"hits": 0, "misses": 0, "evictions": 0}
+
+
+def prepared_cache_stats() -> dict[str, int]:
+    """Попадания/промахи/вытеснения кэша кадров + текущее число слотов.
+
+    Наружу — чтобы механизм не был невидимым: кэш, о котором нельзя спросить, работает ли он,
+    неотличим от кэша, который не работает (ровно так `_FRAME_CACHE` и осиротел).
+    """
+    with _PREPARED_LOCK:
+        return {**_PREPARED_STATS, "slots": len(_PREPARED)}
+
+
+def reset_prepared_cache() -> None:
+    """Сбросить кэш целиком. Нужен смене вселенной и замерам «холодного» прогона."""
+    with _PREPARED_LOCK:
+        _PREPARED.clear()
+        for key in _PREPARED_STATS:
+            _PREPARED_STATS[key] = 0
+
+
+def _prepare_cached(
+    raw: pl.DataFrame,
+    *,
+    symbol: str,
+    tf: str,
+    groups: frozenset[str] | None,
+    rich: bool,
+) -> tuple[pl.DataFrame, TfSummary | None]:
+    """``_prepare_frame`` + ``tf_summary`` с кэшем по содержимому кадра.
+
+    Кэшируются ОБА результата вместе: ``tf_summary`` — чистая функция подготовленного кадра и
+    двух флагов (профиль: 14.6 с из 35.4 с), поэтому пересчитывать её при попадании было бы
+    ровно тем же расходом впустую, от которого кэш и заводится.
+
+    ⚠ Полученный кадр отдаётся ПО ССЫЛКЕ, общей между тиками. Это безопасно, потому что в
+    дереве нет ни одной мутации кадра на месте (проверено свипом по `drop_in_place`,
+    `insert_column`, `replace_column`, `rechunk(in_place=...)` — ноль вхождений), а операции
+    Polars возвращают новый объект. Если такая мутация появится, кэш начнёт отдавать
+    испорченный кадр — и это надо знать, а не выяснять.
+    """
+    groups_key = None if groups is None else tuple(sorted(groups))
+    fingerprint = int(raw.hash_rows().sum())
+    slot_key = (symbol, tf)
+
+    with _PREPARED_LOCK:
+        slot = _PREPARED.get(slot_key)
+        if slot is not None and slot[0] == fingerprint and slot[1] == groups_key and slot[2] == rich:
+            _PREPARED.move_to_end(slot_key)
+            _PREPARED_STATS["hits"] += 1
+            return slot[3], slot[4]
+        _PREPARED_STATS["misses"] += 1
+
+    prepared = _prepare_frame(raw, active_groups=groups)  # I-5: closed-only frames in
+    summary = tf_summary(prepared, rsi_trendline=rich, hidden_stoch_div=rich)
+
+    with _PREPARED_LOCK:
+        _PREPARED[slot_key] = (fingerprint, groups_key, rich, prepared, summary)
+        _PREPARED.move_to_end(slot_key)
+        while len(_PREPARED) > _PREPARED_MAX_SLOTS:
+            _PREPARED.popitem(last=False)
+            _PREPARED_STATS["evictions"] += 1
+    return prepared, summary
 
 
 def _binance_id(symbol: str) -> str:
@@ -167,10 +265,11 @@ def compute_features(view: MarketView) -> FeaturePanel:
         raw: pl.DataFrame | None = getattr(view.klines, field)
         if raw is None or raw.is_empty():
             continue
-        prepared = _prepare_frame(raw, active_groups=groups)  # I-5: closed-only frames in
-        frames[field] = prepared
         rich = tf in _RICH_TFS
-        summary = tf_summary(prepared, rsi_trendline=rich, hidden_stoch_div=rich)
+        prepared, summary = _prepare_cached(
+            raw, symbol=view.symbol, tf=tf, groups=groups, rich=rich
+        )
+        frames[field] = prepared
         if summary is not None:
             summaries[tf] = summary
     factors = _build_factors(view, summaries.get("15m"), summaries.get("1h"), frames.get("m15"))
@@ -186,4 +285,4 @@ def compute_features(view: MarketView) -> FeaturePanel:
     )
 
 
-__all__ = ["compute_features"]
+__all__ = ["compute_features", "prepared_cache_stats", "reset_prepared_cache"]
