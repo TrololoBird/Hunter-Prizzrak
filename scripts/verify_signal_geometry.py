@@ -27,6 +27,8 @@ from typing import Any
 
 import ccxt.async_support as ccxt
 
+from _verify_common import report_skipped, verdict_scope
+
 from hunt_core.prizrak.config import PrizrakConfig
 from hunt_core.prizrak.orchestrator import build_prizrak_signals
 
@@ -168,20 +170,13 @@ async def main(symbols: list[str]) -> None:
     finally:
         await ex.close()
     print(f"\nпроверено сигналов: {n_sig}")
-    if SKIPPED:
-        print(f"\nПОКРЫТИЕ НЕПОЛНОЕ — не загружено пар символ/ТФ: {len(SKIPPED)}")
-        for s in SKIPPED[:20]:
-            print("   ", s)
-        if len(SKIPPED) > 20:
-            print(f"    … и ещё {len(SKIPPED) - 20}")
+    report_skipped(SKIPPED)
     if FAIL:
         print(f"\n❌ НАРУШЕНИЙ: {len(FAIL)}")
         for f in FAIL:
             print("   ", f)
-    elif SKIPPED:
-        print("\nнарушений не найдено НА ЗАГРУЖЕННОЙ ЧАСТИ — см. пропуски выше")
     else:
-        print("\n✅ нарушений геометрии эмиссии не найдено")
+        print(f"\n✅ нарушений геометрии эмиссии не найдено{verdict_scope(SKIPPED)}")
 
 
 if __name__ == "__main__":

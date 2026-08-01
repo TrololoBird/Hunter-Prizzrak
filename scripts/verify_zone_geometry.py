@@ -29,6 +29,8 @@ from typing import Any
 
 import ccxt.async_support as ccxt
 
+from _verify_common import report_skipped, verdict_scope
+
 from hunt_core.engine.params import OHLCV_LIMIT
 
 from hunt_core.prizrak.config import PrizrakConfig
@@ -277,12 +279,7 @@ async def main(symbols: list[str]) -> None:
     if tot["zones"]:
         print(f"ЯКОРЬ ПОК: {tot['poc']}/{tot['zones']} зон = "
               f"{tot['poc'] / tot['zones'] * 100:.0f}%  (остальные входят по кромке)")
-    if SKIPPED:
-        print(f"\nПОКРЫТИЕ НЕПОЛНОЕ — не загружено пар символ/ТФ: {len(SKIPPED)}")
-        for s in SKIPPED[:20]:
-            print("   ", s)
-        if len(SKIPPED) > 20:
-            print(f"    … и ещё {len(SKIPPED) - 20}")
+    report_skipped(SKIPPED)
     if WARN:
         print(f"\n⚠️  К РУЧНОМУ РАЗБОРУ (не нарушения): {len(WARN)}")
         for w in WARN:
@@ -291,10 +288,8 @@ async def main(symbols: list[str]) -> None:
         print(f"\n❌ НАРУШЕНИЙ: {len(FAIL)}")
         for f in FAIL:
             print("   ", f)
-    elif SKIPPED:
-        print("\nнарушений не найдено НА ЗАГРУЖЕННОЙ ЧАСТИ — см. пропуски выше")
     else:
-        print("\n✅ нарушений инвариантов не найдено")
+        print(f"\n✅ нарушений инвариантов не найдено{verdict_scope(SKIPPED)}")
 
 
 if __name__ == "__main__":

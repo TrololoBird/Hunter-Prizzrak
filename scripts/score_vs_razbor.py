@@ -36,6 +36,8 @@ from typing import Any
 
 import ccxt.async_support as ccxt
 
+from _verify_common import report_skipped
+
 from hunt_core.prizrak.config import PrizrakConfig
 from hunt_core.engine.params import OHLCV_LIMIT
 from hunt_core.engine.spot import SpotEngine
@@ -504,12 +506,8 @@ async def main() -> None:
             print(f"\nКАЧЕСТВО ПОПАДАНИЙ: {q}"
                   f"   (ШИРОКАЯ = накрыт полосой >{_INTEREST_ZONE_MAX_WIDTH_PCT:g}%, лимитку не поставить)")
             print(f"  локализовано точно: {tot_hit - wide}/{tot_lvl} = {(tot_hit - wide) / tot_lvl * 100:.0f}%")
+        report_skipped(SKIPPED)
         if SKIPPED:
-            print(f"\nПОКРЫТИЕ НЕПОЛНОЕ — не загружено пар символ/ТФ: {len(SKIPPED)}")
-            for s in SKIPPED[:20]:
-                print("   ", s)
-            if len(SKIPPED) > 20:
-                print(f"    … и ещё {len(SKIPPED) - 20}")
             print("    recall ниже посчитан НА ЗАГРУЖЕННОЙ ЧАСТИ и с прошлым замером несравним")
         print(f"\n{'=' * 60}\nИТОГО recall {tot_hit}/{tot_lvl} = {tot_hit / tot_lvl * 100:.0f}%"
               f"   ·   зон напечатано: {tot_zones} (он публикует 2–4 на символ)")

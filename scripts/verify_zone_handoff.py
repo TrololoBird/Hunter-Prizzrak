@@ -24,6 +24,8 @@ import sys
 
 import ccxt.async_support as ccxt
 
+from _verify_common import report_skipped, verdict_scope
+
 from hunt_core.prizrak.config import PrizrakConfig
 from hunt_core.prizrak.setups import build_symbol_setups
 from hunt_core.prizrak.zone_watch import (
@@ -107,22 +109,16 @@ async def main(symbols: list[str]) -> None:
 
     problems = [f"{s} {lab}: R:R {rr} прошёл при поле {CFG.min_rr}"
                 for s, lab, rr, _w in passed if rr < float(CFG.min_rr)]
-    if SKIPPED:
-        print(f"\nПОКРЫТИЕ НЕПОЛНОЕ — не загружено пар символ/ТФ: {len(SKIPPED)}")
-        for s in SKIPPED[:20]:
-            print("   ", s)
-        if len(SKIPPED) > 20:
-            print(f"    … и ещё {len(SKIPPED) - 20}")
+    report_skipped(SKIPPED)
     if problems:
         print(f"\n❌ ГЕЙТ ПРОПУСКАЕТ НИЖЕ ПОЛА: {len(problems)}")
         for p in problems:
             print("   ", p)
     elif not passed:
         print("\n⚠️  гейт отклонил ВСЕ зоны — проверить, не зарезан ли путь целиком")
-    elif SKIPPED:
-        print("\nвердикт вынесен НА ЗАГРУЖЕННОЙ ЧАСТИ — см. пропуски выше")
     else:
-        print("\n✅ гейт выносит осмысленный вердикт: всё прошедшее выше пола")
+        print(f"\n✅ гейт выносит осмысленный вердикт: всё прошедшее выше пола"
+              f"{verdict_scope(SKIPPED)}")
 
 
 if __name__ == "__main__":
