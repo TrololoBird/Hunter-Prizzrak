@@ -14,6 +14,7 @@ import time
 from collections.abc import Sequence
 from typing import Any
 
+from hunt_core.engine import metrics
 from hunt_core import clock, serde
 from hunt_core.view.runtime import MarketRuntime, build_market_runtime
 from hunt_core.data.lake import FeatureLakeWriter, buffer_tick_rows, flush_lake
@@ -739,7 +740,34 @@ async def run_loop(
                     raise
             if once:
                 break
+            # ⚠ `--interval` — НИЖНЯЯ ГРАНИЦА, А НЕ ПЕРИОД, и до 2026-08-01 это молчало.
+            #
+            # Когда тело тика длиннее интервала, внутренний `while` не выполняется ни разу:
+            # цикл уходит на следующую итерацию без сна. Ни строки лога, ни метрики — то
+            # есть система переходила в свободный бег незаметно, а оператор крутил ручку,
+            # которая не связывает.
+            #
+            # ЗАМЕР аудита по персистнутым строкам тика (`data/hunt_scan-*.jsonl`, 1232
+            # межтиковых интервала): медиана периода **34.0 с** при `--interval 30`,
+            # p90 158.7 с, p99 1992 с, max 2817 с — **69.2% интервалов за бортом**.
+            # Рядом в конфиге `SYMBOL_TICK_TIMEOUT_S = 180` при интервале 30: один
+            # залипший символ легально растягивает тик в шесть раз.
+            #
+            # Теперь просрочка объявляется, а фактическая длительность тика публикуется
+            # метрикой. Это не «настроить каденс», а сделать его измеримым: настраивать
+            # окно без замера запрещает I-7, и первым шагом обязан быть замер.
+            tick_s = time.monotonic() - started
+            metrics.set_tick_duration(tick_s)
             deadline = started + max(1.0, float(interval_s))
+            if tick_s > float(interval_s):
+                LOG.warning(
+                    "watch_interval_overrun",
+                    tick_s=round(tick_s, 1),
+                    interval_s=float(interval_s),
+                    overrun_s=round(tick_s - float(interval_s), 1),
+                    note="тик длиннее интервала — период задаёт ТИК, а не настройка; "
+                         "цикл идёт на следующую итерацию без сна",
+                )
             while time.monotonic() < deadline and not should_stop():
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:

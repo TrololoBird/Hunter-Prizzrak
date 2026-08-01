@@ -107,6 +107,27 @@ def set_loop_lag(seconds: float) -> None:
     LOOP_LAG.set(seconds)
 
 
+# Фактическая длительность тела главного тика.
+#
+# ⚠ ЗАЧЕМ ОТДЕЛЬНО ОТ ЗАДЕРЖКИ ЦИКЛА. `LOOP_LAG` отвечает «успевает ли цикл отдавать
+# управление», эта — «укладывается ли тик в свой интервал». Величины разные: тик может
+# честно уступать управление и всё равно идти дольше интервала (сеть), и наоборот.
+#
+# Замер аудита 2026-08-01 по 1232 межтиковым интервалам: медиана периода 34.0 с при
+# `--interval 30`, p90 158.7 с, **69.2% интервалов за бортом** — и в логе не было ни одной
+# величины, по которой это видно. `--interval` при таком раскладе не период, а нижняя
+# граница; ручка, которая не связывает, вводит в заблуждение того, кто её крутит.
+TICK_DURATION = Gauge(
+    "hunter_tick_duration_seconds",
+    "Wall time of the last main-tick body. Compare against --interval: when it exceeds, the "
+    "loop free-runs and the interval knob no longer binds.",
+)
+
+
+def set_tick_duration(seconds: float) -> None:
+    TICK_DURATION.set(seconds)
+
+
 def _plane_type(plane: str) -> str:
     """Coarsen a plane name to its low-cardinality type (``kline.4h`` → ``kline``)."""
     return plane.split(".", 1)[0] if plane else "unknown"
@@ -227,7 +248,9 @@ __all__ = [
     "PLANE_BOUND_RATIO",
     "USED_WEIGHT",
     "LOOP_LAG",
+    "TICK_DURATION",
     "set_loop_lag",
+    "set_tick_duration",
     "set_feed_silence",
     "record_reconnect",
     "record_staleness_reject",
