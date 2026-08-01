@@ -256,14 +256,22 @@ def main():
 
     # consistency: ledger outcomes must reference an existing signal (by symbol)
     hist_syms = set()
+    hist_unparsable = 0
     with open(HIST) as f:
         for line in f:
             try:
                 r = json.loads(line)
                 if r.get("symbol"):
                     hist_syms.add(r["symbol"])
-            except Exception:
-                pass
+            except Exception:  # noqa: BLE001 — битая строка не должна ронять весь обзор
+                # ⚠ Именно этот набор используется дальше как ЭТАЛОН: сигнал из леджера,
+                # символа которого здесь нет, объявляется сиротой. Молча выпавшая строка
+                # истории превращает валидную запись в «нарушение» — то есть отчёт врёт
+                # в сторону ложной тревоги. Пропуск обязан быть в отчёте.
+                hist_unparsable += 1
+    if hist_unparsable:
+        print(f"ВНИМАНИЕ: строк истории не разобрано — {hist_unparsable}; "
+              f"поиск сирот в леджере ниже даст ложные срабатывания на их символах")
     consistency = []
     for idx, rec in new_led:
         if "_parse_error" in rec:

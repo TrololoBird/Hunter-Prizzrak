@@ -41,6 +41,8 @@ CFG = PrizrakConfig.load()
 TFS = ("5m", "15m", "1h", "4h", "1d", "1w")
 FAIL: list[str] = []
 WARN: list[str] = []
+# Незагруженные пары символ/ТФ — печатаются рядом с вердиктом (см. хвост main).
+SKIPPED: list[str] = []
 
 
 def bad(sym: str, msg: str) -> None:
@@ -224,7 +226,10 @@ async def main(symbols: list[str]) -> None:
                     # 2026-07-27, см. `setups._horizon_zones`). Верификатор, меряющий на
                     # кадрах мельче боевых, сертифицирует не тот объект.
                     o = await ex.fetch_ohlcv(sym, tf, limit=OHLCV_LIMIT)
-                except Exception:
+                except Exception as exc:  # noqa: BLE001 — недоступный ТФ не приговор прогону
+                    # Пропуск обязан дойти до итога: «нарушений инвариантов не найдено»
+                    # на неполном покрытии — утверждение шире сделанного.
+                    SKIPPED.append(f"{sym}/{tf}: {exc.__class__.__name__}")
                     continue
                 step = ex.parse_timeframe(tf) * 1000
                 closed = [b for b in o if int(b[0]) + step <= now]  # I-5: только закрытые
@@ -272,6 +277,12 @@ async def main(symbols: list[str]) -> None:
     if tot["zones"]:
         print(f"ЯКОРЬ ПОК: {tot['poc']}/{tot['zones']} зон = "
               f"{tot['poc'] / tot['zones'] * 100:.0f}%  (остальные входят по кромке)")
+    if SKIPPED:
+        print(f"\nПОКРЫТИЕ НЕПОЛНОЕ — не загружено пар символ/ТФ: {len(SKIPPED)}")
+        for s in SKIPPED[:20]:
+            print("   ", s)
+        if len(SKIPPED) > 20:
+            print(f"    … и ещё {len(SKIPPED) - 20}")
     if WARN:
         print(f"\n⚠️  К РУЧНОМУ РАЗБОРУ (не нарушения): {len(WARN)}")
         for w in WARN:
@@ -280,6 +291,8 @@ async def main(symbols: list[str]) -> None:
         print(f"\n❌ НАРУШЕНИЙ: {len(FAIL)}")
         for f in FAIL:
             print("   ", f)
+    elif SKIPPED:
+        print("\nнарушений не найдено НА ЗАГРУЖЕННОЙ ЧАСТИ — см. пропуски выше")
     else:
         print("\n✅ нарушений инвариантов не найдено")
 

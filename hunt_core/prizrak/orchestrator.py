@@ -29,6 +29,8 @@ from __future__ import annotations
 from contextvars import ContextVar
 from typing import Any, Literal
 
+import structlog
+
 from hunt_core.contract import price_in_entry_zone
 from hunt_core.prizrak.invalidation import build_invalidation
 from hunt_core.prizrak.accumulation import _CLUSTER_TOL, _overlaps, find_accumulation_zone, find_accumulation_zones
@@ -46,6 +48,11 @@ from hunt_core.prizrak.poc import zone_poc
 from hunt_core.prizrak.stop_volume import find_stop_volume
 from hunt_core.prizrak.structure import bars_from_ohlcv, multi_scale_structure, _tier_structure
 from hunt_core.prizrak.traps import classify_level_touch, detect_level_saw
+
+# ⚠ Логгера здесь не было НИ ОДНОГО на 2824 строки — при том что модуль решает, эмитить ли
+# сигнал. Появился 2026-08-01 вместе с починкой проглоченного `detect_pereprior` ниже:
+# сообщать о деградации нечем, если сообщать некуда.
+LOG = structlog.get_logger(__name__)
 
 _TIER_SETUP_KIND = {"intraday": "level_intraday_scalp", "meso": "level_core", "macro": "level_core"}
 
@@ -2810,7 +2817,14 @@ def compute_prizrak_structure(
             continue
         try:
             all_by_tf[tf] = {**all_by_tf[tf], **detect_pereprior(bars_tf)}
-        except Exception:  # noqa: BLE001 — структура не должна падать из-за доп-детектора
+        except Exception as exc:  # noqa: BLE001 — структура не должна падать из-за доп-детектора
+            # Отказ детектора роняет не карточку, а СЛОВАРЬ: без `pp_early_*`/`pp_true_*`
+            # карточка не сможет назвать слом так, как называет его автор, и напечатает
+            # обычный BOS/CHoCH. Внешне это выглядит как «слома нет», а не как сбой —
+            # ровно тот класс, который CLAUDE.md зовёт «поле без продюсера».
+            LOG.warning(
+                "pereprior_detector_failed", tf=tf, bars=len(bars_tf), error=repr(exc)
+            )
             continue
     return {
         "struct_by_tier": struct_by_tier,

@@ -115,8 +115,12 @@ async def proxy_reachable(url: str, *, timeout_s: float = 3.0) -> bool:
         writer.close()
         try:
             await writer.wait_closed()
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 — ответ на вопрос «достижим ли» уже получен
+            # Сокет открылся — значит хост достижим, и это ЕДИНСТВЕННОЕ, что здесь меряется.
+            # Грязное закрытие ответа не меняет, поэтому не влияет на возврат. Но и молчать
+            # нельзя: повторяющаяся ошибка закрытия — симптом больного прокси, а увидеть её
+            # больше негде. Уровень debug, потому что на здоровом пути это шум.
+            LOG.debug("proxy_probe_close_failed", host=host, port=port, error=repr(exc))
         return True
     except (OSError, asyncio.TimeoutError):
         return False

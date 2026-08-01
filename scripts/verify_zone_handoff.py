@@ -35,6 +35,8 @@ from hunt_core.prizrak.zone_watch import (
 
 CFG = PrizrakConfig.load()
 TFS = ("5m", "15m", "1h", "4h", "1d", "1w")
+# Незагруженные пары символ/ТФ — печатаются рядом с вердиктом (см. хвост main).
+SKIPPED: list[str] = []
 
 
 async def main(symbols: list[str]) -> None:
@@ -50,7 +52,10 @@ async def main(symbols: list[str]) -> None:
             for tf in TFS:
                 try:
                     o = await ex.fetch_ohlcv(sym, tf, limit=500)
-                except Exception:
+                except Exception as exc:  # noqa: BLE001 — недоступный ТФ не приговор прогону
+                    # Пропуск обязан дойти до итога: вердикт «гейт выносит осмысленный
+                    # вердикт» на половине данных — утверждение шире сделанного.
+                    SKIPPED.append(f"{sym}/{tf}: {exc.__class__.__name__}")
                     continue
                 step = ex.parse_timeframe(tf) * 1000
                 raw[tf] = [b for b in o if int(b[0]) + step <= now]  # I-5
@@ -102,12 +107,20 @@ async def main(symbols: list[str]) -> None:
 
     problems = [f"{s} {lab}: R:R {rr} прошёл при поле {CFG.min_rr}"
                 for s, lab, rr, _w in passed if rr < float(CFG.min_rr)]
+    if SKIPPED:
+        print(f"\nПОКРЫТИЕ НЕПОЛНОЕ — не загружено пар символ/ТФ: {len(SKIPPED)}")
+        for s in SKIPPED[:20]:
+            print("   ", s)
+        if len(SKIPPED) > 20:
+            print(f"    … и ещё {len(SKIPPED) - 20}")
     if problems:
         print(f"\n❌ ГЕЙТ ПРОПУСКАЕТ НИЖЕ ПОЛА: {len(problems)}")
         for p in problems:
             print("   ", p)
     elif not passed:
         print("\n⚠️  гейт отклонил ВСЕ зоны — проверить, не зарезан ли путь целиком")
+    elif SKIPPED:
+        print("\nвердикт вынесен НА ЗАГРУЖЕННОЙ ЧАСТИ — см. пропуски выше")
     else:
         print("\n✅ гейт выносит осмысленный вердикт: всё прошедшее выше пола")
 
