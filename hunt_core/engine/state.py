@@ -18,7 +18,11 @@ from enum import Enum
 from statistics import median
 from typing import Generic, TypeVar
 
+import structlog
+
 from hunt_core.engine import params
+
+LOG = structlog.get_logger("hunt_core.engine.state")
 
 T = TypeVar("T")
 
@@ -331,12 +335,43 @@ class SymbolState:
         """
         frame = self._frames.setdefault(name, [])
         tail = frame[-1][0] if frame else float("-inf")
+        # Шаг серии берётся из САМОГО кадра, а не из имени плана: два последних бара знают
+        # его точно, а разбор строки «kline.1h» пришлось бы поддерживать отдельно.
+        step_ms = (frame[-1][0] - frame[-2][0]) if len(frame) >= 2 else None
+        gap_after: float | None = None
+        gap_bars = 0
         for bar in new_closed:
             if bar[0] > tail:
+                # ⚠ РАЗРЫВ СЕРИИ ОБЯЗАН БЫТЬ ЗАМЕЧЕН. Условие `bar[0] > tail` пропускает
+                # ЛЮБОЙ бар из будущего, в том числе после дыры: если WS молчал дольше
+                # пары баров (реконнект, ротация 24 ч, потеря сокета), новый хвост
+                # приклеивался к старому телу, и в середине оставалась пустота.
+                #
+                # Дальше по этому кадру считаются уровни, накопление и ПОК — то есть вся
+                # геометрия метода, — а `not_ready` при этом чист и штамп свеж: дыру не
+                # видел ни один прибор. Ровно сигнатура инцидента `stale-htf-cache-trap`.
+                #
+                # Здесь только ОБНАРУЖЕНИЕ и громкий лог: чинит дыру пересев из REST
+                # (`engine/api.py::Engine._reconnect_and_reseed`). Выбрасывать бар нельзя —
+                # это превратило бы отравленный кадр в замороженный, что хуже.
+                if step_ms and tail != float("-inf") and bar[0] - tail > step_ms * 1.5:
+                    gap_after = tail
+                    gap_bars = max(gap_bars, int((bar[0] - tail) / step_ms) - 1)
                 frame.append(bar)
                 tail = bar[0]
             elif frame and bar[0] == frame[-1][0]:
                 frame[-1] = bar  # тот же бар пришёл доформированным — правда за последним
+        if gap_after is not None:
+            LOG.warning(
+                "kline_frame_gap",
+                symbol=self.symbol,
+                plane=name,
+                gap_after_open_ms=int(gap_after),
+                missing_bars=gap_bars,
+                step_ms=int(step_ms or 0),
+                note="в серии дыра — геометрия по этому кадру недостоверна до пересева "
+                     "из REST (Engine._reconnect_and_reseed)",
+            )
         if len(frame) > params.OHLCV_LIMIT:
             del frame[: len(frame) - params.OHLCV_LIMIT]
         self._record_interval(name, stamp.received_ms)

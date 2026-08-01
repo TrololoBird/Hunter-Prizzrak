@@ -135,7 +135,16 @@ class SpotEngine:
         bound = int(params.FRESH_TICKER_S * 1000.0)
 
         async def step() -> None:
-            tickers = await self._ex.watch_tickers()
+            # ⚠ СО СПИСКОМ СИМВОЛОВ. Без аргумента ccxt подписывается на всерыночный поток,
+            # и это ловушка №2 из `.claude/rules/engine-data-plane.md`: основной движок её
+            # соблюдает, спотовый — нарушал. Кадр там массив по всей бирже, ccxt парсит
+            # КАЖДЫЙ элемент, и делает это в том же event loop, где считаются Polars-фичи
+            # тика; полезными оказываются единицы процентов.
+            #
+            # Список берётся из `wanted` — ровно тех символов, по которым ниже и стоит
+            # фильтр `if sym in wanted`. То есть парсинг остального был работой, результат
+            # которой выбрасывался строкой ниже.
+            tickers = await self._ex.watch_tickers(sorted(wanted))
             now = _now_ms()
             for sym, tk in tickers.items():
                 if sym in wanted:
