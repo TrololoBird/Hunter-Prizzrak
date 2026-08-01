@@ -293,9 +293,23 @@ def evaluate_levels(
     # between spot and the zone "hits" on the registration tick. Promotion to
     # TRIGGERED happens in `_maybe_armed_to_triggered` (followups) once price
     # actually enters the latched entry zone; only then does management start.
-    if str(active.get("delivery_tier") or "").lower() == "armed":
-        return events
+    # ⚠ ГАРД `armed` ПЕРЕЕХАЛ НИЖЕ БАРЬЕРА ПРОТУХАНИЯ. Он стоял ЗДЕСЬ, то есть выходил
+    # раньше проверки orphan-TTL, и неисполнившийся лимит не истекал НИКОГДА: запись
+    # оставалась в `signals` бессрочно, потому что единственный путь её снять лежал за
+    # этим `return`.
+    #
+    # До 2026-08-01 это была «просто» вечная запись. С гардом занятого направления в
+    # `tracker.py::register_signal_open` (добавлен тогда же) цена выросла: висящий armed
+    # БЛОКИРУЕТ все будущие сигналы по этому `SYMBOL:direction`. То есть безобидная утечка
+    # состояния превратилась бы в тихую пробку на канале.
+    #
+    # Что применимо к armed, а что нет: TTL — ДА, лимит, к которому никто не возвращался
+    # сутки, надо снимать. Машина SL/TP и MFE-stall — НЕТ: позиции не существует, экстремумы
+    # копятся от спота, и любой их разбор книжит исход сделке, которой не было (ровно то,
+    # ради чего гард и заводился). Поэтому TTL считается для всех, а всё остальное — после
+    # выхода armed.
     announced = bool(active.get("telegram_sent")) or bool(active.get("entry_message_id"))
+    is_armed = str(active.get("delivery_tier") or "").lower() == "armed"
 
     tr = tracker_thresholds(symbol)
     base_orphan_ttl_h = float(tr.get("orphan_ttl_hours", 24.0))
@@ -351,6 +365,15 @@ def evaluate_levels(
                     },
                 )
             )
+        return events
+
+    # Отсюда и ниже — управление ПОЗИЦИЕЙ. У armed её нет: это отдыхающий лимит, который
+    # ещё не залился. Прогон машины SL/TP по нему книжит исход сделке, которой не было —
+    # экстремумы копятся от спота, поэтому MFE равен всей незалитой дистанции до зоны,
+    # трейл храповит, а цель между спотом и зоной «срабатывает» на тике регистрации.
+    # Повышение до TRIGGERED делает `_maybe_armed_to_triggered` (followups), когда цена
+    # реально войдёт в защёлкнутую зону входа; только тогда начинается управление.
+    if is_armed:
         return events
 
     # Longs accumulate and legitimately sit flat/red for days before the pump
