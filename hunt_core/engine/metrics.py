@@ -128,6 +128,25 @@ def set_tick_duration(seconds: float) -> None:
     TICK_DURATION.set(seconds)
 
 
+# Сдвиг часов процесса относительно серверных.
+#
+# ⚠ ВЕЛИЧИНА, КОТОРУЮ НЕЛЬЗЯ ВЫВЕСТИ НИ ИЗ ЧЕГО ДРУГОГО. Уехавшие часы не дают ни ошибки, ни
+# отказа плана: возраст выглядит правдоподобно, бары выглядят закрытыми, штампы монотонны.
+# В истории проекта сдвиг **43.4 с** привёл к тому, что форминг-бар отдавался как закрытый
+# **72% времени** — прямое нарушение I-5, и обнаружено оно было только прямым замером.
+# До 2026-08-02 коррекция (`clock.set_offset_ms`) не имела ни одного вызывающего вообще.
+CLOCK_OFFSET = Gauge(
+    "hunter_clock_offset_seconds",
+    "Process clock offset vs exchange server time (positive = local clock is behind). Large "
+    "|value| silently breaks closed-bar detection and bar-close scheduling.",
+    ["venue"],
+)
+
+
+def set_clock_offset_s(venue: str, seconds: float) -> None:
+    CLOCK_OFFSET.labels(venue=venue).set(seconds)
+
+
 def _plane_type(plane: str) -> str:
     """Coarsen a plane name to its low-cardinality type (``kline.4h`` → ``kline``)."""
     return plane.split(".", 1)[0] if plane else "unknown"

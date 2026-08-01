@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from hunt_core import serde
+from hunt_core import clock, serde
 from hunt_core.data.universe import PINNED_SYMBOLS
 from hunt_core.paths import ANALYST_TICKS_JSONL
 from hunt_core.prizrak.engines.config import load_analyst_config
@@ -77,6 +77,59 @@ def deep_tg_on_change() -> bool:
         return env.strip().lower() not in {"0", "false", "no"}
     from_toml = _pinned_cfg("tg_on_change")
     return True if from_toml is None else bool(from_toml)
+
+
+# ── Выравнивание пробуждения по закрытию бара ─────────────────────────────────────────────
+# Полоса эмиссии шла по СВОБОДНОМУ таймеру, то есть попадала в сетку закрытий баров случайной
+# фазой. Лаг «бар закрылся → полоса его увидела» распределён тогда равномерно на [0, период],
+# и медиана равна половине периода — это свойство конструкции, а не выборки.
+#
+# ЗАМЕР 2026-08-02 (`scripts/measure_bar_close_lag.py`, простои процесса исключены, n=78):
+# лаг до 15m-бара med **160.1 с**, p90 **437.4 с**, max 582.8 с — то есть **17.8% бара в
+# медиане и 48.6% в p90** проходило, прежде чем сигнал по нему вообще МОГ быть выпущен.
+# Для сравнения главный тик (такт 30 с) на тех же данных: med 20.5 с, 2.3% бара.
+#
+# ⚠ ПОЧЕМУ СЕТКА ИМЕННО 5m. Период полосы (300 с) УЖЕ равен 5-минутному бару, а границы всех
+# ТФ, которые читают тиры призрака (5m/15m/1h/4h/1d/1w — `prizrak/config.py`), КРАТНЫ пяти
+# минутам. Значит фазовая привязка к 5m-сетке ставит закрытие ЛЮБОГО из них в пределах запаса
+# от пробуждения, и при этом не меняет частоту обходов — меняется только фаза.
+_BAR_GRID_S = 300.0
+
+# Запас после границы: раньше него бар в движке ещё не закрыт, и полоса прочитала бы ПРОШЛЫЙ
+# бар со свежим штампом — замороженный кадр, который не видит ни один прибор (сигнатура
+# `stale-htf-cache-trap`). Проснуться рано здесь строго хуже, чем поздно.
+#
+# ЗАМЕР 2026-08-02 (`scripts/measure_bar_availability.py`, живой WS+REST, n=30, опрос 0.25 с):
+# «граница бара → бар виден закрытым в движке» med **4.18 с**, p90 7.32 с, **max 10.60 с**.
+# Путь появления (`engine/ingest.py::_step_ohlcv`): WS-сигнал о закрытии → REST full-fidelity
+# (WS-бар без taker-объёма не мержится) → merge. От таймфрейма он не зависит, поэтому мерилось
+# на 1m: тот же код, 15 замеров за время одного замера на 15m.
+_BAR_SETTLE_S = 12.0  # max наблюдённый 10.60 + запас
+
+
+def _next_bar_wake_ts(now: float, *, grid_s: float = _BAR_GRID_S, settle_s: float = _BAR_SETTLE_S) -> float:
+    """Ближайшее «граница бара + запас» СТРОГО в будущем относительно ``now`` (epoch-секунды).
+
+    Args:
+        now: Текущее epoch-время (``time.time()``, не monotonic — сетка баров привязана к UTC).
+        grid_s: Шаг сетки закрытий, секунды.
+        settle_s: Запас на доставку бара движком после границы.
+
+    Returns:
+        Epoch-время следующего пробуждения по бару. Всегда строго больше ``now`` и никогда
+        не дальше, чем на ``grid_s``.
+    """
+    # ⚠ СЧИТАТЬ НАДО ОТ ПРЕДЫДУЩЕЙ ГРАНИЦЫ, А НЕ ОТ СЛЕДУЮЩЕЙ. Первая редакция брала границу
+    # СТРОГО ПОСЛЕ `now` — и на входе `now` = ровно граница бара возвращала пробуждение через
+    # **312 с вместо 12 с**: только что закрывшийся бар пропускался целиком, а полоса ждала
+    # следующего. Худший из возможных промахов, потому что обход как раз и заканчивается
+    # около границы. Ветка «если запас уже прошёл, взять следующую» при этом была МЁРТВОЙ
+    # (`boundary > now` выполнялось всегда) и ровно этим дефект и маскировала.
+    # Поймано случайной проверкой инварианта (832 нарушения из 20000), а не чтением кода.
+    prev_boundary = (now // grid_s) * grid_s
+    if prev_boundary + settle_s > now:
+        return prev_boundary + settle_s
+    return prev_boundary + grid_s + settle_s
 
 
 def _compact_symbol(symbol: str) -> str:
@@ -516,14 +569,37 @@ async def analyst_pinned_loop(
         # этом пишется в лог — иначе `interval_s` был бы величиной, которая не связывает,
         # и никто бы этого не увидел.
         walk_s = time.monotonic() - walk_started
-        pause = max(0.0, interval - walk_s)
-        if pause <= 0.0:
+        cadence_pause = interval - walk_s
+        if cadence_pause <= 0.0:
             LOG.warning(
                 "analyst_pinned_interval_overrun",
                 walk_s=round(walk_s, 1),
                 interval_s=interval,
                 note="обход длиннее интервала — период эмиссии задаёт обход, а не настройка",
             )
+        # ⚠ ВЫРАВНИВАНИЕ МОЖЕТ ТОЛЬКО ПРИБЛИЗИТЬ ПРОБУЖДЕНИЕ, НИКОГДА НЕ ОТДАЛИТЬ. Берётся
+        # МИНИМУМ из штатного дедлайна и точки «граница бара + запас», поэтому оператор,
+        # понизивший `interval_s`, получает ровно то, что просил, а не молча замедленную полосу.
+        #
+        # ⚠ И БУДИЛЬНИК ПО БАРУ НЕ ЗАМЕНЯЕТ ТАКТ, А ДОБАВЛЯЕТСЯ К НЕМУ. Проверено, а не
+        # предположено: `prizrak/engines/activation.py::assess_activation` читает ЖИВУЮ цену, и
+        # состояние `in_entry_zone` (то самое, что переводит сетап в «активирован») возникает
+        # в СЕРЕДИНЕ бара. Полоса, разбуженная только закрытиями, пропускала бы вход в зону —
+        # то есть «починка» лага стоила бы потери реакции на цену.
+        #
+        # Часы берутся из `clock`, а не из `time.time()`: сетка баров живёт в биржевом
+        # времени, и с 2026-08-02 движок сводит с ним часы процесса (`Engine._sync_clock`).
+        now_wall = clock.now_ms() / 1000.0
+        bar_pause = _next_bar_wake_ts(now_wall) - now_wall
+        pause = min(cadence_pause, bar_pause)
+        LOG.info(
+            "analyst_pinned_sleep",
+            trigger="bar_close" if bar_pause <= cadence_pause else "cadence",
+            pause_s=round(max(1.0, pause), 1),
+            walk_s=round(walk_s, 1),
+            bar_pause_s=round(bar_pause, 1),
+            cadence_pause_s=round(cadence_pause, 1),
+        )
         try:
             await asyncio.sleep(max(1.0, pause))
         except asyncio.CancelledError:

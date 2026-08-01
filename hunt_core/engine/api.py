@@ -16,6 +16,7 @@ from typing import Any
 
 import structlog
 
+from hunt_core import clock
 from hunt_core.engine import exchanges, metrics, params, rest
 from hunt_core.engine.health import Watchdog
 from hunt_core.engine.ingest import Ingest
@@ -33,6 +34,18 @@ from hunt_core.market.symbols import is_crypto_underlying
 LOG = structlog.get_logger(__name__)
 
 _DEFAULT_TFS: tuple[str, ...] = ("1m", "5m", "15m", "1h", "4h", "1d", "1w")  # incl macro tier (Prizrak)
+
+# Синхронизация часов с биржей (см. `Engine._sync_clock`). Проб несколько, берётся медиана:
+# одиночный выброс RTT не должен двигать штампы всего процесса. Замер 2026-08-02: разброс
+# семи проб уложился в 458 мс при медиане −128 мс, то есть пяти проб с запасом хватает.
+_CLOCK_SYNC_SAMPLES = 5
+_CLOCK_SYNC_GAP_S = 0.4
+# Пересинхронизация раз в час: типичный дрейф кварцевых часов — секунды в сутки, так что час
+# держит сдвиг далеко под порогом тревоги, и это один публичный запрос в час.
+_CLOCK_RESYNC_S = 3600.0
+# 2 с — шестая часть запаса `_BAR_SETTLE_S = 12 c`, которым полоса эмиссии страхуется от
+# чтения ещё не закрытого бара. Больше этого — и выравнивание начнёт промахиваться.
+_CLOCK_SKEW_ALERT_MS = 2000.0
 _SEED_CONCURRENCY = 8  # bound on concurrent REST OHLCV seeds at startup (latency-bound, not rate-bound)
 
 
@@ -123,6 +136,7 @@ class Engine:
 
     async def start(self) -> None:
         await self._ingest.exchange.load_markets()
+        await self._sync_clock()
         await self._seed()
         self._ingest.start(self._symbols, self._timeframes)
         self._watchdog = Watchdog(
@@ -135,8 +149,73 @@ class Engine:
         self._bg.append(asyncio.create_task(self._poll_positioning(), name="engine_positioning"))
         self._bg.append(asyncio.create_task(self._publish_cadence(), name="engine_cadence"))
         self._bg.append(asyncio.create_task(self._sample_loop_lag(), name="engine_loop_lag"))
+        self._bg.append(asyncio.create_task(self._resync_clock_loop(), name="engine_clock_sync"))
         metrics.start_exporter(params.METRICS_PORT)
         LOG.info("engine_started", symbols=len(self._symbols), timeframes=self._timeframes)
+
+    async def _sync_clock(self) -> None:
+        """Свести часы процесса с серверными по ``fetchTime`` (публичный метод).
+
+        ⚠ ДО 2026-08-02 У ``clock.set_offset_ms`` НЕ БЫЛО НИ ОДНОГО ВЫЗЫВАЮЩЕГО во всём
+        репозитории. Механизм коррекции существовал, был описан в докстроке ``clock.py`` и
+        экспортирован — но ``_offset_ms`` навсегда оставался 0.0, ``is_synced()`` навсегда
+        False, а ``clock.now_utc()`` был побайтово равен ``datetime.now(UTC)``. То есть
+        каждый штамп проекта (время строки тика, ``opened_at`` сделки, леджер, вся сетка
+        свежести) шёл по НЕПРОВЕРЕННЫМ локальным часам.
+
+        Почему это не мелочь: в истории проекта уже есть инцидент со сдвигом локальных
+        часов на **43.4 с**, при котором форминг-бар отдавался как закрытый **72% времени**
+        (нарушение I-5 — детекторы обязаны видеть только закрытые бары). Ровно от этого
+        ``clock.py`` и был написан; подключён он не был.
+
+        Замер 2026-08-02 на этой машине: сдвиг **−128 мс** (n=7, медиана; min −188, max
+        +270) — то есть сейчас всё в порядке. Но «сейчас в порядке» не является механизмом:
+        часы уходят молча, а обнаружить это по данным нельзя ничем другим.
+
+        Метод: RTT-компенсированный сдвиг ``server - (t0+t1)/2`` по нескольким пробам,
+        берётся МЕДИАНА — одиночный выброс сетевой задержки не должен двигать все штампы.
+        """
+        samples: list[float] = []
+        for _ in range(_CLOCK_SYNC_SAMPLES):
+            t0 = time.time() * 1000.0
+            try:
+                server_ms = float(await self._ingest.exchange.fetch_time())
+            except Exception as exc:  # noqa: BLE001 — источник времени может быть недоступен
+                LOG.warning("engine_clock_sync_probe_failed", error=repr(exc))
+                continue
+            t1 = time.time() * 1000.0
+            samples.append(server_ms - (t0 + t1) / 2.0)
+            await asyncio.sleep(_CLOCK_SYNC_GAP_S)
+        if not samples:
+            # Молчать здесь нельзя: несинхронизированные часы — это состояние, при котором
+            # выравнивание полосы эмиссии по закрытию бара перестаёт быть обоснованным.
+            LOG.error(
+                "engine_clock_unsynced",
+                note="fetchTime недоступен — штампы идут по локальным часам без проверки",
+            )
+            return
+        samples.sort()
+        offset_ms = samples[len(samples) // 2]
+        clock.set_offset_ms(offset_ms)
+        metrics.set_clock_offset_s(
+            str(getattr(self._ingest.exchange, "id", "binance")), offset_ms / 1000.0
+        )
+        # Порог назван числом, а не «разумным значением»: 2 с — это шестая часть запаса
+        # `_BAR_SETTLE_S = 12 c`, которым полоса эмиссии страхуется от чтения незакрытого
+        # бара. Больше — и выравнивание по границе бара начинает промахиваться.
+        level = LOG.warning if abs(offset_ms) >= _CLOCK_SKEW_ALERT_MS else LOG.info
+        level(
+            "engine_clock_synced",
+            offset_ms=round(offset_ms, 1),
+            spread_ms=round(samples[-1] - samples[0], 1),
+            samples=len(samples),
+        )
+
+    async def _resync_clock_loop(self) -> None:
+        """Периодический пересчёт сдвига — часы уходят, и уходят молча."""
+        while True:
+            await asyncio.sleep(_CLOCK_RESYNC_S)
+            await self._sync_clock()
 
     async def _publish_cadence(self) -> None:
         """Публиковать ИЗМЕРЕННЫЙ темп планов и громко ругаться на недостижимый бонд.
