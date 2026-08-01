@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import structlog
 import math
+import threading
 from typing import Any, Literal, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -256,6 +257,12 @@ def btc_beta_1h(sym_work_1h: Any, btc_work_1h: Any, *, lookback: int = 48) -> fl
 # (см. _BLACKOUT_ALERT_COOLDOWN_S в runtime/cycle/_cycle_loop.py). Поэтому: считаем по имени
 # колонки и отдаём сводку наружу; молчания при этом нет — число всегда доступно.
 _SUBSTITUTIONS: dict[str, int] = {}
+# ⚠ Замок обязателен с 2026-08-01: `compute_features` считается в РАБОЧЕМ ПОТОКЕ
+# (`native_assembly.py`, `asyncio.to_thread`), и до шести символов идут одновременно.
+# `d[k] = d.get(k, 0) + 1` — это чтение и запись двумя шагами, между которыми поток
+# переключается, поэтому без замка часть инкрементов теряется. Счётчик диагностический,
+# но занижающий счётчик дыр в данных хуже отсутствующего: он выглядит как измерение.
+_SUBSTITUTIONS_LOCK = threading.Lock()
 
 
 def substitution_counts() -> dict[str, int]:
@@ -264,17 +271,20 @@ def substitution_counts() -> dict[str, int]:
     Ноль записей = подстановок не было. Непустой словарь = ровно столько показаний в фичах
     НЕ измерены, а назначены; читать как «столько-то дыр в данных», а не как шум.
     """
-    return dict(_SUBSTITUTIONS)
+    with _SUBSTITUTIONS_LOCK:
+        return dict(_SUBSTITUTIONS)
 
 
 def reset_substitution_counts() -> None:
     """Обнулить счётчик (вызывается в начале тика, чтобы сводка была по одному тику)."""
-    _SUBSTITUTIONS.clear()
+    with _SUBSTITUTIONS_LOCK:
+        _SUBSTITUTIONS.clear()
 
 
 def col(df: Any, name: str, default: float = 0.0, *, idx: int = -1) -> float:
     if df is None or df.is_empty() or name not in df.columns:
-        _SUBSTITUTIONS[name] = _SUBSTITUTIONS.get(name, 0) + 1
+        with _SUBSTITUTIONS_LOCK:
+            _SUBSTITUTIONS[name] = _SUBSTITUTIONS.get(name, 0) + 1
         return default
     try:
         return float(df.item(idx, name))

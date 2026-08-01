@@ -385,7 +385,7 @@ requires-dist = [
     { name = "aiogram", specifier = ">=3.28.2,!=3.29.0" },
     { name = "aiohttp", specifier = ">=3.13.5,<4" },
     { name = "aiohttp-socks", specifier = ">=0.10.1" },
-    { name = "ccxt", specifier = ">=4.5.44" },
+    { name = "ccxt", specifier = ">=4.5.68" },
     { name = "colorama", marker = "sys_platform == 'win32'", specifier = ">=0.4.6" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=2.3.0,<2.4" },
     { name = "numpy", specifier = ">=2.4.6,<2.5" },
