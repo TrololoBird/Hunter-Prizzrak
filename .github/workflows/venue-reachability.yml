@@ -1,0 +1,62 @@
+# Достижимость публичных API площадок С РАННЕРА GitHub — замер, а не предположение.
+#
+# ЗАЧЕМ. Директива владельца (CLAUDE.md, 2026-07-25): проверять только на живых данных.
+# Логичный следующий шаг — гонять `scripts/verify_*.py` по расписанию в Actions. Но у этого
+# плана есть предпосылка, которую нельзя принимать на веру: раннеры GitHub стоят в дата-центрах
+# Azure, преимущественно в США, а Binance по регламенту отдаёт оттуда HTTP 451 (Unavailable For
+# Legal Reasons). Если так — расписание построит ЗЕЛЁНЫЙ конвейер, который ничего не проверяет,
+# либо красный, который никто не сможет починить. Это ровно тот класс «тихой деградации»,
+# который проект запрещает.
+#
+# Поэтому сначала ФАКТ: этот воркфлоу ходит по одному дешёвому публичному эндпоинту каждой
+# площадки и печатает HTTP-код + регион раннера. Никаких ключей, никаких приватных вызовов.
+#
+# Читать результат так:
+#   200 у fapi.binance.com  -> расписание verify_* в Actions осмысленно, строим дальше;
+#   451/403                 -> Actions как площадка для живых замеров НЕ подходит, и тогда
+#                              честный вариант — self-hosted runner на машине владельца
+#                              либо запуск по месту, а не имитация проверки в облаке.
+name: venue-reachability
+
+on:
+  workflow_dispatch:
+  # Раз в неделю: геоблок — это политика площадки, она меняется без анонса, и узнать об
+  # изменении хочется до того, как на нём будет построен конвейер.
+  schedule:
+    - cron: "41 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Runner geography
+        run: |
+          echo "::group::runner location"
+          curl -sS --max-time 10 https://ipinfo.io/json || echo "ipinfo unavailable"
+          echo
+          echo "::endgroup::"
+
+      - name: Public endpoint probe
+        run: |
+          set -u
+          probe() {
+            name="$1"; url="$2"
+            code=$(curl -sS -o /tmp/body.txt -w '%{http_code}' --max-time 15 "$url" || echo "000")
+            head=$(head -c 160 /tmp/body.txt | tr -d '\n')
+            printf '%-28s %s  %s\n' "$name" "$code" "$head"
+          }
+          echo "endpoint                     code  body(first 160b)"
+          echo "-------------------------------------------------------------"
+          probe "binance-usdm/ping"      "https://fapi.binance.com/fapi/v1/ping"
+          probe "binance-usdm/exchInfo"  "https://fapi.binance.com/fapi/v1/exchangeInfo"
+          probe "binance-spot/ping"      "https://api.binance.com/api/v3/ping"
+          probe "binance-data/oiHist"    "https://fapi.binance.com/futures/data/openInterestHist?symbol=BTCUSDT&period=5m&limit=1"
+          probe "okx/time"               "https://www.okx.com/api/v5/public/time"
+          probe "bybit/time"             "https://api.bybit.com/v5/market/time"
+          probe "bitget/time"            "https://api.bitget.com/api/v2/public/time"
+          probe "coingecko/ping"         "https://api.coingecko.com/api/v3/ping"
+          probe "cryptocom/instruments"  "https://api.crypto.com/exchange/v1/public/get-instruments"
