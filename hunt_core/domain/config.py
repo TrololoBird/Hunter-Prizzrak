@@ -296,9 +296,63 @@ def load_toml_defaults() -> dict[str, Any]:
 _DEFAULTS_PATH = Path(__file__).resolve().parents[2] / "config.defaults.toml"
 
 
+def config_section(*path: str) -> dict[str, Any]:
+    """Секция файла настроек по пути, как она записана в TOML. Пусто — если её нет.
+
+    ⚠ ЗАЧЕМ ОТДЕЛЬНАЯ ФУНКЦИЯ, если рядом есть :func:`load_config_defaults_toml`. Та —
+    НЕ универсальный читатель, а форвардер по БЕЛОМУ СПИСКУ: она отображает несколько
+    известных секций в ключи param-store и возвращает ровно ``{"gates", "tracker"}``.
+    Всё остальное из файла в её выводе отсутствует.
+
+    На этом легко обжечься, и обжёгся я: правка `[analyst.pinned]` читалась через неё и
+    молча не действовала — секции `analyst` в её выводе просто нет. Поймал собственный
+    контроль (TOML=777 → код видел 300), а не обзор кода. Отсюда явное имя и эта оговорка.
+
+    Порядок источников тот же, что у :func:`load_settings`: `config.defaults.toml` —
+    истина, `config.toml` накладывается поверх (пер-ключево внутри секции).
+
+    Args:
+        path: Путь секции, например ``("analyst", "pinned")`` для ``[analyst.pinned]``.
+
+    Returns:
+        Словарь секции. Пустой — если секции нет; отличать «нет секции» от «секция пуста»
+        по этому ответу нельзя, и вызывающий обязан иметь дефолт.
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    merged: dict[str, Any] = {}
+    for name in ("config.defaults.toml", "config.toml"):
+        candidate = repo_root / name
+        if not candidate.is_file():
+            continue
+        try:
+            raw: Any = _toml_lib.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, _toml_lib.TOMLDecodeError) as exc:
+            # Логгер здесь намеренно локальный: модуль настроек грузится очень рано, и
+            # модульный structlog-логгер завёл бы импортный цикл через runtime/logging.
+            import structlog
+
+            structlog.get_logger("hunt_core.domain.config").warning(
+                "config_section_unreadable", path=str(candidate), error=repr(exc)
+            )
+            continue
+        for key in path:
+            raw = raw.get(key) if isinstance(raw, dict) else None
+            if raw is None:
+                break
+        if isinstance(raw, dict):
+            merged.update(raw)
+    return merged
+
+
 @lru_cache(maxsize=1)
 def load_config_defaults_toml() -> dict[str, Any]:
-    """Parse config.defaults.toml into param_store universal section keys."""
+    """Parse config.defaults.toml into param_store universal section keys.
+
+    ⚠ ЭТО ФОРВАРДЕР ПО БЕЛОМУ СПИСКУ, А НЕ ЧИТАТЕЛЬ ФАЙЛА. Возвращает только
+    ``{"gates", "tracker"}`` — секции, явно отображённые ниже. Для произвольной секции
+    нужен :func:`config_section`; попытка достать через эту функцию что-то другое вернёт
+    ``None`` молча.
+    """
     if not _DEFAULTS_PATH.exists():
         return {}
     try:
