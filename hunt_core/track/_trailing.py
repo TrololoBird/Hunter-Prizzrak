@@ -99,17 +99,23 @@ def _update_trailing_stop(
     """Trail SL behind peak MFE; squeeze_on + MFE>0 tightens room by 30% (Phase 5B).
 
     Returns ``(updated, previous_stop)`` for same-tick guards and TG notifications.
-
-    Манипуляционные сигналы (reversal) не используют трейлинг — держим до цели/стопа.
     """
-    # register_signal_open stores the manipulation marker as active["setup_phase"]
-    # = setup["phase"] == "manipulation" (NOT entry_type, which isn't persisted, and
-    # NOT "phase", which becomes the lifecycle value "dump_confirmed"). The old guard
-    # matched entry_type=="manipulation_reversal" and so NEVER fired — the runner got
-    # trailed out of big moves on temporary pullbacks. Manipulation reversals hold to
-    # structural targets + averaging, no trail.
-    if str(active.get("setup_phase") or "") == "manipulation":
-        return False, float(active.get("stop_loss") or 0)
+    # ⚠ ВЕТКА «манипуляционные сигналы не трейлятся» СНЯТА 2026-08-01 — она мертва.
+    #
+    # Она сравнивала `setup_phase == "manipulation"`, а единственные продюсеры этой фазы —
+    # `deliver/manipulation_delivery.py` и `scanner/` — вырезаны вместе с модулем
+    # (`a0773f2`). Новая запись такую фазу получить НЕ МОЖЕТ; старых в дереве нет —
+    # замер 2026-08-01: `data/hunt_outcome_ledger.jsonl` 5 строк,
+    # `data/signal_history.jsonl` 4, записей с фазами манипуляций **0**.
+    #
+    # Оставлять условие, которое не может сработать, — это ровно тот класс, который
+    # CLAUDE.md зовёт фирменным: ветка выглядит защитой, а защищает ноль случаев, и
+    # следующий читатель тратит время, выясняя, кто её кормит.
+    #
+    # Историю ветки сохраняю, потому что она поучительна: прежний гард сравнивал
+    # `entry_type == "manipulation_reversal"` и НЕ СРАБАТЫВАЛ НИКОГДА (поле не
+    # персистилось), из-за чего раннер вытрейливало из крупных движений на временных
+    # откатах. Класс «условие на поле без продюсера» тут уже стоил денег один раз.
     cur_stop = float(active.get("stop_loss") or 0)
     mfe = _mfe_pct(active, direction=direction)
     if mfe <= 0:
