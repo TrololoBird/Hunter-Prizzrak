@@ -1,6 +1,8 @@
 """Telegram /stats — tracker WR, phase matrix, TG funnel, regime, confidence."""
 from __future__ import annotations
 
+import structlog
+
 
 
 import html
@@ -20,9 +22,11 @@ from hunt_core.track.tracker import load_tracker_state
 from hunt_core.track.outcomes import (
     LEGACY_UNKNOWN,
     entry_lifecycle_phase,
-    is_polluted,
+    pollution_reason,
     outcome_kind,
 )
+
+LOG = structlog.get_logger("hunt_core.runtime.stats_report")
 
 _WIN_REASONS = frozenset({"tp1", "tp2", "fix_profit_tp1", "fix_profit_tp2"})
 _STOP_REASONS = frozenset({"stop_hit"})
@@ -161,17 +165,34 @@ def bayesian_wr_ci(*, wins: int, n: int) -> str:
 
 def _labeled_closed(signals: dict[str, Any]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
+    dropped: dict[str, int] = {}
     for sig in signals.values():
         if not isinstance(sig, dict) or sig.get("status") != "closed":
             continue
         reason = str(sig.get("close_reason") or "unknown")
         if reason == "unknown" or sig.get("pnl_pct") is None:
             continue
-        # Exclude polluted archive rows (missing opened_at/score/fuel) so /stats
-        # WR, Bayesian CI and the phase matrix match analyze_signals' genuine set.
-        if is_polluted(sig):
+        # Исключаем легаси/частичные архивные строки, чтобы WR, байесовский интервал и
+        # фазовая матрица в /stats совпадали с genuine-набором analyze_signals.
+        #
+        # ⚠ НО ОТБРАКОВКА ОБЯЗАНА БЫТЬ СЛЫШНА. До 2026-08-01 тест требовал `score`/`fuel`,
+        # которые писал вырезанный модуль сканера, поэтому отбраковывались ВСЕ сделки
+        # призрака — а /stats просто показывал пустоту, неотличимую от «сделок не было».
+        # Владелец, у которого это единственная обратная связь, диагностировать такое не мог.
+        reason_polluted = pollution_reason(sig)
+        if reason_polluted is not None:
+            dropped[reason_polluted] = dropped.get(reason_polluted, 0) + 1
             continue
         out.append(sig)
+    if dropped:
+        LOG.warning(
+            "stats_rows_excluded",
+            total=sum(dropped.values()),
+            kept=len(out),
+            reasons=dict(sorted(dropped.items(), key=lambda kv: -kv[1])),
+            note="закрытые сделки исключены из статистики; пустой отчёт при ненулевом "
+                 "total означает сломанный учёт, а не отсутствие сделок",
+        )
     return out
 
 

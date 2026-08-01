@@ -72,9 +72,15 @@ async def main(symbols: list[str]) -> None:
                 )
                 lo, hi = _entry_band(z)
                 tps = list(z.get("targets") or [])
+                # ⚠ `poc` ОБЯЗАТЕЛЕН, иначе верификатор считает НЕ ТО, что считает гейт.
+                # До 2026-08-01 его здесь не было, и скрипт печатал «гейт выносит
+                # осмысленный вердикт», проверив другую арифметику: у шортов расхождение
+                # доходит до 3.4 раза (ETH 0.62 без ПОК против 2.13 с ним). Сертификат,
+                # выданный по чужому расчёту, — тот же класс дефекта, что и в боевом коде,
+                # только опаснее: он ЗАКРЫВАЕТ вопрос.
                 rr = _rr_worst_fill(
                     direction=z["direction"], entry_lo=lo, entry_hi=hi,
-                    stop=stop, tp1=tps[0] if tps else None,
+                    stop=stop, tp1=tps[0] if tps else None, poc=z.get("poc"),
                 )
                 width = (hi / lo - 1.0) * 100.0 if lo > 0 else 0.0
                 label = f"{z['kind']}/{z['direction']}"
