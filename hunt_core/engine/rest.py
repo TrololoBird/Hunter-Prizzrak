@@ -246,11 +246,17 @@ async def fetch_futures_data_series(
 
 
 async def fetch_all_tickers(exchange: Any) -> dict[str, dict[str, Any]]:
-    """All-symbol 24h tickers via REST ``fetch_tickers`` (the scanner funnel ranks the whole universe).
+    """All-symbol 24h tickers via REST ``fetch_tickers`` — the one universe-wide REST batch.
 
-    The streamed per-symbol ticker planes only cover the TRACKED universe; the scanner has to rank
-    every perp, so this is the one genuinely universe-wide REST batch (weight ~40, periodic). Fail-loud
-    ``{}`` on failure — never a partial/fabricated map.
+    The streamed per-symbol ticker planes only cover the TRACKED universe, while the cross-sectional
+    market regime (``regime/market_regime.py``) has to rank EVERY perp — hence this batch. Weight is
+    **40** on Binance USDⓈ-M: ``/fapi/v1/ticker/24hr`` costs 1 with a symbol and ``noSymbol=40``
+    without one (сверено с доком биржи и деревом ``api`` ccxt 4.5.68 — 2026-07-31,
+    ``docs/engine/exchange-apis-2026-07-31.md``). That is 1.7% of the 2400/min IP budget per call,
+    so it stays periodic — never per-tick. Fail-loud ``{}`` on failure — never a partial map.
+
+    ⚠ Прежняя редакция обосновывала вызов «воронкой сканера»; модуль МАНИПУЛЯЦИИ вырезан
+    2026-07-31, и живых читателей теперь два: режим рынка и ``_cycle_loop``.
     """
     try:
         tickers = await exchange.fetch_tickers()

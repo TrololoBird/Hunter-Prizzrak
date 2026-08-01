@@ -8,6 +8,7 @@ from hunt_core.contract import price_in_entry_zone
 from hunt_core.market.symbols import is_crypto_symbol, underlying_type_for
 from hunt_core.track.pnl import entry_base, realized_pct
 import structlog
+import contextlib
 import os
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -374,26 +375,85 @@ def _backfill_signal_geometry(sig: dict[str, Any]) -> None:
         sig["risk_reward"] = round(reward / risk, 3)
 
 
+class TrackerStateUnreadable(RuntimeError):
+    """Файл состояния СУЩЕСТВУЕТ, но не читается — это авария, а не «сделок нет».
+
+    Поднимается вместо возврата пустого состояния. Причина в том, что вызывающие делают
+    load → mutate → save (`runtime/analyst_assembly.py::send_analyst_change_telegram`,
+    `runtime/cycle/_cycle_tick.py`), а `save_tracker_state` перезаписывает файл БЕЗУСЛОВНО.
+    Пустой словарь на входе означал бы: все активные сделки стёрты с диска, SL/TP-реконсиляция
+    и follow-up по ним не выполнятся никогда, а лог показал бы здоровый цикл.
+    """
+
+
 def load_tracker_state(path: Path = STATE_PATH) -> dict[str, Any]:
+    """Состояние трекера с диска. Отсутствие файла — норма, нечитаемый файл — авария.
+
+    ⚠ Правка 2026-07-31 по директиве владельца «молчаливые ошибки недопустимы». Прежняя
+    редакция гасила `OSError`/`JSONDecodeError` голым `pass` и возвращала
+    `{"signals": {}}` — неотличимо от «позиций нет». Ветка `not path.exists()` уже
+    обслуживает первый запуск, поэтому исключение здесь означает именно повреждение или
+    недоступность существующего файла. Молчать об этом нельзя: следующий
+    `save_tracker_state` затирает битый файл пустотой, уничтожая и данные, и улику.
+    """
     if not path.exists():
         return {"signals": {}, "followup_sent": {}}
     try:
         raw = serde.loads(path.read_text(encoding="utf-8"))
-        if isinstance(raw, dict) and "signals" in raw:
-            for sig in (raw.get("signals") or {}).values():
-                if isinstance(sig, dict):
-                    _backfill_signal_geometry(sig)
-                    if sig.get("status") != "closed":
-                        _backfill_announced(sig)
-            return raw
-    except (OSError, serde.JSONDecodeError):
-        pass
-    return {"signals": {}, "followup_sent": {}}
+    # ⚠ `ValueError`, а НЕ `serde.JSONDecodeError`. Первая редакция этой правки ловила
+    # `(OSError, serde.JSONDecodeError)` и пропускала главный случай: файл забит русскими
+    # именами зон («перезакуп»), и обрыв записи посреди многобайтного символа даёт
+    # `UnicodeDecodeError`. Он — подкласс `ValueError`, но НЕ `JSONDecodeError`, поэтому
+    # летел наружу необъявленным типом мимо всего механизма. Замер на живом
+    # data/hunt_signal_state.json (80 495 байт): torn-mid-cyrillic → UnicodeDecodeError.
+    except (OSError, ValueError) as exc:
+        _LOG.exception("tracker_state_unreadable", path=str(path), err=repr(exc))
+        raise TrackerStateUnreadable(
+            f"{path} существует, но не читается ({exc!r}). Пустое состояние НЕ подставляется: "
+            f"это стёрло бы активные сделки при следующей записи. Разобрать файл вручную."
+        ) from exc
+
+    if not isinstance(raw, dict) or "signals" not in raw:
+        # Раньше этот случай тоже проваливался в пустой словарь — без исключения и без лога.
+        _LOG.error("tracker_state_malformed", path=str(path), got=type(raw).__name__)
+        raise TrackerStateUnreadable(
+            f"{path} разобран, но не похож на состояние трекера "
+            f"(тип {type(raw).__name__}, ключ 'signals' отсутствует)."
+        )
+
+    for sig in (raw.get("signals") or {}).values():
+        if isinstance(sig, dict):
+            _backfill_signal_geometry(sig)
+            if sig.get("status") != "closed":
+                _backfill_announced(sig)
+    return raw
 
 
 def save_tracker_state(state: dict[str, Any], path: Path = STATE_PATH) -> None:
+    """Записать состояние АТОМАРНО: временный файл рядом + `os.replace`.
+
+    ⚠ Правка 2026-07-31. Прежняя редакция делала `path.write_text(...)` напрямую, то есть
+    файл в 80 КБ существовал в порванном виде всё время записи. Это не теория: `--once`
+    намеренно НЕ берёт single-instance lock (`_cli.py::main`), поэтому обязательный smoke
+    `watch --once --no-telegram` штатно бежит параллельно с живым циклом и читает файл
+    ровно в окне перезаписи. Читатель получал `JSONDecodeError` (или `UnicodeDecodeError`
+    на обрыве посреди кириллицы) на СОВЕРШЕННО ЦЕЛОМ по смыслу состоянии.
+
+    `os.replace` на Windows и POSIX — атомарная подстановка в пределах одной ФС, поэтому
+    читатель всегда видит либо старую версию целиком, либо новую целиком. Временный файл
+    кладётся В ТОТ ЖЕ каталог: `os.replace` между разными томами не атомарен.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(serde.dumps_str(state, indent=True), encoding="utf-8")
+    tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}")
+    try:
+        tmp.write_text(serde.dumps_str(state, indent=True), encoding="utf-8")
+        os.replace(tmp, path)
+    except BaseException:
+        # Мусор за собой не оставляем даже при Ctrl-C: осиротевший .tmp-<pid> сбил бы
+        # следующего читателя каталога и замаскировал бы настоящую причину.
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
 
 
 def iter_active_tracker_symbols(state: dict[str, Any]) -> list[tuple[str, str]]:

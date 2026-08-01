@@ -1,4 +1,9 @@
-"""Watch main loop — universe, prescan, tick scheduling (Phase 8 split)."""
+"""Watch main loop — universe, tick scheduling (Phase 8 split).
+
+Воронка вселенной (`prescan`) снята вместе с модулем МАНИПУЛЯЦИИ 2026-07-31: она набирала
+НЕпиннутую вселенную под сканер, тогда как призрак работает по пиннутым мажорам и `/signal SYM`.
+Состав тика теперь — пиннутые ∪ CLI ∪ открытые позиции трекера.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -12,19 +17,9 @@ from typing import Any
 from hunt_core import clock, serde
 from hunt_core.view.runtime import MarketRuntime, build_market_runtime
 from hunt_core.data.lake import FeatureLakeWriter, buffer_tick_rows, flush_lake
-from hunt_core.scanner.feed import EngineScannerFeed, ScannerFeed
-from hunt_core.scanner.prescan import (
-    PrescanDebounceQueue,
-    PrescanEngine,
-    apply_quality_gates,
-    prescan_from_tickers,
-)
-from hunt_core.data.baseline_store import batch_update_baselines
 from hunt_core.data.universe import PINNED_SYMBOLS, resolve_watch_universe
-from hunt_core.deliver.digest import DigestCandidate, get_digest_scheduler
 from hunt_core.deliver.telegram import TelegramBroadcaster
 from hunt_core.domain.config import (
-    SCAN_INTERVAL_S,
     TICK_ROTATE_INTERVAL_S,
     TICK_ROTATE_MIN_BYTES,
 )
@@ -34,11 +29,11 @@ from hunt_core.regime.market_regime import (
     load_regime_file,
     refresh_market_regime,
 )
-from hunt_core.errors import DEFENSIVE_EXC, defensive_exc_types, system_breakers
+from hunt_core.errors import DEFENSIVE_EXC, system_breakers
 from hunt_core.maps.engine import get_map_store
 from hunt_core.market.symbol_gate import gate_symbol_list
 from hunt_core.market.symbols import fetch_ticker_rows
-from hunt_core.params.store import migrate_calibration_split, prescan_thresholds
+from hunt_core.params.store import migrate_calibration_split
 from hunt_core.runtime.cycle._cycle_tick import run_tick
 from hunt_core.runtime.heartbeat import beat as _wd_beat
 from hunt_core.runtime.heartbeat import seconds_since_progress as _wd_gap
@@ -52,7 +47,6 @@ from hunt_core.runtime.state import (
 )
 from hunt_core.runtime.telegram_commands import build_hunt_telegram_commands
 from hunt_core.runtime.tick_io import rotate_hunt_ticks, rotate_telemetry_jsonl
-from hunt_core.track.events import record_funnel_stage
 from hunt_core.track.pump_history import (
     backfill_from_jsonl,
     load_pump_history,
@@ -136,111 +130,6 @@ def _log_orphan_ws(exc: BaseException) -> None:
         LOG.debug("asyncio_orphan_ws | %s", exc)
     state["count"] = 0.0
     state["next_emit"] = now + _ORPHAN_WS_LOG_INTERVAL_S
-
-
-def _build_digest_candidates(
-    gated_ticker_rows: list[dict[str, Any]],
-) -> list[DigestCandidate]:
-    """Score gated tickers into pump/dump candidates for the scheduled digest.
-
-    Score = |24h change %| with a mild liquidity weight so a thin-volume mover
-    does not outrank a high-volume one at equal magnitude.
-    """
-    out: list[DigestCandidate] = []
-    for row in gated_ticker_rows:
-        sym = str(row.get("symbol") or "").strip().upper()
-        if not sym:
-            continue
-        chg_raw = row.get("price_change_percent")
-        if chg_raw is None:
-            chg_raw = row.get("price_change_pct")
-        try:
-            chg = float(chg_raw if chg_raw is not None else 0)
-        except (TypeError, ValueError):
-            continue
-        if not chg:
-            continue
-        try:
-            qvol = float(row.get("quote_volume") or row.get("quoteVolume") or 0.0)
-        except (TypeError, ValueError):
-            qvol = 0.0
-        liq_w = 1.0 + min(qvol / 1e8, 1.0) * 0.25
-        out.append(
-            DigestCandidate(
-                symbol=sym,
-                direction="pump" if chg > 0 else "dump",
-                score=abs(chg) * liq_w,
-                change_24h_pct=chg,
-            )
-        )
-    return out
-
-
-async def _manipulation_scan_loop(
-    cli_symbols: Sequence[str],
-    feed: ScannerFeed,
-    broadcaster: Any | None,
-    send_telegram: bool,
-    *,
-    interval_s: int = 300,
-) -> None:
-    """Periodic scan for manipulation reversal setups (scanner/detect/patterns.py).
-
-    Detects Pattern A (long: impulse→absorption→bokovik→sweep→break) and
-    Pattern B (short: HTF sweep→fade→LTF_confirm) across the non-pinned
-    universe. Each scan fetches OHLCV for all tracked symbols, runs the
-    state machine, and delivers if score ≥ 0.50.
-
-    The universe is re-resolved EVERY cycle. It used to be a list captured once at
-    process start, so the watchlist that prescan keeps rewriting never reached the
-    scanner: a coin that started coiling after boot was invisible until the next
-    restart — and the whole point of the prescan is to surface exactly those.
-    """
-    from hunt_core.deliver.manipulation_delivery import deliver_manipulation_setups
-    from hunt_core.data.lake import buffer_tracker_state, flush_tracker_state
-    from hunt_core.data.universe import PINNED_SYMBOLS, load_watchlist_symbols
-    from hunt_core.track.tracker import load_tracker_state
-
-    LOG.info("manipulation_scan_loop_started interval=%s", interval_s)
-    while not should_stop():
-        try:
-            # Pinned symbols are Prizrak's exclusive domain; scanner owns the rest.
-            # Blacklisted symbols are skipped like the tick loop does: without
-            # this a symbol blacklisted mid-session kept costing 6 TFs of REST +
-            # funding every cycle, failing at debug level and burning weight.
-            pinned_upper = {str(s).upper() for s in PINNED_SYMBOLS}
-            symbols = [
-                s
-                for s in dict.fromkeys(list(cli_symbols) + load_watchlist_symbols())
-                if str(s).upper() not in pinned_upper and not is_blacklisted(s)
-            ]
-            cycle_started = time.monotonic()
-            delivered: list[dict[str, Any]] = []
-            if send_telegram and broadcaster is not None and symbols:
-                ts = load_tracker_state()
-                delivered = await deliver_manipulation_setups(
-                    symbols, feed, broadcaster, tracker_state=ts
-                ) or []
-                buffer_tracker_state(ts)
-                flush_tracker_state()
-            # One line per cycle. The loop used to log ONLY on delivery, so a
-            # quiet scanner was indistinguishable from a broken one: 2h of live
-            # silence could not be attributed without reading the source.
-            LOG.info(
-                "manipulation_scan_cycle",
-                symbols=len(symbols),
-                delivered=len(delivered),
-                delivered_syms=[str(d.get("symbol")) for d in delivered][:5],
-                duration_s=round(time.monotonic() - cycle_started, 1),
-                telegram=bool(send_telegram and broadcaster is not None),
-            )
-        except asyncio.CancelledError:
-            break
-        except Exception:
-            LOG.exception("manipulation_scan_loop_error")
-        await asyncio.sleep(interval_s)
-
-    LOG.info("manipulation_scan_loop_stopped")
 
 
 def _engine_universe(*symbol_groups: Sequence[str]) -> tuple[list[str], list[str]]:
@@ -371,7 +260,7 @@ async def run_loop(
         set_live_market_runtime(None)
         LOG.error("engine_runtime_unavailable | watch loop degraded, no legacy fallback")
     # The engine's primary ccxt.pro client — the exchange handle every drained consumer takes
-    # (regime refresh, prescan run_scan, path-backfill, the tick's universe funnel). None ⇒ degraded.
+    # (regime refresh, path-backfill, the tick's universe funnel). None ⇒ degraded.
     exchange = market_runtime.multi.primary.exchange if market_runtime is not None else None
     # Persistent across ticks: prev-tick OI carry for oi_flush/oi_build.
     prev_oi: dict[str, float | None] = {}
@@ -379,48 +268,19 @@ async def run_loop(
     last_lifecycle_phase: dict[str, str] = {}
     symbol_state = new_session_state()
 
-    manipulation_task: asyncio.Task[None] | None = None
-    if not once:
-        # ADR-0004 S7: the scanner reads its detection frames off the ENGINE — EngineScannerFeed on
-        # the primary engine's ccxt client (engine.exchange + engine.rest, the on-demand REST tail the
-        # engine serves for non-tracked symbols). The legacy client feed is deleted; if the engine
-        # runtime failed to start the scanner is simply skipped (logged), never client-fed.
-        if market_runtime is None:
-            LOG.error("manipulation_scan_disabled | engine runtime unavailable")
-        else:
-            scanner_feed: ScannerFeed = EngineScannerFeed(market_runtime.multi.primary)
-            # Pass the CLI seed only — the loop re-resolves watchlist ∪ cli minus pinned on
-            # every pass, so freshly-prescanned coins are actually scanned (see docstring).
-            manipulation_task = asyncio.create_task(
-                _manipulation_scan_loop(cli_symbols, scanner_feed, broadcaster, send_telegram),
-                name="manipulation_scan_loop",
-            )
-            LOG.info("manipulation_scan_loop_scheduled", engine_fed=True)
-
     feature_lake = FeatureLakeWriter()
-    prescan_debounce = PrescanDebounceQueue(
-        debounce_s=float(
-            os.getenv(
-                "HUNT_PRESCAN_DEBOUNCE_S",
-                str(prescan_thresholds()["debounce_s"]),
-            )
-            or prescan_thresholds()["debounce_s"]
-        ),
-    )
-    prescan_engine = PrescanEngine()
-    digest_scheduler = get_digest_scheduler()
+
     pump_store = load_pump_history()
     if not pump_store.symbols and not pump_store.event_log:
         backfill_from_jsonl(pump_store)
         save_pump_history(pump_store)
 
-    # --once smoke: skip the heavy first-tick scan (full watchlist prescan).
+    # --once smoke: skip the heavy first-tick regime refresh.
     _now_mono = time.monotonic()
-    last_scan = _now_mono if once else 0.0
     last_regime = _now_mono if once else 0.0
     # Cross-venue is now engine-native (MultiEngine secondaries), so the legacy REST cross-ex cache and
-    # secondary-CEX ticker overlay are permanently empty here — kept only as the soft inputs the prescan
-    # funnel + the (cross-ignoring) run_tick still accept.
+    # secondary-CEX ticker overlay are permanently empty here — kept only as the soft inputs the
+    # (cross-ignoring) run_tick still accepts.
     _cross_ex_cache: dict[str, dict[str, Any]] = {}
     _secondary_ticker_overlay: dict[str, dict[str, Any]] = {}
     last_tick_rotate = time.monotonic()
@@ -571,36 +431,11 @@ async def run_loop(
                         LOG.exception("market_regime_refresh_failed")
                         last_regime = time.monotonic()
 
-                if (
-                    not once
-                    and exchange is not None
-                    and time.monotonic() - last_scan >= SCAN_INTERVAL_S
-                ):
-                    try:
-                        from hunt_core.params.store import hunter_thresholds
-                        from hunt_core.scanner.prescan import run_scan
-
-                        _ht = hunter_thresholds()
-                        summary = await run_scan(
-                            limit=int(_ht.get("watchlist_limit", 50)),
-                            min_score=float(_ht.get("score_watch", 45.0)),
-                            exchange=exchange,
-                        )
-                        LOG.info(
-                            "hunt_scan_refresh",
-                            watch=summary.get("watch_count"),
-                            priority=summary.get("priority_count"),
-                        )
-                    except defensive_exc_types(asyncio.IncompleteReadError) as exc:
-                        LOG.warning("hunt_scan_refresh_failed", error=repr(exc))
-                    last_scan = time.monotonic()
-
                 settings = load_settings()
                 now = clock.now_utc()
-                # Whole-universe 24h tickers off the engine ccxt exchange (fail-loud []); the scanner
-                # funnel + prescan rank against these. Cross-venue is engine-native now, so the legacy
-                # secondary-CEX overlay is permanently empty (soft) and the per-symbol OI %-change cache
-                # is gone — prescan treats absent OI as None (I-6, never fabricated).
+                # Whole-universe 24h tickers off the engine ccxt exchange (fail-loud []).
+                # Cross-venue is engine-native now, so the legacy secondary-CEX overlay is
+                # permanently empty (soft) and the per-symbol OI %-change cache is gone.
                 ticker_raw = (
                     await asyncio.wait_for(fetch_ticker_rows(exchange), timeout=120.0)
                     if exchange is not None
@@ -608,57 +443,6 @@ async def run_loop(
                 )
                 ticker_by_sym = {str(t.get("symbol")): t for t in ticker_raw if t.get("symbol")}
                 ex = exchange
-                # P1.6: prescan outliers feed an internal debounce queue, NOT
-                # Telegram. Ready (debounced) symbols merge into the watch universe.
-                gated_ticker_rows = [
-                    t for t in ticker_raw if apply_quality_gates(t)[0]
-                ]
-                _oi_change_by_sym: dict[str, float | None] = {}
-                batch_update_baselines(gated_ticker_rows, oi_by_sym=_oi_change_by_sym)
-                _prescan_hits = prescan_from_tickers(
-                    gated_ticker_rows,
-                    engine=prescan_engine,
-                    secondary_overlay=_secondary_ticker_overlay,
-                    oi_change_by_sym=_oi_change_by_sym,
-                )
-                prescan_debounce.offer(_prescan_hits)
-                # P1.17: strongest outlier per symbol for the early-advisory merge.
-                prescan_outlier_by_sym: dict[str, dict[str, Any]] = {}
-                for _h in _prescan_hits:
-                    prev = prescan_outlier_by_sym.get(_h.symbol)
-                    if prev is None or _h.energy > prev.get("energy", 0.0):
-                        prescan_outlier_by_sym[_h.symbol] = {
-                            "direction": _h.direction,
-                            "change_pct": _h.change_pct,
-                            "energy": _h.energy,
-                            "readiness_direction": _h.readiness_direction,
-                            "interval": _h.interval,
-                            "cross_venues": _h.cross_venues,
-                            "oi_divergence": getattr(_h, "oi_divergence", None),
-                        }
-                prescan_ready = prescan_debounce.drain_ready()
-                if prescan_ready:
-                    LOG.info(
-                        "hunt_prescan_debounce_ready",
-                        count=len(prescan_ready),
-                        head=[d.symbol for d in prescan_ready[:6]],
-                    )
-                    try:
-                        from hunt_core.diagnostics.universe_audit import (
-                            append_prescan_universe_audit,
-                        )
-
-                        for _d in prescan_ready:
-                            append_prescan_universe_audit(_d, ts=now)
-                    except Exception:
-                        LOG.exception("hunt_prescan_universe_audit_failed")
-                    for d in prescan_ready[:12]:
-                        record_funnel_stage(
-                            "prescan",
-                            symbol=d.symbol,
-                            direction=d.direction,
-                            detail=f"{d.interval}:{d.change_pct:.1f}%",
-                        )
                 price_map = {
                     sym: float(row.get("last_price") or 0)
                     for sym, row in ticker_by_sym.items()
@@ -681,65 +465,6 @@ async def run_loop(
                         if s not in merged:
                             merged.append(s)
                         mode_map.setdefault(s, SYMBOL_WATCH_MODES.get(s, "short"))
-                    # P1.6 merge: debounced prescan outliers join the ignition path.
-                    prescan_merge_cap = int(
-                        os.getenv(
-                            "HUNT_PRESCAN_MERGE_CAP",
-                            str(prescan_thresholds()["merge_cap"]),
-                        )
-                        or prescan_thresholds()["merge_cap"]
-                    )
-                    max_chg_merge = float(
-                        os.getenv(
-                            "HUNT_PRESCAN_MAX_CHANGE_PCT",
-                            str(prescan_thresholds()["max_change_pct_for_merge"]),
-                        )
-                        or prescan_thresholds()["max_change_pct_for_merge"]
-                    )
-                    from hunt_core.scanner.prescan import prescan_merge_eligible
-
-                    prescan_filtered: list[Any] = []
-                    prescan_skipped_late = 0
-                    for _d in prescan_ready:
-                        if prescan_merge_eligible(_d, max_change_pct=max_chg_merge):
-                            prescan_filtered.append(_d)
-                        else:
-                            prescan_skipped_late += 1
-                            try:
-                                from hunt_core.diagnostics.universe_audit import (
-                                    append_prescan_merge_skip_audit,
-                                )
-
-                                append_prescan_merge_skip_audit(
-                                    _d,
-                                    reason="late_chase",
-                                    max_change_pct=max_chg_merge,
-                                    ts=now,
-                                )
-                            except Exception:
-                                LOG.exception("hunt_prescan_merge_skip_audit_failed")
-                    if prescan_skipped_late:
-                        LOG.info(
-                            "hunt_prescan_late_chase_skipped",
-                            skipped=prescan_skipped_late,
-                            max_change_pct=max_chg_merge,
-                            eligible=len(prescan_filtered),
-                        )
-                    prescan_to_merge = prescan_filtered[: max(prescan_merge_cap, 0)]
-                    if len(prescan_ready) > len(prescan_to_merge):
-                        LOG.info(
-                            "hunt_prescan_merge_capped",
-                            ready=len(prescan_ready),
-                            merged=len(prescan_to_merge),
-                            cap=prescan_merge_cap,
-                        )
-                    for d in prescan_to_merge:
-                        s = d.symbol.upper()
-                        if s not in merged:
-                            merged.append(s)
-                        mode_map.setdefault(
-                            s, "short" if d.direction in {"dump", "bear"} else "long"
-                        )
                     # Keep open tracker positions in every tick batch — otherwise
                     # SL/TP followups stall until orphan kline reconcile.
                     tracker_pin = load_tracker_state()
@@ -783,7 +508,6 @@ async def run_loop(
                     "ticker_by_sym": ticker_by_sym,
                     "pump_store": pump_store,
                     "cross_ex_cache": _cross_ex_cache,
-                    "prescan_outlier_by_sym": prescan_outlier_by_sym,
                     "symbol_state": symbol_state,
                     "feature_lake": feature_lake,
                 }
@@ -970,15 +694,6 @@ async def run_loop(
                         except Exception:
                             LOG.exception("watch_pinned_startup_brief_failed")
                         _pinned_brief_sent = True
-                # P1.7: scheduled pump/dump digest (1h/3h/6h) — distinct from the
-                # per-tick advisory batch. Candidates come from gated tickers.
-                if send_telegram and broadcaster is not None:
-                    digest_candidates = _build_digest_candidates(gated_ticker_rows)
-                    sent_digest = await digest_scheduler.maybe_emit(
-                        broadcaster, digest_candidates
-                    )
-                    if sent_digest:
-                        LOG.info("hunt_digest_scheduled_sent", candidates=len(digest_candidates))
                 # Periodic session checkpoint (~every 5 minutes)
                 if time.monotonic() - _last_checkpoint >= 300.0:
                     try:
@@ -1045,12 +760,6 @@ async def run_loop(
             tg_task.cancel()
             try:
                 await tg_task
-            except asyncio.CancelledError:
-                pass
-        if manipulation_task is not None:
-            manipulation_task.cancel()
-            try:
-                await manipulation_task
             except asyncio.CancelledError:
                 pass
         if deep_task is not None:

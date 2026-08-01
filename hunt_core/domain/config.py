@@ -309,18 +309,10 @@ def load_config_defaults_toml() -> dict[str, Any]:
         return {}
 
     out: dict[str, Any] = {}
-    scanner = raw.get("hunter")
-    if isinstance(scanner, dict):
-        # Forward the WHOLE [hunter] section under key "hunter" — that is the key
-        # store.py::hunter_thresholds() reads via universal_section("hunter"). It used
-        # to be emitted under "scanner" (which nothing reads) AND with only 4 renamed
-        # keys, so the entire TOML [hunter] block was doc-only: editing e.g.
-        # min_quote_volume_usd or scan_interval_s in the TOML silently did nothing, the
-        # effective value being the inline `.get(key, fallback)` in hunter_thresholds().
-        # Values currently equal those fallbacks, so this wiring is behaviour-preserving
-        # today and makes future TOML edits actually take effect. Original key names are
-        # kept (range_hot_pct, not the old hot_range_pct rename) so store's .get() hits.
-        out["hunter"] = {k: v for k, v in scanner.items() if v is not None}
+    # Форвардинг секции [hunter] снят 2026-07-31 вместе с модулем МАНИПУЛЯЦИИ: её читатель
+    # `store.py::hunter_thresholds()` обслуживал воронку вселенной сканера и удалён вместе
+    # с ней. Форвардить секцию, которую никто не читает, — ровно тот дефект, который здесь
+    # уже чинили (блок был doc-only и правки TOML молча не действовали).
 
     # NB (audit R2 chunk 7): only [confirm.short] is wired (→ "gates", consumed by
     # effective_hunt_params). The [confirm] top-level keys (entry_confirm_tf* /

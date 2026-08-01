@@ -3,9 +3,9 @@
 **Single source of truth.** Hunt is crypto-futures **signal-analytics** over *public*
 Binance USDⓈ-M data. It is **NOT a trading bot**: no orders, no balances, no account
 state, no private API keys. The AI-instruction files that must agree with this one are
-`CLAUDE.md` (Claude Code) and `AGENTS.md` (opencode) — the only two agents working on this
-repo. Both follow links, so they CITE this file rather than duplicating the list; there is
-deliberately no inline mirror to drift.
+`CLAUDE.md` (Claude Code) — the only agent working on this repo since 2026-07-31, when
+`AGENTS.md` (opencode) was deleted. It follows links, so it CITES this file rather than
+duplicating the list; there is deliberately no inline mirror to drift.
 
 > Removed 2026-07-17: `.github/copilot-instructions.md` and `.cursor/rules/000-hunt.mdc`,
 > plus the CI drift guard that existed solely to keep the Copilot copy in sync. Copilot does

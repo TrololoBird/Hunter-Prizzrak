@@ -26,6 +26,7 @@ from hunt_core.deliver.digest import get_advisory_digest
 from hunt_core.deliver.telegram import TelegramBroadcaster
 from hunt_core.engine import metrics
 from hunt_core.errors import defensive_exc_types
+from hunt_core.features.snapshot import reset_substitution_counts, substitution_counts
 from hunt_core.features.feature_engine import (
     FeatureExtractError,
     build_feature_vector_native,
@@ -137,7 +138,6 @@ async def run_tick(
     ticker_by_sym: dict[str, dict[str, Any]] | None = None,
     pump_store: Any | None = None,
     cross_ex_cache: dict[str, dict[str, Any]] | None = None,
-    prescan_outlier_by_sym: dict[str, dict[str, Any]] | None = None,
     symbol_state: SymbolStateStore | None = None,
     feature_lake: FeatureLakeWriter | None = None,
 ) -> list[dict[str, Any]]:
@@ -164,6 +164,11 @@ async def run_tick(
 
     state = _load_state()
     tracker_state = load_tracker_state()
+    # Счётчик подстановок дефолтов (`features/snapshot.py::col`) обнуляется НА ТИК, чтобы
+    # сводка ниже читалась как «столько дыр в данных было в ЭТОМ тике», а не нарастающим
+    # итогом с момента запуска. Без этого вызова счётчик копился бесконечно, а его
+    # докстрока утверждала «вызывается в начале тика» — вызывающего не существовало.
+    reset_substitution_counts()
     now = clock.now_utc()
     exchange = rt.multi.primary.exchange
     rows: list[dict[str, Any]] = []
@@ -171,8 +176,8 @@ async def run_tick(
     try:
         # The tick assembles ONLY the engine warm-set (pinned + any on-demand /signal coin). A
         # non-pinned coin is on-demand — warmed just-in-time by the /signal query path, never
-        # continuously WS-streamed (ADR-0004 §1.6 + the "non-pinned = on-demand" model); prescan
-        # outliers stay OUT (Module 2 scans them on its own REST-tail). Open signals on non-pinned
+        # continuously WS-streamed (ADR-0004 §1.6 + the "non-pinned = on-demand" model).
+        # Open signals on non-pinned
         # symbols are NOT bulk-warmed here: adding ~N trackers' WS subscriptions at once triggers a
         # Binance 1006 close-storm at scale — they are tracked instead by the REST safety nets below
         # (reconcile_active_from_ticker + _reconcile_orphan_signals). After this scope every ticked
@@ -233,6 +238,19 @@ async def run_tick(
                 elapsed_s=snap_elapsed,
                 ready=ready_n,
                 not_ready=len(ordered) - ready_n,
+            )
+        # Дыры в данных за этот тик. `col()` подставляет дефолт вместо отсутствующего
+        # значения сотни раз за тик, и warning на каждый вызов уже устраивал здесь флуд
+        # (95 сообщений за 20 ч, 39% канала). Поэтому подстановки СЧИТАЮТСЯ по имени
+        # колонки, а наружу идёт одна строка — но идти она обязана: без неё счётчик был
+        # ровно тем, против чего написан, — тихой деградацией (директива владельца
+        # 2026-07-31). Пусто — не логируем: нулевая строка каждый тик обесценила бы сигнал.
+        subs = substitution_counts()
+        if subs:
+            LOG.warning(
+                "tick_default_substitutions",
+                total=sum(subs.values()),
+                columns=dict(sorted(subs.items(), key=lambda kv: -kv[1])[:10]),
             )
 
         for symbol in ordered:
@@ -300,8 +318,6 @@ async def run_tick(
                     lifecycle=neutral_lc,
                     mtf_dict=mtf_confluence_to_dict(mtf) if mtf is not None else None,
                 )
-                if prescan_outlier_by_sym and compact in prescan_outlier_by_sym:
-                    persist["prescan_outlier"] = prescan_outlier_by_sym[compact]
                 rows.append(persist)
 
                 kline_events = await _reconcile_inwatch_active(

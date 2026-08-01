@@ -381,17 +381,8 @@ def build_stats_report_text() -> str:
     if sf:
         blocks.append(sf)
     blocks.extend(_phase_matrix(labeled))
-    from hunt_core.scanner.detect.delivery_support import disabled_phase_pairs
-
-    disabled = disabled_phase_pairs()
-    if disabled:
-        lines = ["<b>Phase auto-off</b> (WR under 25%, n≥10):"]
-        for (phase, direction), st in sorted(disabled.items()):
-            lines.append(
-                f"· <code>{phase[:18]}</code> {direction} "
-                f"WR {st.wr * 100:.0f}% n={st.n}"
-            )
-        blocks.append("\n".join(lines))
+    # Блок «Phase auto-off» снят вместе с модулем МАНИПУЛЯЦИИ (2026-07-31): его источник
+    # `disabled_phase_pairs()` возвращал `{}` безусловно, то есть ветка не отрисовывалась ни разу.
     blocks.append(_format_tg_funnel(signals=signals))
     blocks.append("<i>Hunt stats · read-only · не auto-trade</i>")
     return "\n\n".join(blocks)

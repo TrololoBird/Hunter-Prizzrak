@@ -16,7 +16,12 @@
 set -eu
 
 ROOT="${CLAUDE_PROJECT_DIR:-$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)}"
+
+# Раскладка venv зависит от платформы: POSIX кладёт бинарь в bin/, Windows — в Scripts/ с .exe.
+# Прежняя редакция знала только про bin/, поэтому на Windows хук падал на проверке ниже с
+# «ruff не найден» — то есть линт правок молча не выполнялся ни разу (замер 2026-07-30).
 RUFF="$ROOT/.venv/bin/ruff"
+[ -x "$RUFF" ] || RUFF="$ROOT/.venv/Scripts/ruff.exe"
 
 file="$(jq -r '.tool_input.file_path // .tool_response.filePath // empty')"
 [ -n "$file" ] || exit 0

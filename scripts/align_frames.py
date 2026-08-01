@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Align scene-change keyframes of a video with its transcript segments.
 
-Produces, for a video + its ``<slug>.segments.jsonl`` (from ingest_manipulation_video.py):
+Produces, for a video + its ``<slug>.segments.jsonl`` (from the razbor-video pipeline):
 - scene-change JPEGs with **real timestamps** in a temp dir (never committed), and
 - ``<out>/frames.jsonl``: for each frame ``{i, t, hhmmss, file, said}`` where ``said`` is the
   narration spoken in a window around the frame's timestamp.

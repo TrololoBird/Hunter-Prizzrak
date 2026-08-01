@@ -489,11 +489,26 @@ def compute_interest_zones(
         out: dict[str, Any] = {"tf": use_tf}
         if long_zone:
             long_ladder = _ladder(below, nearer=lambda z: z["hi"], side="long")
-            deepest_lo = min(z["lo"] for z in long_ladder)
+            # ⚠ Лестница может быть ПУСТОЙ при непустой зоне: `long_zone` и `below` выводятся
+            # раздельно, поэтому «зона есть, но структурных ступеней ниже цены нет» — штатное
+            # состояние рынка, а не аномалия. Прежняя редакция звала здесь
+            # `min(z["lo"] for z in long_ladder)` без защиты и падала с
+            # `ValueError: min() iterable argument is empty`.
+            #
+            # Падение НЕ было видно как дефект: тик ловит его в общий обработчик и печатает
+            # `watch_symbol_data_reject error="ValueError(...)"`, то есть настоящая ошибка
+            # кода выглядела как обычная нехватка данных. Замер 2026-07-31 по трём прогонам:
+            # **8 из 18 отказов на 7 символах, 6 из 52 на 12, 6 из 51 на 20** — это оно.
+            #
+            # Инвалидация здесь ОТСУТСТВУЕТ, а не равна нулю или цене зоны (I-6): без ступеней
+            # прятать стоп «за структуру» (курс стр. 19) не за что. Ключ просто не ставится —
+            # потребитель увидит его отсутствие, а не правдоподобное число.
+            deepest_lo = min((z["lo"] for z in long_ladder), default=None)
             out["long"] = {"lo": float(long_zone["lo"]), "hi": float(long_zone["hi"]),
                            "touches": int(long_zone.get("touches") or 0),
-                           "invalidation": deepest_lo * (1.0 - buffer_pct),
                            **_course_flags(long_zone, side="long")}
+            if deepest_lo is not None:
+                out["long"]["invalidation"] = deepest_lo * (1.0 - buffer_pct)
             targets_up = [float(z["lo"]) for z in zones
                           if float(z.get("lo") or 0) > float(long_zone["hi"])]
             if targets_up:
@@ -501,11 +516,14 @@ def compute_interest_zones(
             out["long_ladder"] = long_ladder
         if short_zone:
             short_ladder = _ladder(above, nearer=lambda z: -z["lo"], side="short")
-            highest_hi = max(z["hi"] for z in short_ladder)
+            # Симметрично long-ветке выше: пустая лестница — штатное состояние, и падение
+            # `max() iterable argument is empty` здесь было той же природы.
+            highest_hi = max((z["hi"] for z in short_ladder), default=None)
             out["short"] = {"lo": float(short_zone["lo"]), "hi": float(short_zone["hi"]),
                             "touches": int(short_zone.get("touches") or 0),
-                            "invalidation": highest_hi * (1.0 + buffer_pct),
                             **_course_flags(short_zone, side="short")}
+            if highest_hi is not None:
+                out["short"]["invalidation"] = highest_hi * (1.0 + buffer_pct)
             targets_down = [float(z["hi"]) for z in zones
                             if 0 < float(z.get("hi") or 0) < float(short_zone["lo"])]
             if targets_down:

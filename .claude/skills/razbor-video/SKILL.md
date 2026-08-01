@@ -43,17 +43,21 @@ corrections, frame alignment, data grounding). When the user hands you a video, 
 (re-)разбор it** — do not skip because a transcript/manifest entry already exists. Re-ingest
 with `--force` so the transcript reflects the current pipeline, then always run steps 3–5.
 
-### 1. Classify the module (by CONTENT, not filename)
-- Влад SHORT / «Owner of SHORT» / engineered pump-dump +100…+4000% / paid Академия → **manipulations** (`hunt_core/scanner`).
-- PrizrakTrade / level-structure-zone level trading (ключевой уровень, накопление, ПОК, стоп за структуру) → **prizrak** (`hunt_core/prizrak`).
-- Unsure? Peek first: `uv run python scripts/ingest_manipulation_video.py "<src>" --stdout` and read before filing.
+### 1. Check the content is PRIZRAK
+Единственный корпус с 2026-07-31 — `research/prizrak_corpus/`: PrizrakTrade,
+level-structure-zone трейдинг (ключевой уровень, накопление, ПОК, стоп за структуру).
+Материал про инженерные памп/дампы (Влад SHORT / «Owner of SHORT» / +100…+4000%) относился
+к вырезанному модулю МАНИПУЛЯЦИИ — корпуса для него больше нет; не заводить обратно.
 
 ### 2. Ingest (transcript + segments + manifest/INDEX) — always fresh
-```bash
-uv run python scripts/ingest_manipulation_video.py "<src>" --corpus <manipulations|prizrak> --force [--name <slug>]
-```
-`--force` re-transcribes and overwrites even if this source was ingested before (so the
-transcript benefits from the latest glossary/corrections). Note the `<slug>` it writes.
+⚠ **Конвейер ingest недоступен.** `scripts/ingest_manipulation_video.py` удалён 2026-07-31
+вместе с модулем, а замены под Windows не собрано: в шаге транскрипции стоял `mlx-whisper`,
+который работает ТОЛЬКО на Apple Silicon. На этой машине из тройки зависимостей есть один
+`yt-dlp`; `ffmpeg` и whisper не установлены (решение владельца 2026-07-30 — не ставить).
+
+Пока это так, разбор начинается с **шага 3**: на вход подаётся готовый транскрипт или текст,
+шаги 3–5 (выравнивание кадров, сверка с рынком, запись `<slug>.razbor.md`) выполняются как
+описано ниже. Уже лежащие в корпусе 17 транскриптов доступны сразу.
 
 ### 3. Align frames with audio, then READ them
 Needs a local video file (for a URL, download once: `yt-dlp -f "best[height<=720]" -o /tmp/<slug>.mp4 "<url>"`).

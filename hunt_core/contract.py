@@ -29,7 +29,20 @@ def _normalized_float(value: Any, default: float | None = None) -> float | None:
     return parsed
 
 
-# CCXT source map for ops/debug when readiness gates fail (see hunt/docs/CCXT.md).
+# CCXT source map for ops/debug when readiness gates fail.
+#
+# ⚠️ ЭТО ПРОЗА ДЛЯ ОПЕРАТОРА, А НЕ КАРТА ВЫЗОВОВ. Строки ниже подсказывают, ГДЕ ИСКАТЬ
+# источник поля, когда гейт готовности упал, — они не доказывают, что метод вызывается.
+# Проверено 2026-08-01: часть строк называет методы, которых в дереве НЕТ ни одного вызова
+# (`fetchTrades`, `fetchOrderBook` против первичной венью, `fetchMarkOHLCV`,
+# `fetchPremiumIndexOHLCV`, `watchTradesForSymbols`, `watchOrderBookForSymbols` — проект
+# зовёт `watch_trades` / `watch_order_book`, а REST-стакан только на ВТОРИЧНЫХ площадках
+# через `engine/multi.py::cross_orderbook`). Именно цитирование этого словаря как call site
+# породило пять ложных пометок «используется» при сборке справочника.
+# Прежде чем опереться на строку — `rg` метод по `hunt_core/`, как требует I-8.
+#
+# Полная публичная поверхность каждой площадки: `docs/reference/exchange-api/`.
+# Прежняя редакция ссылалась на `hunt/docs/CCXT.md` — такого файла в дереве нет.
 MARKET_FIELD_CCXT_SOURCE: dict[str, str] = {
     "mark_price": "WS watchMarkPrices | REST fetchMarkOHLCV",
     "funding_rate": "REST fetchFundingRate | WS watchMarkPrices",
@@ -54,9 +67,11 @@ MARKET_FIELD_CCXT_SOURCE: dict[str, str] = {
     "aggression_shift": "REST fetchTrades | WS watchTradesForSymbols",
     "liquidation_score": "WS watchLiquidationsForSymbols",
     "liquidation_cascade_5m": "WS watchLiquidationsForSymbols",
-    "spot_lead_return_1m": "REST spot fetchOHLCV (HuntCcxtSpotCompanion)",
+    # `HuntCcxtSpotCompanion` удалён; спот сегодня — engine/spot.py на клиенте
+    # exchanges.py::make_binance_spot (отдельный weight-бюджет, не fapi).
+    "spot_lead_return_1m": "WS spot watch_ohlcv('1m') — engine/spot.py",
     "spot_futures_spread_bps": "REST spot + futures ticker",
-    "spot_quote_volume_24h": "REST spot fetchTicker (HuntCcxtSpotCompanion)",
+    "spot_quote_volume_24h": "WS spot watch_tickers — engine/spot.py",
     "basis": "implicit fapiDataGetBasis | REST mark/index OHLCV",
 }
 

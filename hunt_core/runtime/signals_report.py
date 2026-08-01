@@ -19,7 +19,7 @@ from hunt_core.deliver.telegram import TelegramBroadcaster
 
 
 from hunt_core.data.universe import load_watchlist_symbols
-from hunt_core.scanner.detect.delivery_support import (
+from hunt_core.deliver.delivery_support import (
     collect_report_blockers,
     evaluate_alert_gate,
 )
@@ -39,8 +39,8 @@ _LONG_STRONG_PHASES = frozenset(
     {"recovery", "impulse_active", "impulse_initiating", "breakout_arming"}
 )
 
-# Gate codes (scanner/detect/delivery_support.py REPORT_BLOCK_PRIORITY) → readable
-# Russian — raw snake_case tokens must not leak into the re-alert line (G-54).
+# Gate codes (deliver/delivery_support.py) → readable Russian — raw snake_case
+# tokens must not leak into the re-alert line (G-54).
 _REALERT_BLOCK_LABELS: dict[str, str] = {
     "not_confirmed": "сетап ещё не подтверждён",
     "below_calibrated_gate": "score ниже калиброванного порога",

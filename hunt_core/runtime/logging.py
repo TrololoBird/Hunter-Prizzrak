@@ -3,9 +3,11 @@ from __future__ import annotations
 
 
 
+import importlib.util
 import logging
 import logging.handlers
 import os
+import sys
 
 import structlog
 
@@ -34,9 +36,82 @@ def _rotating_file_handler() -> logging.Handler | None:
 # dict; rich then recurses effectively forever rendering it, so a single
 # LOG.exception (e.g. during a Binance 429/418 storm) freezes the whole watcher.
 # plain_traceback formats a bounded, text-only traceback with no rich/locals render.
+_COLOR_DEGRADE_ANNOUNCED = False
+
+
+def _colors_supported() -> bool:
+    """Можно ли КРАСИТЬ вывод, а не «хотим ли» — на Windows это не одно и то же.
+
+    structlog красит через colorama и без неё на Windows поднимает `SystemError` прямо в
+    конструкторе `ConsoleRenderer`. Замер 2026-07-31: `python -m hunt_core watch --once`
+    не стартовал НИ РАЗУ — трейс обрывался в `structlog.dev._init_terminal` на импорте
+    `runtime/state.py`, то есть до единой строки логики бота. Проект писался на macOS, где
+    colorama не нужна, поэтому у автора дефект проявиться не мог.
+
+    ⚠ Деградация ОБЪЯВЛЯЕТСЯ, а не применяется молча (директива владельца 2026-07-31:
+    «игнорирование, молчаливые ошибки, отсутствующие данные, деградации НЕДОПУСТИМЫ»).
+    Первая редакция этой функции гасила цвет беззвучно — то есть заводила ровно тот класс
+    дефекта, на котором проект уже горел: состояние, отличающееся от заявленного, и никакого
+    следа в выводе. Здесь падать нельзя (цвет — украшение, ронять из-за него рантайм хуже),
+    поэтому единственная допустимая форма — громкое уведомление на stderr, ОДИН раз.
+    """
+    if os.name != "nt":
+        return True
+    if importlib.util.find_spec("colorama") is not None:
+        return True
+
+    global _COLOR_DEGRADE_ANNOUNCED
+    if not _COLOR_DEGRADE_ANNOUNCED:
+        _COLOR_DEGRADE_ANNOUNCED = True
+        print(
+            "hunt: ДЕГРАДАЦИЯ ЛОГОВ — цветной вывод выключен: на Windows structlog требует "
+            "colorama, её нет. Логи полные, потерь данных нет; цвет вернёт "
+            "`uv pip install colorama`.",
+            file=sys.stderr,
+            flush=True,
+        )
+    return False
+
+
+def _force_utf8_stdio() -> None:
+    """Перевести stdout/stderr в UTF-8 — иначе лог УБИВАЕТ процесс на своём же тексте.
+
+    Замер 2026-07-31, живой прогон: `watch --once` упал с
+    `UnicodeEncodeError: 'charmap' codec can't encode character '\\u2191'` в
+    `encodings/cp1251.py`. Стрелка `↑` пришла из обычной строки лога, а cp1251 — ANSI-кодовая
+    страница русской Windows, в которой её нет. Падение случилось ВНУТРИ `LOG.warning`, то
+    есть попытка сообщить о проблеме и была тем, что уронило тик целиком
+    (`_cycle_tick.py::_settle_native_results`).
+
+    Регрессию внесла установка `colorama`: она оборачивает stdout своим writer'ом, и запись
+    идёт через кодировку консоли, а не через UTF-8. До неё перенаправленный stdout брал
+    UTF-8 и тот же текст проходил. Лечить надо здесь, а не отказом от colorama: проект
+    логирует по-русски, и кодировка, неспособная вынести собственный вывод, — дефект
+    независимо от цвета.
+
+    `errors="backslashreplace"` намеренно: если однажды встретится символ, который не
+    переживёт даже UTF-8, лог обязан выжить и показать escape — но НЕ уронить рантайм.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:  # обёрнутый поток без reconfigure — не наш случай, но не падаем
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="backslashreplace")
+        except (OSError, ValueError) as exc:
+            print(
+                f"hunt: не удалось перевести вывод в UTF-8 ({exc!r}). Лог с не-ASCII "
+                f"символами может уронить процесс — см. runtime/logging.py::_force_utf8_stdio.",
+                file=sys.stderr,
+                flush=True,
+            )
+
+
 def _console_renderer(*, colors: bool = True) -> structlog.types.Processor:
+    _force_utf8_stdio()
     return structlog.dev.ConsoleRenderer(
-        colors=colors, exception_formatter=structlog.dev.plain_traceback
+        colors=colors and _colors_supported(),
+        exception_formatter=structlog.dev.plain_traceback,
     )
 
 

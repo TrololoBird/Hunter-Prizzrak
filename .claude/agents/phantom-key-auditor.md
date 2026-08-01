@@ -31,8 +31,11 @@ the class, a grep/recompute PROOF, and a minimal fix:
    unreachable (BOS/CHoCH class). Defer deep lookahead to no-lookahead-reviewer.
 
 Rules: verify every `file:line` by grep — never guess line numbers. Do NOT re-flag the
-already-closed gaps in docs/HUNTER_TARGET_SPEC.md §8 (G-1..G-30) or the round-2 report
-docs/AUDIT_ROUND2.md. Intent-unknown (a branch that MIGHT be a wanted-but-unwired feature)
-is class B — say so, do not assert it as a bug; note that reviving it changes signal
-emission (backtest-gated) while deleting it as dead code is behaviour-preserving. Report
+already-closed gaps in docs/HUNTER_TARGET_SPEC.md §8 (G-1..G-30); the round-2 report
+`docs/AUDIT_ROUND2.md` covered the rest and was deleted 2026-07-31 (history in git), so
+findings it closed must be re-derived from the tree rather than cited. Intent-unknown (a
+branch that MIGHT be a wanted-but-unwired feature) is class B — say so, do not assert it as
+a bug; note that reviving it changes signal emission while deleting it as dead code is
+behaviour-preserving. ⚠ The backtest gate no longer exists — it belonged to the МАНИПУЛЯЦИИ
+module, cut 2026-07-31; emission changes are proven on LIVE data only. Report
 findings most-severe first; if a file is clean, say so. You do NOT edit code — you report.

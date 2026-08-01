@@ -262,6 +262,61 @@ class Engine:
         ("fapiDataGetTopLongShortPositionRatio", "longShortRatio", "top_ls_pos_5m"),
     )
 
+    async def _poll_symbol_positioning(
+        self,
+        ex: Any,
+        symbol: str,
+        bound: int,
+        sem: asyncio.Semaphore,
+    ) -> None:
+        """Позиционирование ОДНОГО символа: OI + пять статистик + базис (только крипта).
+
+        Вынесено из тела `_poll_positioning` при распараллеливании обхода 2026-07-31.
+        Семантика не менялась: отсутствующее значение НЕ подставляется — `poll_*` возвращают
+        `None`, и тогда `put_value` просто не зовётся, план остаётся `not_ready` (I-6).
+
+        Разрядку держат ворота `_FD_GATE` внутри `rest.poll_futures_data` — единственное
+        место, где интервал вообще должен жить, потому что в тот же лимит независимо стучит
+        deep-полоса (`runtime/native_assembly.py`).
+        """
+        async with sem:
+            bsym = _binance_id(ex, symbol)
+            if bsym is None:
+                return
+            st = self._ingest.state_for(symbol)
+            now = int(time.time() * 1000)
+            oi = await rest.poll_open_interest(ex, symbol)
+            if oi is not None:
+                st.put_value("oi", oi, PlaneStamp(Source.REST_SEED, now, now, bound))
+            base = {"symbol": bsym, "period": "5m", "limit": 1}
+            for method, key, plane in self._FUTURES_DATA_STATS:
+                val = _last_float(await rest.poll_futures_data(ex, method, base), key)
+                if val is not None:
+                    st.put_value(plane, val, PlaneStamp(Source.REST_SEED, now, now, bound))
+            # Базис существует только у КРИПТО-перпов. Binance USDⓈ-M листит и токенизированные
+            # товары/акции (XAUUSDT, XAGUSDT, …), и для них /futures/data/basis отвечает
+            # -4104 «Invalid contract type» — навсегда, а не транзиентно. Замечено на живом
+            # прогоне 2026-07-25: два символа из семи пиннед-набора били по эндпоинту каждый
+            # цикл. Это не только шум в логе: /futures/data — тот самый лимит, по которому
+            # репозиторий уже ловил бан -1003, и жечь его на заведомо невозможный ответ нельзя.
+            # Фильтр — уже существующий ``is_crypto_underlying`` (fail-open на неизвестном типе,
+            # чтобы смена формата exchangeInfo не выключила базис всем разом).
+            #
+            # ⚠ Исторически именно у базиса не было разрядки, и замер за сутки 2026-07-28 дал
+            # **53 бана, ВСЕ до единого на `fapiDataGetBasis`** (4.0 часа под баном, паузы
+            # росли 642 → 687 → 1093 → 1173 → 1224 → 1412 с). Теперь разрядка у него общая с
+            # остальными пятью — та же, что у любого запроса через `_FD_GATE`.
+            if is_crypto_underlying((getattr(ex, "markets", None) or {}).get(symbol)):
+                basis = _last_float(
+                    await rest.poll_futures_data(
+                        ex, "fapiDataGetBasis",
+                        {"pair": bsym, "contractType": "PERPETUAL", "period": "5m", "limit": 1},
+                    ),
+                    "basis",
+                )
+                if basis is not None:
+                    st.put_value("basis", basis, PlaneStamp(Source.REST_SEED, now, now, bound))
+
     async def _poll_positioning(self) -> None:
         """Poll every un-streamable ``/futures/data/*`` plane on the 5-min native cadence.
 
@@ -290,53 +345,51 @@ class Engine:
         while True:
             cycle_started = time.monotonic()
             ex = self._ingest.exchange
-            for symbol in list(self._symbols):  # snapshot — add_symbol may append mid-cycle
-                bsym = _binance_id(ex, symbol)
-                if bsym is None:
-                    continue
-                st = self._ingest.state_for(symbol)
-                now = int(time.time() * 1000)
-                oi = await rest.poll_open_interest(ex, symbol)
-                if oi is not None:
-                    st.put_value("oi", oi, PlaneStamp(Source.REST_SEED, now, now, bound))
-                base = {"symbol": bsym, "period": "5m", "limit": 1}
-                for method, key, plane in self._FUTURES_DATA_STATS:
-                    val = _last_float(await rest.poll_futures_data(ex, method, base), key)
-                    if val is not None:
-                        st.put_value(plane, val, PlaneStamp(Source.REST_SEED, now, now, bound))
-                    await asyncio.sleep(params.FUTURES_DATA_SPACING_S)
-                # Базис существует только у КРИПТО-перпов. Binance USDⓈ-M листит и токенизированные
-                # товары/акции (XAUUSDT, XAGUSDT, …), и для них /futures/data/basis отвечает
-                # -4104 «Invalid contract type» — навсегда, а не транзиентно. Замечено на живом
-                # прогоне 2026-07-25: два символа из семи пиннед-набора били по эндпоинту каждый
-                # цикл. Это не только шум в логе: /futures/data — тот самый лимит, по которому
-                # репозиторий уже ловил бан -1003, и жечь его на заведомо невозможный ответ нельзя.
-                # Фильтр — уже существующий ``is_crypto_underlying`` (fail-open на неизвестном типе,
-                # чтобы смена формата exchangeInfo не выключила базис всем разом).
-                if is_crypto_underlying((getattr(ex, "markets", None) or {}).get(symbol)):
-                    basis = _last_float(
-                        await rest.poll_futures_data(
-                            ex, "fapiDataGetBasis",
-                            {"pair": bsym, "contractType": "PERPETUAL", "period": "5m", "limit": 1},
-                        ),
-                        "basis",
-                    )
-                    if basis is not None:
-                        st.put_value("basis", basis, PlaneStamp(Source.REST_SEED, now, now, bound))
-                    # ⚠ РАЗРЯДКА ОБЯЗАТЕЛЬНА И ЗДЕСЬ. Каждый из пяти вызовов в цикле выше
-                    # заканчивается этим же ожиданием, а базис — единственный, у кого его не было:
-                    # он выстреливал вплотную к предыдущему запросу, и сразу за ним начинался
-                    # следующий символ, то есть не был разряжен ни до, ни после.
-                    #
-                    # У `/futures/data/*` ОТДЕЛЬНЫЙ бюджет (1000 запросов / 5 мин / IP), заголовков
-                    # веса он не отдаёт, и ccxt троттлит его против общего ведра, допуская кратное
-                    # превышение — так что единственная реальная защита это разрядка.
-                    # Замер по логам за сутки 2026-07-28: **53 бана, ВСЕ до единого на
-                    # `fapiDataGetBasis`**, суммарно 4.0 часа под баном, и паузы росли
-                    # монотонно — последние шесть 642 → 687 → 1093 → 1173 → 1224 → 1412 с
-                    # (Binance наращивает срок за повторные нарушения). Ни одного бана на
-                    # остальных пяти вызовах, у которых разрядка была.
-                    await asyncio.sleep(params.FUTURES_DATA_SPACING_S)
+            # Обход символов ПАРАЛЛЕЛЬНЫЙ с ограничением (2026-07-31). Тот же приём и по той же
+            # причине, что уже применён к сидированию кадров выше (`_SEED_CONCURRENCY`).
+            #
+            # ЗАМЕР, который это вызвал: на 7 пиннутых символах круг занимал **280 с из 300**,
+            # то есть 40 с на символ при запасе всего 20 с. Ступени 12 и 20 символов не закрыли
+            # круг за 450 с ВООБЩЕ. Прежние оценки (комментарий ниже — «~11 с на символ»,
+            # params.py — «~38 символов») занижали реальность в 3–5 раз, потому что считали
+            # обязательные паузы и игнорировали RTT: 6 × 1.2 с = 7.2 с паузы против ~33 с сети.
+            #
+            # Почему параллелизм здесь работает, хотя ворота `_FD_GATE` глобальны: лок в
+            # `rest.py::poll_futures_data` отпускается ДО сетевого вызова — он разряжает СТАРТЫ
+            # запросов, а не сериализует их целиком. При последовательном обходе RTT каждого
+            # запроса накапливался; при параллельном они перекрываются, и пол круга задаёт
+            # только разрядка: 6 запросов × N символов × FUTURES_DATA_SPACING_S.
+            #
+            # Заодно сняты собственные `asyncio.sleep(FUTURES_DATA_SPACING_S)` этого цикла:
+            # они дублировали ворота (докстринг `poll_futures_data` прямо требует держать
+            # интервал «здесь, а не в цикле-вызывателе») и удваивали эффективную паузу. Это
+            # ПОДНИМАЕТ темп к `/futures/data` примерно с 9 до 50 запросов/мин — при бюджете
+            # 1000/5 мин = 200/мин это 25%, и защита от -1003 (`_BAN_UNTIL_MS`) остаётся.
+            sem = asyncio.Semaphore(params.POSITIONING_CONCURRENCY)
+            # ⚠ `return_exceptions=True`, а НЕ False. С False один таймаут по одному символу
+            # рвал `gather` целиком, и остальные корутины отменялись — то есть ОДНА
+            # временная сетевая ошибка оставляла БЕЗ позиционирования всю вселенную, а не
+            # один символ. Планы уходили в `not_ready` массово, и это выглядело как блэкаут
+            # данных, хотя биржа была жива.
+            # Молчания при этом нет (директива владельца 2026-07-31): каждый отказ
+            # логируется поимённо ниже. Тихо проглотить исключение здесь было бы I-6.
+            walk = list(self._symbols)
+            results = await asyncio.gather(
+                *(self._poll_symbol_positioning(ex, s, bound, sem) for s in walk),
+                return_exceptions=True,
+            )
+            failed = [
+                (sym, res)
+                for sym, res in zip(walk, results, strict=False)
+                if isinstance(res, BaseException)
+            ]
+            if failed:
+                LOG.warning(
+                    "engine_positioning_symbol_failures",
+                    failed=len(failed),
+                    total=len(walk),
+                    sample=[f"{s}: {type(e).__name__}" for s, e in failed[:5]],
+                )
             walk_s = time.monotonic() - cycle_started
             # ⚠ Скользящий МАКСИМУМ обхода, а не последнее значение. Бонд, посчитанный в конце
             # цикла k, охраняет промежуток между k+1 и k+2 — то есть отстаёт на цикл. При запасе
@@ -347,6 +400,21 @@ class Engine:
             self._walk_history.append(walk_s)
             period_s = max(params.FUTURES_DATA_POLL_S, *self._walk_history)
             bound = int(period_s * params.POSITIONING_BOUND_MARGIN * 1000.0)
+            # Длительность обхода печатается КАЖДЫЙ круг, а не только при переборе бюджета.
+            # До 2026-07-31 единственной записью был WARNING ниже, то есть узнать реальный
+            # запас можно было лишь ПОСЛЕ того, как он кончился: при 7 символах обход занимает
+            # ~78 с из 300, и в логе об этом не было ни строки. Это инвариант I-7 в чистом
+            # виде — окно без замера. Здесь же лежит единственный способ ответить на вопрос
+            # «сколько символов ещё влезет»: headroom_s = poll_s − walk_s.
+            LOG.info(
+                "engine_positioning_walk",
+                walk_s=round(walk_s, 1),
+                poll_s=params.FUTURES_DATA_POLL_S,
+                headroom_s=round(params.FUTURES_DATA_POLL_S - walk_s, 1),
+                symbols=len(self._symbols),
+                per_symbol_s=round(walk_s / max(1, len(self._symbols)), 2),
+                bound_s=round(bound / 1000.0, 1),
+            )
             if walk_s > params.FUTURES_DATA_POLL_S:
                 # Не деградация данных, а исчерпание бюджета: обход одного круга уже не влезает
                 # в собственный такт, значит свежесть позиционирования падает пропорционально.
