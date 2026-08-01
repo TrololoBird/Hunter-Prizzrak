@@ -85,6 +85,28 @@ USED_WEIGHT = Gauge(
 )
 
 
+# Задержка event loop — сколько СВЕРХ запрошенного проспал короткий сон.
+#
+# ⚠ ЗАЧЕМ ОТДЕЛЬНЫЙ ПРИБОР, если есть темп планов. Потому что темп плана не отличает
+# «биржа шлёт редко» от «мы не успеваем читать», а лечение у этих двух причин
+# противоположное: в первом случае поднимают бонд, во втором — разгружают цикл. Поднять
+# бонд при второй причине значит УЗАКОНИТЬ отставание.
+#
+# Замер 2026-08-01, живой прогон на 7 символах: главный тик занимает медиану 24.9 с при
+# `--interval 30` (p90 33.9, max 58.0), а `bbo` при медиане темпа 0.3 с даёт p90 20.6 с.
+# Биржа шлёт трижды в секунду — значит двадцатисекундные провалы наши. Эта метрика делает
+# такое утверждение измеримым, а не выводимым по совпадению двух распределений.
+LOOP_LAG = Gauge(
+    "hunter_event_loop_lag_seconds",
+    "How much longer than requested a short sleep actually took. Non-zero means the event "
+    "loop is blocked by CPU work (Polars features in the tick) and WS ingest is starving.",
+)
+
+
+def set_loop_lag(seconds: float) -> None:
+    LOOP_LAG.set(seconds)
+
+
 def _plane_type(plane: str) -> str:
     """Coarsen a plane name to its low-cardinality type (``kline.4h`` → ``kline``)."""
     return plane.split(".", 1)[0] if plane else "unknown"
@@ -204,6 +226,8 @@ __all__ = [
     "PLANE_CADENCE",
     "PLANE_BOUND_RATIO",
     "USED_WEIGHT",
+    "LOOP_LAG",
+    "set_loop_lag",
     "set_feed_silence",
     "record_reconnect",
     "record_staleness_reject",

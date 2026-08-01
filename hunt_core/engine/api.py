@@ -134,6 +134,7 @@ class Engine:
         self._bg.append(asyncio.create_task(self._watchdog.run(), name="engine_watchdog"))
         self._bg.append(asyncio.create_task(self._poll_positioning(), name="engine_positioning"))
         self._bg.append(asyncio.create_task(self._publish_cadence(), name="engine_cadence"))
+        self._bg.append(asyncio.create_task(self._sample_loop_lag(), name="engine_loop_lag"))
         metrics.start_exporter(params.METRICS_PORT)
         LOG.info("engine_started", symbols=len(self._symbols), timeframes=self._timeframes)
 
@@ -189,6 +190,52 @@ class Engine:
                     ratio=None if cad.bound_ratio is None else round(cad.bound_ratio, 2),
                     samples=cad.samples,
                 )
+
+    async def _sample_loop_lag(self) -> None:
+        """Мерить, насколько event loop не успевает, и ругаться, когда он встаёт.
+
+        КАК. Просим короткий сон и смотрим, сколько проспали на самом деле. Разница —
+        время, которое цикл провёл, не возвращая управление: пока считаются Polars-фичи
+        тика, ни один ``watch_*`` не может прочитать кадр.
+
+        ⚠ ЗАЧЕМ ОТДЕЛЬНО ОТ ТЕМПА ПЛАНОВ. Темп плана не отличает «биржа шлёт редко» от
+        «мы не успеваем читать», а лечение у этих причин противоположное: в первом случае
+        поднимают бонд, во втором — разгружают цикл. Поднять бонд при второй причине значит
+        УЗАКОНИТЬ отставание, и `not_ready` останется, только перестанет называться.
+
+        Замер 2026-08-01, живой прогон 7 символов: `watch_snapshot_batch` занимает медиану
+        **24.9 с** при `--interval 30` (p90 33.9, max 58.0), а `bbo` при медиане темпа
+        **0.3 с** даёт p90 **20.6 с**. Биржа шлёт трижды в секунду — значит провалы наши.
+        Этот датчик превращает такой вывод из совпадения двух распределений в измерение.
+
+        Порог для лога — не круглое число: он привязан к самому короткому бонду среди
+        планов (``FRESH_BBO_S``), потому что именно бонд определяет, когда отставание
+        начинает ПОРТИТЬ ДАННЫЕ, а не просто существовать.
+        """
+        interval = params.LOOP_LAG_SAMPLE_S
+        threshold = params.FRESH_BBO_S
+        worst = 0.0
+        flagged = False
+        while True:
+            t0 = time.monotonic()
+            await asyncio.sleep(interval)
+            lag = max(0.0, time.monotonic() - t0 - interval)
+            metrics.set_loop_lag(lag)
+            worst = max(worst, lag)
+            if lag >= threshold and not flagged:
+                flagged = True
+                LOG.warning(
+                    "engine_event_loop_stalled",
+                    lag_s=round(lag, 2),
+                    threshold_s=threshold,
+                    note="цикл не отдавал управление дольше самого короткого бонда — "
+                         "WS-планы в это время не читались; поднимать бонд НЕЛЬЗЯ, это "
+                         "узаконит отставание",
+                )
+            elif lag < threshold / 2 and flagged:
+                flagged = False
+                LOG.info("engine_event_loop_recovered", worst_lag_s=round(worst, 2))
+                worst = 0.0
 
     async def _seed(self) -> None:
         # Concurrent (bounded) seeding: 7 symbols × 7 TFs used to be ~49 SEQUENTIAL round-trips

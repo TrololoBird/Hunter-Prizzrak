@@ -35,9 +35,19 @@ _DEFAULT = [
     "BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT",
 ]
 _ZONES = [0.5, 1.0, 2.0, 5.0]
+# Допуск для «охват равен нулю». Сегодня ноль приходит литералом (`... if in_bids else 0.0`),
+# то есть точное сравнение сработало бы, — но верификатор не должен зависеть от того, КАК
+# именно реализация получила ноль. Стоит ей начать считать `(p - p) / p * 100`, и точное
+# `!= 0.0` начнёт врать. SonarCloud пометил это как дефект надёжности, и замечание по делу.
+_ZERO_TOL = 1e-9
 
 FAIL: list[str] = []
 SKIPPED: list[str] = []
+
+
+def _is_zero_coverage(cov: float | None) -> bool:
+    """Охват измерен и равен нулю. ``None`` — это НЕ ноль: ключа нет, значит не измерено."""
+    return cov is not None and abs(cov) <= _ZERO_TOL
 
 
 async def main(symbols: list[str]) -> int:
@@ -81,7 +91,7 @@ async def main(symbols: list[str]) -> int:
                         FAIL.append(f"{sym} {key}: односторонняя полоса, но перекос отсутствует")
                     elif abs(abs(imb) - 1.0) > 1e-9:
                         FAIL.append(f"{sym} {key}: односторонняя полоса, а перекос {imb} != ±1.0")
-                    if cov != 0.0:
+                    if not _is_zero_coverage(cov):
                         FAIL.append(f"{sym} {key}: односторонняя полоса, а охват {cov} != 0.0")
                 elif n_bid == 0 and n_ask == 0:
                     tag = "  (полоса пуста)"
@@ -141,7 +151,7 @@ async def main(symbols: list[str]) -> int:
                 phase2 += 1
                 if imb is None or abs(abs(imb) - 1.0) > 1e-9:
                     FAIL.append(f"{sym} (фаза 2): перекос {imb}, ждём ровно -1.0")
-                if cov != 0.0:
+                if not _is_zero_coverage(cov):
                     FAIL.append(f"{sym} (фаза 2): охват {cov}, ждём 0.0")
             else:
                 SKIPPED.append(f"{sym} (фаза 2): полоса вышла двусторонней (бид={n_bid})")

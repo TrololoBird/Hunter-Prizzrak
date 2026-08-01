@@ -107,6 +107,13 @@ WEIGHT_WARN_FRACTION: float = 0.75
 # бан -1003 (история: 53 бана за сутки 2026-07-28).
 POSITIONING_CONCURRENCY: int = 6
 
+# Как часто датчик задержки цикла (`api.py::_sample_loop_lag`) просит короткий сон.
+# 0.5 с — компромисс: достаточно часто, чтобы поймать блокировку короче секунды, и
+# достаточно редко, чтобы сам датчик не был заметной нагрузкой (два пробуждения в секунду
+# против сотен кадров WS). Значение НЕ является порогом: порог берётся из `FRESH_BBO_S`,
+# потому что отставание начинает портить данные ровно на самом коротком бонде.
+LOOP_LAG_SAMPLE_S: float = 0.5
+
 # --- Per-plane freshness bounds (Plane.read) ---
 FRESH_BBO_S: float = 5.0  # LIVE age 0.4s + DOC bookTicker real-time
 FRESH_DEPTH_S: float = 5.0  # LIVE age 0.4s, ttl_hint 5s
