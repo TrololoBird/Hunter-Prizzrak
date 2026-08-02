@@ -41,6 +41,64 @@ def _pct(values: list[float], q: float) -> float:
     return ordered[k]
 
 
+def _newest_closed_open_ms(engine: Engine, symbol: str) -> int | None:
+    """Открытие новейшего ЗАКРЫТОГО бара в кадре движка, или None если плана нет.
+
+    None здесь — «спросить не у чего», а не «ноль»: отсутствие плана попадает в отдельный
+    счётчик, иначе несвежий план засчитался бы как мгновенная доставка.
+    """
+    # План ещё не свеж — называем причину и идём дальше, не молча.
+    try:
+        frame = engine.snapshot(symbol, (f"kline.{_TF}",)).require(f"kline.{_TF}")
+    except Exception as exc:
+        LOG.debug("bar_availability_plane_not_ready", symbol=symbol, err=repr(exc))
+        return None
+    if not isinstance(frame, list) or not frame:
+        return None
+    return int(frame[-1][0])
+
+
+def _observe_delay(symbol: str, newest_open: int, now_ms: float) -> float | None:
+    """Задержка «граница бара → он виден», или None если наблюдение непригодно."""
+    # Бар с open=T закрылся в T+step; замеряем от ГРАНИЦЫ, а не от открытия.
+    delay_s = (now_ms - (newest_open + _STEP_MS)) / 1000.0
+    if delay_s < -1.0:
+        # Кадр отдал бар, который ещё не закрылся, — это нарушение I-5, а не шум.
+        LOG.error(
+            "bar_availability_lookahead",
+            symbol=symbol,
+            open_ms=newest_open,
+            ahead_s=round(-delay_s, 2),
+        )
+        return None
+    LOG.info("bar_closed_visible", symbol=symbol, open_ms=newest_open, delay_s=round(delay_s, 2))
+    return max(0.0, delay_s)
+
+
+async def _collect(
+    engine: Engine, symbols: list[str], minutes: float
+) -> dict[str, list[float]]:
+    """Опрашивать кадры до дедлайна, копя задержки появления каждого нового бара."""
+    newest_seen: dict[str, int] = {}
+    delays: dict[str, list[float]] = {s: [] for s in symbols}
+    deadline = time.monotonic() + minutes * 60.0
+    while time.monotonic() < deadline:
+        await asyncio.sleep(_POLL_S)
+        now_ms = time.time() * 1000.0
+        for symbol in symbols:
+            newest_open = _newest_closed_open_ms(engine, symbol)
+            if newest_open is None:
+                continue
+            prev = newest_seen.get(symbol)
+            newest_seen[symbol] = newest_open
+            if prev is None or newest_open <= prev:
+                continue
+            delay = _observe_delay(symbol, newest_open, now_ms)
+            if delay is not None:
+                delays[symbol].append(delay)
+    return delays
+
+
 async def _measure(symbols: list[str], minutes: float) -> int:
     engine = Engine(symbols)
     await engine.start()
@@ -48,46 +106,8 @@ async def _measure(symbols: list[str], minutes: float) -> int:
     # не задержку доставки, а время подъёма подписок. Это разные величины.
     LOG.info("bar_availability_warmup", seconds=20)
     await asyncio.sleep(20.0)
-
-    newest_seen: dict[str, int] = {}
-    delays: dict[str, list[float]] = {s: [] for s in symbols}
-    deadline = time.monotonic() + minutes * 60.0
     try:
-        while time.monotonic() < deadline:
-            await asyncio.sleep(_POLL_S)
-            now_ms = time.time() * 1000.0
-            for symbol in symbols:
-                try:
-                    frame = engine.snapshot(symbol, (f"kline.{_TF}",)).require(f"kline.{_TF}")
-                except Exception as exc:  # noqa: BLE001 — план ещё не свеж; называем и идём
-                    LOG.debug("bar_availability_plane_not_ready", symbol=symbol, err=repr(exc))
-                    continue
-                if not isinstance(frame, list) or not frame:
-                    continue
-                newest_open = int(frame[-1][0])
-                prev = newest_seen.get(symbol)
-                newest_seen[symbol] = newest_open
-                if prev is None or newest_open <= prev:
-                    continue
-                # Бар с open=T закрылся в T+step; замеряем от ГРАНИЦЫ, а не от открытия.
-                boundary_ms = newest_open + _STEP_MS
-                delay_s = (now_ms - boundary_ms) / 1000.0
-                if delay_s < -1.0:
-                    # Кадр отдал бар, который ещё не закрылся, — это нарушение I-5, а не шум.
-                    LOG.error(
-                        "bar_availability_lookahead",
-                        symbol=symbol,
-                        open_ms=newest_open,
-                        ahead_s=round(-delay_s, 2),
-                    )
-                    continue
-                delays[symbol].append(max(0.0, delay_s))
-                LOG.info(
-                    "bar_closed_visible",
-                    symbol=symbol,
-                    open_ms=newest_open,
-                    delay_s=round(delay_s, 2),
-                )
+        delays = await _collect(engine, symbols, minutes)
     finally:
         await engine.close()
 

@@ -65,7 +65,10 @@ async def _run(symbols: list[str], cycles: int) -> int:
             expected_open_ms = int((boundary - _GRID_S) * 1000)
             try:
                 frame = engine.snapshot(symbols[0], (f"kline.{_TF}",)).require(f"kline.{_TF}")
-            except Exception as exc:  # noqa: BLE001 — план не свеж: это НЕ «рано», это отказ плана
+            # План не свеж — это НЕ «проснулись рано», а отказ плана, и считается отдельно.
+            # (Директивы `noqa: BLE001` здесь нет намеренно: правило в `pyproject.toml`
+            # не включено, поэтому такая директива ничего не подавляет — см. Issue #20.)
+            except Exception as exc:
                 skipped += 1
                 LOG.warning("verify_wake_plane_unavailable", err=repr(exc))
                 continue

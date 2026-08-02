@@ -189,6 +189,39 @@ def _report_lane(name: str, path: Path, *, tf_ms: int, tf: str) -> list[float]:
     return all_lags
 
 
+def _lag_moves(
+    ohlcv: list[list[float]], *, step_ms: int, lag_bars: int
+) -> tuple[list[float], list[float]]:
+    """Ход цены за окно лага от каждой границы ``step_ms``.
+
+    Args:
+        ohlcv: Минутные бары подряд.
+        step_ms: Длительность бара, от закрытия которого отсчитывается лаг.
+        lag_bars: Ширина окна лага в минутных барах.
+
+    Returns:
+        ``(сносы, размахи)`` в процентах: снос — |close_конца − close_границы|,
+        размах — худшее отклонение внутри окна в любую сторону.
+    """
+    moves: list[float] = []
+    adverse: list[float] = []
+    for i, bar in enumerate(ohlcv):
+        # Минутный бар, закрывающий период step: его close кратен step.
+        if (int(bar[0]) + 60_000) % step_ms != 0:
+            continue
+        if i + lag_bars >= len(ohlcv):
+            break
+        anchor = float(bar[4])
+        window = ohlcv[i + 1 : i + 1 + lag_bars]
+        if anchor <= 0 or not window:
+            continue
+        hi = max(float(b[2]) for b in window)
+        lo = min(float(b[3]) for b in window)
+        moves.append(abs(float(window[-1][4]) - anchor) / anchor * 100.0)
+        adverse.append(max(hi - anchor, anchor - lo) / anchor * 100.0)
+    return moves, adverse
+
+
 async def _price_cost(symbols: list[str], lag_s: float, *, tf: str) -> None:
     """Во что лаг обходится в цене — по ЖИВЫМ 1m барам, а не по модели.
 
@@ -200,38 +233,20 @@ async def _price_cost(symbols: list[str], lag_s: float, *, tf: str) -> None:
     print(f"\n── цена лага (живые 1m бары, окно {lag_s:.0f} с) ────────────")
     ex = ccxt.binanceusdm({"enableRateLimit": True, "options": {"defaultType": "future"}})
     try:
-        step_s = _TF_MS[tf] / 1000.0
+        step_ms = _TF_MS[tf]
         lag_bars = max(1, int(round(lag_s / 60.0)))
         for sym in symbols:
             unified = f"{sym[:-4]}/USDT:USDT" if sym.endswith("USDT") else sym
+            # Символ мог быть делистнут — называем отказ и идём дальше, не молча.
             try:
                 ohlcv = await ex.fetch_ohlcv(unified, timeframe="1m", limit=1000)
-            except Exception as exc:  # noqa: BLE001 — символ мог быть делистнут; называем и идём
+            except Exception as exc:
                 print(f"  {sym:<10} ОТКАЗ: {exc!r}")
                 continue
             if len(ohlcv) < lag_bars + 2:
                 print(f"  {sym:<10} мало баров ({len(ohlcv)}) — пропуск, НЕ ноль")
                 continue
-            moves: list[float] = []
-            adverse: list[float] = []
-            for i, bar in enumerate(ohlcv):
-                ts_ms = int(bar[0])
-                # Бар 1m, закрывающий период tf: его close_ms кратен step.
-                if (ts_ms + 60_000) % int(step_s * 1000) != 0:
-                    continue
-                if i + lag_bars >= len(ohlcv):
-                    break
-                anchor = float(bar[4])
-                if anchor <= 0:
-                    continue
-                window = ohlcv[i + 1 : i + 1 + lag_bars]
-                if not window:
-                    continue
-                end = float(window[-1][4])
-                hi = max(float(b[2]) for b in window)
-                lo = min(float(b[3]) for b in window)
-                moves.append(abs(end - anchor) / anchor * 100.0)
-                adverse.append(max(hi - anchor, anchor - lo) / anchor * 100.0)
+            moves, adverse = _lag_moves(ohlcv, step_ms=step_ms, lag_bars=lag_bars)
             if not moves:
                 print(f"  {sym:<10} ни одной границы {tf} в окне — пропуск")
                 continue
@@ -269,9 +284,10 @@ def main() -> int:
 
     if not args.no_live:
         worst = max([*deep, *main_lags], default=0.0)
-        lag_for_cost = statistics.median(deep) if deep else (
-            statistics.median(main_lags) if main_lags else 0.0
-        )
+        # Окно берётся по полосе ЭМИССИИ: именно её лаг стоит денег. Главный тик — запасной
+        # источник, если полоса не писала; ноль означает «мерить не по чему», а не «лага нет».
+        lag_source = deep or main_lags
+        lag_for_cost = statistics.median(lag_source) if lag_source else 0.0
         if lag_for_cost > 0:
             asyncio.run(
                 _price_cost(
