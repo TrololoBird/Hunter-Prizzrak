@@ -55,12 +55,12 @@ CORE = ROOT / "hunt_core"
 
 #: Замер 2026-08-03. Опускать вместе с типизацией; ПОДНИМАТЬ — только с обоснованием.
 #: Параметры и возврат функций.
-BASELINE_SIGNATURES = 772
+BASELINE_SIGNATURES = 769
 #: Из них у функций с публичным именем — межпакетный контракт в узком смысле.
-BASELINE_PUBLIC = 388
+BASELINE_PUBLIC = 385
 #: ВСЕ аннотации, включая поля классов и переменные. Держит обход через `x: dict[str, Any]`
 #: вместо параметра — без этой величины гейт обходится объявлением поля.
-BASELINE_ANNOTATIONS = 987
+BASELINE_ANNOTATIONS = 982
 
 
 def _is_dict_str_any(node: ast.AST) -> bool:

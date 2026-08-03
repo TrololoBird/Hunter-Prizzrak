@@ -17,7 +17,6 @@ from hunt_core.data.completeness import (
     series_z_strict,
 )
 from hunt_core.features.candle_patterns import candle_pattern_snapshot
-from hunt_core.features.chart_patterns import chart_pattern_snapshot
 from hunt_core.features.pivots import _pivot_rows, rsi_trendline_break, with_spec_columns
 from hunt_core.features.polars_ta_bridge import rsi_series as _rsi_series
 from hunt_core.toolkit.trend import legacy_trend_label, trend_from_snapshot
@@ -512,7 +511,6 @@ def tf_snapshot(
     closed: bool = False,
     rsi_trendline: bool = False,
     hidden_stoch_div: bool = False,
-    chart_patterns: bool = False,
     candle_patterns: bool = False,
 ) -> dict[str, Any]:
     if df is None or df.is_empty():
@@ -688,11 +686,6 @@ def tf_snapshot(
             }
         ),
         "closed_bar": closed and df.height >= 2,
-        **(
-            chart_pattern_snapshot(df.slice(0, df.height + idx + 1 if idx < 0 else idx + 1))
-            if chart_patterns
-            else {}
-        ),
     }
 
 
