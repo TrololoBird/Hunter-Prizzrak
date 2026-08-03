@@ -9,6 +9,30 @@
   hints, not exact liquidation prices. Deep reconcile ignores synthetic bands for
   trade veto; the formatter labels them explicitly.
 - Improve accuracy only via additional **public** OI/liq feeds — no auth endpoints.
+
+⚠ **ПОТОК ЛИКВИДАЦИЙ BINANCE — СНАПШОТ, А НЕ ПОЛНАЯ ЛЕНТА, и это меняет смысл чисел.**
+Документация Binance про ``!forceOrder@arr`` дословно: *«For each symbol, only the largest
+one liquidation order within 1000ms will be pushed as the snapshot. If no liquidation
+happens in the interval of 1000ms, no stream will be pushed»* (формулировка менялась с
+«latest» на «largest»). То есть за каждую секунду по символу приходит РОВНО ОДНА
+ликвидация — крупнейшая, — а все остальные молча теряются.
+
+Практические следствия, которые обязан знать любой потребитель этого модуля:
+
+1. **Суммарный объём ликвидаций по Binance систематически ЗАНИЖЕН**, и величина занижения
+   неизвестна — она зависит от того, сколько событий пришлось на ту же секунду. Поэтому
+   здесь нет и не должно появляться «точного» подсчёта объёма: события годятся как
+   СИГНАЛЬНЫЕ ВСПЛЕСКИ (был каскад / не было) и как расположение по цене, а не как мера.
+2. **Доля тоже смещена, хотя и слабее суммы.** ``liq_score_5m`` — это ДОЛЯ шортовых
+   ликвидаций, а не сумма, и на неё отбор «крупнейшей за секунду» влияет меньше. Но не
+   нулевым образом: в секунду, где были события с обеих сторон, выживает только большее.
+   Это доп-фактор, а не гейт, и таковым и используется.
+3. **Полнота различается по венью** — см. ``_VENUE_LIQ_COMPLETENESS`` в конце файла;
+   она доезжает до карточки (``deliver/_sections.py`` печатает ``binance=capped_1s·3ev``),
+   так что «тихо» и «урезано» читатель различает.
+
+Полное решение — агрегировать Bybit ``allLiquidation`` (полный поток) и внешний агрегатор;
+это отдельная задача (T5.2 в ТЗ), здесь только зафиксирована граница применимости.
 """
 from __future__ import annotations
 
@@ -955,6 +979,19 @@ def build_liquidation_map(
 # streams EVERY liquidation at 500ms; Binance/OKX/Bitget collapse to the LARGEST
 # per ~1s, so during cascades they systematically under-count. Surfaced so a reader
 # (and the 1в-5 backtest) can tell a full-fidelity venue from a capped one.
+#: Полнота ленты ликвидаций по венью. ⚠ Это НЕ качественная оценка «на глаз» — метка
+#: описывает документированное поведение канала, и от неё зависит, можно ли складывать
+#: объёмы (нельзя, кроме bybit).
+#:
+#: * ``full`` — Bybit ``allLiquidation.{symbol}``: с 2025-02-25 отдаёт ВСЕ события,
+#:   push каждые 500 мс. Прежний фид был ограничен одним сообщением на символ в секунду.
+#: * ``capped_1s`` — Binance ``!forceOrder@arr``: за 1000 мс по символу публикуется
+#:   ТОЛЬКО КРУПНЕЙШАЯ ликвидация («only the largest one liquidation order within 1000ms
+#:   will be pushed as the snapshot»), остальные теряются. OKX и Bitget троттлят
+#:   аналогично.
+#:
+#: Метка доезжает до карточки (`deliver/_sections.py` печатает `binance=capped_1s·3ev`),
+#: то есть читатель отличает «тихо» от «урезано». Разбор следствий — в докстроке модуля.
 _VENUE_LIQ_COMPLETENESS: dict[str, str] = {
     "bybit": "full",
     "binance": "capped_1s",
