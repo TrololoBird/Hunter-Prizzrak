@@ -312,8 +312,25 @@ def evaluate_levels(
     is_armed = str(active.get("delivery_tier") or "").lower() == "armed"
 
     tr = tracker_thresholds(symbol)
-    base_orphan_ttl_h = float(tr.get("orphan_ttl_hours", 24.0))
-    orphan_ttl_h = 12.0 if direction == "short" else max(base_orphan_ttl_h * 2.0, 48.0)
+    # ⚠ ЗДЕСЬ БЫЛ КЛЮЧ-ОБМАНКА. Читалось `orphan_ttl_hours` (дефолт 24), а дальше стояло
+    # `12.0 if direction == "short" else max(base * 2.0, 48.0)` — то есть для шортов
+    # прочитанное значение ИГНОРИРОВАЛОСЬ полностью, а для лонгов при дефолте 24 всегда
+    # получалось 48 (`max(48, 48)`). Ключ выглядел настраиваемым и не управлял ничем:
+    # правка TOML молча ничего не делала — ровно тот класс, о котором предупреждает README.
+    #
+    # Теперь два честных ключа. ЭФФЕКТИВНЫЕ ЧИСЛА СОХРАНЕНЫ (48/12), чтобы правка не
+    # меняла поведение заодно с исправлением интерфейса.
+    #
+    # ⚠ АСИММЕТРИЯ 48/12 НЕ ИЗМЕРЕНА — это нарушение I-7, и оно остаётся открытым.
+    # Замер 2026-08-03 по всем трём леджерам: событий `orphan_expired` в истории **одно**
+    # (long), то есть обосновать или опровергнуть разницу между лонгом и шортом сейчас
+    # физически не на чем. Числа перенесены как есть и помечены как унаследованные;
+    # менять их — только по выборке, а не «разумным значением».
+    orphan_ttl_h = float(
+        tr.get("orphan_ttl_short_h", 12.0)
+        if direction == "short"
+        else tr.get("orphan_ttl_long_h", 48.0)
+    )
     # (removed: the >50%-toward-TP1 orphan-TTL extension read active["entry_price"]/
     # ["entry_reference"] — phantom keys with no producer, so entry was always 0 and the
     # block never fired — G-68. Reviving it means deriving entry from entry_lo/entry_hi.)

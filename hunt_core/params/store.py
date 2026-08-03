@@ -48,7 +48,11 @@ UNIVERSAL_DEFAULTS: dict[str, Any] = {
         "breakeven_risk_fraction": 0.25,
         "mfe_stall_hours": 8.0,
         "mfe_stall_min_pct": 1.0,
-        "orphan_ttl_hours": 24.0,
+        # `orphan_ttl_hours` заменён двумя честными ключами 2026-08-03 (T2.3): прежний
+        # читался, но перекрывался в коде (шорт — жёстко 12, лонг — max(x*2, 48)).
+        # Значения = прежним ЭФФЕКТИВНЫМ, асимметрия не измерена (см. config.defaults.toml).
+        "orphan_ttl_long_h": 48.0,
+        "orphan_ttl_short_h": 12.0,
         "stale_lc_ticks_default": 3.0,
         "stale_lc_ticks_near_tp1": 8.0,
         "near_tp1_remaining_pct": 3.0,
