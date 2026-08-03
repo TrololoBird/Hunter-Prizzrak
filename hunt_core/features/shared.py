@@ -44,26 +44,56 @@ def wilder_mean(
     name: str,
     seed_offset: int = 0,
 ) -> pl.Series:
-    """Wilder running average seeded with a simple mean over the first window."""
+    """Wilder running average seeded with a simple mean over the first window.
+
+    ⚠ ДЫРА В ДАННЫХ ЗДЕСЬ НЕ ЗАМАЗЫВАЕТСЯ НУЛЁМ (I-6). Прежняя редакция делала
+    ``.fill_nan(0.0).fill_null(0.0)``, то есть отсутствующий бар превращался в
+    **измеренный нулевой** TR/DM — и попадал в экспоненциальную память сглаживания с
+    весом ``(1−1/N)^k``. Один такой ноль занижает ATR не на одном баре, а на десятках
+    последующих; ATR питает стопы, цели, NATR и фильтры волатильности, поэтому эффект —
+    систематически ЗАУЖЕННЫЙ стоп, а не косметика.
+
+    Теперь ``±inf`` и ``NaN`` приводятся к ``null`` и остаются им. Дальше работает
+    ``ewm_mean(ignore_nulls=False)``.
+
+    ЗАМЕР 2026-08-03 (polars 1.43.1, alpha=0.5, вход ``[1,2,3,None,5,6,7,8]``):
+
+    * ``ignore_nulls=False`` → ``[1, 1.5, 2.25, None, 4.0833, 5.0417, …]`` — на самой
+      дыре ``null``, а следующее значение ПЕРЕВЗВЕШЕНО с учётом пропуска (вес прошлого
+      ``(1−α)²``, нового ``α``, нормированы: 1/3 и 2/3);
+    * ``ignore_nulls=True`` → ``[…, None, 3.625, …]`` — пропуск считается несуществующим.
+
+    Берём ``False``: пропуск — это прошедшее время, а не отсутствие времени.
+    ⚠ Отсюда уточнение к формулировке ТЗ: хвост после дыры **не** становится ``null``
+    навсегда — ``null`` только на самом пропущенном баре, дальше идёт корректно
+    перевзвешенное число. Это сильнее, чем «вернуть null», и честнее, чем вернуть ноль.
+
+    Ведущие ``null`` до конца окна затравки — ожидаемое поведение и раньше.
+    """
     size = len(series)
     period = max(1, int(period))
     seed_end = int(seed_offset) + period
     if size < seed_end:
         return pl.Series(name, [None] * size, dtype=pl.Float64)
 
-    # Vectorized Wilder: use ewm_mean with alpha=1/period, seeded with SMA
-    # Replace non-finite values to ensure stability, matching finite_float behavior
+    # ±inf и NaN → null. Именно null, а не 0.0: «нет значения» и «измеренный ноль» —
+    # разные факты, и ниже по течению их уже не различить.
     clean_series = (
-        series.replace([float("inf"), float("-inf")], None)
-        .fill_nan(0.0)
-        .fill_null(0.0)
-        .cast(pl.Float64)
+        series.cast(pl.Float64, strict=False)
+        .replace([float("inf"), float("-inf")], None)
+        .fill_nan(None)
     )
 
-    # Compute seeding SMA
-    sma = clean_series.slice(seed_offset, period).mean()
+    # Затравка — простое среднее по окну. `Series.mean()` пропускает null молча, поэтому
+    # неполное окно затравки здесь ОТКАЗ, а не среднее по тому, что осталось: посеять
+    # Уайлдера по трём барам из четырнадцати и не сказать об этом — ровно тот подлог,
+    # который убран выше. Отказ проносится как all-null и виден потребителю.
+    seed_window = clean_series.slice(seed_offset, period)
+    if seed_window.null_count() > 0:
+        return pl.Series(name, [None] * size, dtype=pl.Float64)
+    sma = seed_window.mean()
     if sma is None:
-        sma = 0.0
+        return pl.Series(name, [None] * size, dtype=pl.Float64)
 
     # Construct input for EWM: seed value followed by subsequent raw values
     subsequent = clean_series.slice(seed_end, size - seed_end)
@@ -72,7 +102,9 @@ def wilder_mean(
     # Equivalence with scalar Wilder loop verified: max delta < 1e-7 on 300-bar
     # random series, period=14. See Phase 4 AUD-1 smoke test (2026-05).
     # Prepending the SMA makes ewm(alpha=1/period, adjust=False) equivalent.
-    ewm_output = ewm_input.ewm_mean(alpha=1.0 / period, adjust=False)
+    # ignore_nulls=False задан ЯВНО, хотя это и дефолт: значение параметра здесь —
+    # содержательное решение о том, как считается дыра, а не умолчание библиотеки.
+    ewm_output = ewm_input.ewm_mean(alpha=1.0 / period, adjust=False, ignore_nulls=False)
 
     # Align with original series length by prepending nulls
     result = pl.concat(
