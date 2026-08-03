@@ -159,12 +159,44 @@ extend-select = ["TID251", "S110", "S112"]
 "hunt_core/data_readiness.py" = ["F841"]
 
 [tool.mypy]
-ignore_missing_imports = true
+# ⚠ ГЛОБАЛЬНЫЙ `ignore_missing_imports = true` СНЯТ 2026-08-03 (T0.3), и это не педантизм.
+# Он действовал в том числе на `hunt_core.*`, то есть УДАЛЕНИЕ ВНУТРЕННЕГО МОДУЛЯ проходило
+# mypy зелёным. Ровно так и случилось при вырезе модуля манипуляций 2026-07-31: снесли
+# `deliver/digest.py`, из которого главный тик импортирует `get_advisory_digest`, и все
+# гейты прошли — поймал только живой прогон `watch --once`, упав на ModuleNotFoundError.
+#
+# ВОСПРОИЗВЕДЕНО 2026-08-03: файл убран из дерева, `mypy hunt_core` напечатал
+# «Success: no issues found in 195 source files», а новый `scripts/check_imports.py` —
+# «ПРОВАЛ: 7 из 196 модулей». Отсюда и то и другое: точечные исключения ниже вместо
+# глобального, плюс отдельный смоук-импорт как гейт CI.
+#
+# Ниже — ТОЛЬКО внешние библиотеки без стабов и без `py.typed` (замер: 27 ошибок в 12
+# файлах после снятия глобального флага, все до одной import-untyped/import-not-found
+# по этим именам). Внутренние пакеты сюда добавлять НЕЛЬЗЯ: это вернёт ту самую слепоту.
 warn_unused_ignores = false
 exclude = ["_archive", "build", "dist"]
 # `[[overrides]] module=["hunt_core.toolkit.*"] ignore_errors=true` снят 2026-07-26:
 # замер показал 0 ошибок на всех 12 файлах toolkit/ — исключение выводило 1863 строки
 # из-под проверки, ничего при этом не подавляя, и делало «mypy clean» слабее, чем звучит.
+
+[[tool.mypy.overrides]]
+module = [
+    # Транспорт. Стабов нет, `py.typed` нет — проверено на запиненной 4.5.69.
+    "ccxt.*",
+    # Polars-плагины: расширения на Rust, интерфейс объявлен только в рантайме.
+    "polars_ds.*",
+    "polars_ols.*",
+    "polars_ta.*",
+    "polars_talib.*",
+    # ⚠ `polars_trading` НЕ объявлен в зависимостях и НЕ установлен: в
+    # `features/research_plugins.py` он под `try/except ImportError` с собственным
+    # запасным расчётом sharpe/drawdown, то есть ветка библиотеки не исполняется никогда.
+    # Исключение здесь описывает факт, а не разрешает его.
+    "polars_trading.*",
+    # Опциональный экстра `[otel]`: в CI ставится через --all-extras, локально обычно нет.
+    "opentelemetry.*",
+]
+ignore_missing_imports = true
 
 [dependency-groups]
 dev = [
