@@ -48,11 +48,6 @@ import polars_talib as tl
 import structlog
 
 from hunt_core.errors import DEFENSIVE_EXC
-from hunt_core.features.research_plugins import (
-    add_polars_trading_features,
-    polars_trading_available,
-)
-
 from .shared import clean_non_finite, materialize_series, wilder_mean
 
 LOG = structlog.get_logger("hunt_core.features.polars_ta_bridge")
@@ -747,15 +742,6 @@ def obv_series(df: pl.DataFrame) -> pl.Series:
     return _series_from_expr(df, tl.obv(pl.col("close"), pl.col("volume")), name="obv")
 
 
-def polars_trading_sharpe_drawdown(
-    df: pl.DataFrame,
-    *,
-    window: int = 20,
-) -> pl.DataFrame:
-    """``sharpe_20`` + ``current_drawdown`` via polars-trading."""
-    return add_polars_trading_features(df, window=window)
-
-
 __all__ = [
     "BROKEN_PLTA_FUNCTIONS",
     "adx_from_polars_ta",
@@ -769,8 +755,6 @@ __all__ = [
     "natr_series",
     "obv_series",
     "polars_ta_available",
-    "polars_trading_available",
-    "polars_trading_sharpe_drawdown",
     "polars_ta_extended_exprs",
     "polars_wq_exprs",
     "roc_series",

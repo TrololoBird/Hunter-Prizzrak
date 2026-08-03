@@ -1,4 +1,25 @@
-"""Research feature plugins: polars-ols, polars-trading, polars-ds (core deps)."""
+"""Research feature plugins: polars-ols, polars-ds (core deps).
+
+⚠ ПУТЬ ЧЕРЕЗ `polars-trading` УДАЛЁН 2026-08-03, И ОН НЕ ИСПОЛНЯЛСЯ НИ РАЗУ.
+Здесь стоял `try: import polars_trading … except ImportError: _POLARS_TRADING_AVAILABLE
+= False`, а сам пакет **не был объявлен ни в `pyproject.toml`, ни в `uv.lock`** и не стоял
+в `.venv`. То есть флаг был константой False, а две функции-зонда
+(`_polars_trading_sharpe_expr`, `_polars_trading_drawdown_expr`) — недостижимым кодом,
+маскирующимся под опциональную оптимизацию.
+
+Почему удалено, а не подключено: у результата **нет читателя**. Колонки `sharpe_20` и
+`current_drawdown` не читает ни один модуль дерева (единственное упоминание вне этого
+файла было в докстроке), а оба входа в расчёт — дохлые корни, оба уже перечислены в
+`docs/audit/dead-symbols-2026-07-26.txt`: `polars_ta_bridge::polars_trading_sharpe_drawdown`
+(строка 65) и `research_snapshot_fields` (строка 77). Подключать зависимость ради колонок,
+которых никто не запрашивает, значило бы менять сироту «объявлено, не исполняется» на
+сироту «исполняется, не читается».
+
+Заодно ушли два проглатывающих обработчика (`except DEFENSIVE_EXC: continue` / `pass`
+вокруг зондов `getattr`) — из тех 96 типизированных, которых ruff S110/S112 не видит.
+Молчаливой деградации здесь больше нет, потому что нет и самой развилки: расчёт
+sharpe/drawdown теперь безусловный и один.
+"""
 from __future__ import annotations
 
 
@@ -10,16 +31,7 @@ import polars as pl
 import polars_ds
 import polars_ols
 import polars_ols.least_squares as polars_ols_ls
-try:
-    import polars_trading as _polars_trading
-    _POLARS_TRADING_AVAILABLE = True
-except ImportError:
-    _polars_trading = None  # type: ignore[assignment]
-    _POLARS_TRADING_AVAILABLE = False
-
 import structlog
-
-from hunt_core.errors import DEFENSIVE_EXC
 
 LOG = structlog.get_logger("hunt_core.features.research_plugins")
 
@@ -35,10 +47,6 @@ _KS_MIN_SAMPLES = 30
 
 def polars_ols_available() -> bool:
     return True
-
-
-def polars_trading_available() -> bool:
-    return _POLARS_TRADING_AVAILABLE
 
 
 def polars_ds_available() -> bool:
@@ -100,66 +108,27 @@ def add_ols_trend_features(df: pl.DataFrame, *, window: int = _OLS_WINDOW) -> pl
     ).drop("_ols_coef", "_ols_resid", "_slope_raw")
 
 
-def _polars_trading_sharpe_expr(*, window: int) -> pl.Expr | None:
-    pt = _polars_trading
-    for attr in ("rolling_sharpe", "sharpe_ratio"):
-        fn = getattr(pt, attr, None)
-        if callable(fn):
-            try:
-                out = fn(pl.col("close"), window=window)
-                if isinstance(out, pl.Expr):
-                    return out.alias("sharpe_20")
-            except DEFENSIVE_EXC:
-                continue
-    metrics = getattr(pt, "metrics", None)
-    if metrics is not None:
-        rs = getattr(metrics, "rolling_sharpe", None)
-        if callable(rs):
-            try:
-                ret = pl.col("close").pct_change()
-                return rs(ret, window=window).alias("sharpe_20")
-            except DEFENSIVE_EXC:
-                pass
-    return None
+def add_sharpe_drawdown_features(df: pl.DataFrame, *, window: int = _OLS_WINDOW) -> pl.DataFrame:
+    """Добавить ``sharpe_20`` и ``current_drawdown`` — чистый Polars, без внешней библиотеки.
 
+    ⚠ ПЕРЕИМЕНОВАНА ИЗ ``add_polars_trading_features`` 2026-08-03. Прежнее имя стало
+    ложью в тот момент, когда из файла ушёл `polars_trading`: функция никогда и не
+    вызывала библиотеку (пакет не был установлен), а после удаления зондов не может
+    в принципе. Имя, обещающее источник, которого нет, — это тот же класс «name-lie»,
+    который ловит `phantom-key-auditor`.
 
-def _polars_trading_drawdown_expr() -> pl.Expr | None:
-    pt = _polars_trading
-    for attr in ("current_drawdown", "drawdown"):
-        fn = getattr(pt, attr, None)
-        if callable(fn):
-            try:
-                out = fn(pl.col("close"))
-                if isinstance(out, pl.Expr):
-                    return out.alias("current_drawdown")
-            except DEFENSIVE_EXC:
-                continue
-    metrics = getattr(pt, "metrics", None)
-    if metrics is not None:
-        dd = getattr(metrics, "current_drawdown", None)
-        if callable(dd):
-            try:
-                return dd(pl.col("close")).alias("current_drawdown")
-            except DEFENSIVE_EXC:
-                pass
-    return None
-
-
-def add_polars_trading_features(df: pl.DataFrame, *, window: int = _OLS_WINDOW) -> pl.DataFrame:
-    """Add ``sharpe_20`` and ``current_drawdown`` via polars-trading API."""
+    Обе величины считаются ровно так, как считались всегда на практике: рассчитывались
+    именно эти выражения, потому что зонды библиотеки возвращали ``None`` на каждом вызове.
+    Числа НЕ меняются — меняется только то, что развилки больше нет.
+    """
     if df.is_empty() or "close" not in df.columns:
         return df
-    sharpe_expr = _polars_trading_sharpe_expr(window=window)
-    dd_expr = _polars_trading_drawdown_expr()
-    if sharpe_expr is None:
-        sharpe_expr = (
-            pl.col("close")
-            .pct_change()
-            .rolling_mean(window_size=window, min_samples=window)
-            / pl.col("close").pct_change().rolling_std(window_size=window, min_samples=window)
-        ).alias("sharpe_20")
-    if dd_expr is None:
-        dd_expr = (pl.col("close") / pl.col("close").cum_max() - 1.0).alias("current_drawdown")
+    returns = pl.col("close").pct_change()
+    sharpe_expr = (
+        returns.rolling_mean(window_size=window, min_samples=window)
+        / returns.rolling_std(window_size=window, min_samples=window)
+    ).alias("sharpe_20")
+    dd_expr = (pl.col("close") / pl.col("close").cum_max() - 1.0).alias("current_drawdown")
     work = df.with_columns([sharpe_expr, dd_expr])
     return work.with_columns(
         [
@@ -180,7 +149,7 @@ def enrich_research_columns(df: pl.DataFrame) -> pl.DataFrame:
     if "trend_slope_20" not in work.columns:
         work = add_ols_trend_features(work)
     if "sharpe_20" not in work.columns or "current_drawdown" not in work.columns:
-        work = add_polars_trading_features(work)
+        work = add_sharpe_drawdown_features(work)
     return work
 
 
@@ -260,13 +229,12 @@ def symbol_regime_features(df: pl.DataFrame) -> dict[str, Any]:
 
 __all__ = [
     "add_ols_trend_features",
-    "add_polars_trading_features",
+    "add_sharpe_drawdown_features",
     "compute_return_entropy_50",
     "detect_volume_regime_break",
     "enrich_research_columns",
     "polars_ds_available",
     "polars_ols_available",
-    "polars_trading_available",
     "research_snapshot_fields",
     "symbol_regime_features",
 ]
