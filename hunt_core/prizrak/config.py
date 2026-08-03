@@ -107,18 +107,31 @@ class PrizrakConfig(BaseModel):
     structure_lookback_hh_ll: int = Field(default=20, ge=5)
     structure_bos_buffer_pct: float = Field(default=0.003, ge=0.0)
 
-    # HTF-bias gate (course: "для новых ТВХ нужно дождаться слома на МТФ" + "анализ
-    # со старших ТФ к младшим"). Net weighted multi-TF structural trend agreement.
-    # Weights MUST be monotone by seniority (1w ≥ 1d ≥ 4h ≥ 1h): the method reads
-    # senior TFs as dominant. Previously 4h (0.30) outweighed 1d (0.25) — non-monotone,
-    # contradicting both the method and this comment. The 4h-counter-to-senior case
-    # (accumulation/distribution) is handled specially in _htf_bias, so 4h does not
-    # need an inflated weight in the plain vote. Fixed to descending 0.35/0.30/0.25/0.10.
+    # HTF-bias gate (курс: «для новых ТВХ нужно дождаться слома на МТФ» + «анализ со
+    # старших ТФ к младшим»).
+    #
+    # ⚠ ЛИНЕЙНЫЕ ВЕСА `htf_{1w,1d,4h,1h}_weight` СНЯТЫ 2026-08-03 (T4.1). Их было четыре
+    # (0.35/0.30/0.25/0.10), и они противоречили методу в двух местах сразу:
+    #
+    # 1. **1ч участвовал в НАПРАВЛЕНИИ.** Курс использует 1ч как ТФ отработки (прокол/
+    #    пробой, реакция от уровня), а направление берёт со старших: «ПРИОРИТЕТ СТАРШИЙ
+    #    ТАЙМФРЕЙМ», «чем старше ТФ, тем выше винрейт». Вес 0.10 выглядел незначительным,
+    #    но замер 2026-08-03 (40 символов) показал, что он меняет итоговый bias у **15%**:
+    #    у четырёх символов бычий 1ч РАЗБАВЛЯЛ медвежьих старших и держал вердикт в
+    #    neutral. Это ровно «ловушка таймфрейма», о которой курс предупреждает.
+    # 2. **Сумма весов стирает приоритет.** Взвешенная сумма позволяет двум младшим
+    #    перевесить одного старшего — то есть отрицает само правило приоритета, ради
+    #    которого веса и делались монотонными.
+    #
+    # Заменено детерминированным правилом в `orchestrator.py::_htf_bias`: направление
+    # берётся с 1d/4h (1W — контекст-фильтр, 1ч не участвует), при конфликте побеждает
+    # СТАРШИЙ. Порог ниже остаётся: он отсекает решения по единственному прогретому ТФ.
+    #
+    # Веса удалены, а не оставлены «на всякий случай»: `PrizrakConfig.load()` читает
+    # `load_config_defaults_toml().get("deep")`, а тот форвардер возвращает только
+    # {gates, tracker} — то есть задать их извне было нельзя никогда, и оставшиеся поля
+    # были бы ручками без записи (I-6).
     htf_bias_threshold: float = Field(default=0.30, ge=0.0, le=1.0)
-    htf_1w_weight: float = Field(default=0.35, ge=0.0)
-    htf_1d_weight: float = Field(default=0.30, ge=0.0)
-    htf_4h_weight: float = Field(default=0.25, ge=0.0)
-    htf_1h_weight: float = Field(default=0.10, ge=0.0)
     # Strength multiplier when a candidate aligns with HTF bias; penalty when it opposes
     # HTF bias but a confirmed BOS/CHoCH slom exists in the candidate direction.
     htf_align_bonus: float = Field(default=0.12, ge=0.0, le=0.5)
