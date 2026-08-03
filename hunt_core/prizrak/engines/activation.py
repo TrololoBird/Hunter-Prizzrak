@@ -39,7 +39,6 @@ def assess_activation(price: float, summary: dict[str, Any]) -> dict[str, Any]:
                 state = "near_catalyst"
         except (TypeError, ValueError):
             LOG.debug("catalyst_level float conversion failed", exc_info=True)
-            pass
 
     lo = summary.get("entry_lo")
     hi = summary.get("entry_hi")
@@ -63,7 +62,6 @@ def assess_activation(price: float, summary: dict[str, Any]) -> dict[str, Any]:
                     state = "near_entry"
     except (TypeError, ValueError):
         LOG.debug("entry_lo/entry_hi zone assessment failed", exc_info=True)
-        pass
 
     detail = ""
     if state == "in_entry_zone":

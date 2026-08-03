@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import math
 import collections
 import structlog
 from dataclasses import dataclass, field
@@ -68,9 +69,8 @@ def _to_float(value: Any) -> float | None:
         out = float(value)
     except (TypeError, ValueError):
         return None
-    if out != out or out in (float("inf"), float("-inf")):  # NaN / inf
-        return None
-    return out
+    # Было `out != out or out in (inf, -inf)` — побуквенный эквивалент math.isfinite.
+    return out if math.isfinite(out) else None
 
 
 def _okx_detail(info: Any) -> dict[str, Any]:

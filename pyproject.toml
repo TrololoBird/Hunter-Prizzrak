@@ -76,8 +76,10 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/TrololoBird/Crypto-Analytic-Signal-Bot"
-Repository = "https://github.com/TrololoBird/Crypto-Analytic-Signal-Bot"
+# Указывало на ЧУЖОЙ репозиторий `Crypto-Analytic-Signal-Bot`. Сверено с `git remote -v`
+# 2026-08-03: origin здесь `TrololoBird/Hunter-Prizzrak`.
+Homepage = "https://github.com/TrololoBird/Hunter-Prizzrak"
+Repository = "https://github.com/TrololoBird/Hunter-Prizzrak"
 
 [project.optional-dependencies]
 # ⚠ pytest/pytest-asyncio/hypothesis УДАЛЕНЫ вместе с каталогом `tests/` (2026-07-27).

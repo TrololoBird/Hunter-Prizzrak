@@ -480,7 +480,16 @@ def compute_interest_zones(
             # The edge price tests first: long → the box top, short → the box bottom.
             return float(z["hi"] if side == "long" else z["lo"])
 
-        def _course_flags(z: dict[str, Any], *, side: str) -> dict[str, Any]:
+        def _course_flags(
+            z: dict[str, Any], *, side: str, bars: Any = bars
+        ) -> dict[str, Any]:
+            # ⚠ `bars` СВЯЗАН ЗНАЧЕНИЕМ ПО УМОЛЧАНИЮ, а не захвачен замыканием (ruff B023).
+            # Замыкание читает переменную объемлющего ЦИКЛА в момент ВЫЗОВА, а не определения.
+            # Сегодня это безвредно: вызов синхронный и происходит в той же итерации. Но
+            # безвредность держится на порядке исполнения, а не на конструкции — любая
+            # отложенная передача (собрать список функций и вызвать после цикла, уехать в
+            # `asyncio.gather`, в `to_thread`) даст ВСЕМ вызовам последний кадр цикла.
+            # Дефект такого рода не падает, а тихо считает уровни по чужому символу.
             edge = _entry_edge(z, side=side)
             worked = _level_already_worked(bars, level=edge, direction=side)
             saw = detect_level_saw(bars, level=edge)

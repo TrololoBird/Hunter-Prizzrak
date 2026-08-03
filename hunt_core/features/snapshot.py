@@ -129,7 +129,6 @@ def distribution_stats(df: Any, *, idx: int = -1) -> dict[str, float]:
             out["return_zscore"] = round(series_z_strict(ret_window, field="return_zscore"), 2)
         except (DataIncompleteError, TypeError, ValueError):
             LOG.debug("distribution_stats return_zscore failed", exc_info=True)
-            pass
 
     skew, kurt = _return_skew_kurt(ret_window)
     if skew is not None:

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 
 
+import math
 from typing import Any
 
 import polars as pl
@@ -45,7 +46,7 @@ def _as_optional_float(value: Any) -> float | None:
         numeric = float(value)
     except (TypeError, ValueError):
         return None
-    return numeric if numeric == numeric else None
+    return numeric if math.isfinite(numeric) else None  # NaN и ±inf → нет значения
 
 
 def volume_profile_levels(

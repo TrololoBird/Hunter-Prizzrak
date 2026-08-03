@@ -3,6 +3,7 @@ from __future__ import annotations
 
 
 
+import math
 import structlog
 from collections.abc import Iterable
 from typing import Any
@@ -194,7 +195,8 @@ def _ticker_float(value: Any) -> float:
         out = float(value)
     except (TypeError, ValueError):
         return 0.0
-    return out if out == out and out not in (float("inf"), float("-inf")) else 0.0
+    # Побуквенный эквивалент math.isfinite; поведение не меняется.
+    return out if math.isfinite(out) else 0.0
 
 
 def normalize_ticker_rows(
