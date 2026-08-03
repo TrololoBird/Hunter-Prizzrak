@@ -47,7 +47,8 @@ def _read_snapshots() -> list[dict[str, Any]]:
             return []
         data = serde.loads(DOMINANCE_CACHE.read_text())
         return data if isinstance(data, list) else []
-    except Exception:
+    except Exception as exc:
+        log.warning("dominance_cache_unreadable", path=str(DOMINANCE_CACHE), error=repr(exc))
         return []
 
 
@@ -110,7 +111,8 @@ async def _fetch_stable_cd(session: Any, total_mcap: float) -> float | None:
             return None
         stable_cap = sum(float(r.get("market_cap") or 0.0) for r in rows if isinstance(r, dict))
         return stable_cap / total_mcap * 100.0 if stable_cap > 0 else None
-    except Exception:
+    except Exception as exc:
+        log.warning("stablecoin_dominance_parse_failed", error=repr(exc))
         return None
 
 
@@ -197,7 +199,8 @@ def read_cached_changes_24h() -> dict[str, float] | None:
         if t3_prior <= 0:
             return None
         total3_change = (t3_now - t3_prior) / t3_prior * 100.0
-    except Exception:
+    except Exception as exc:
+        log.warning("dominance_delta_failed", error=repr(exc))
         return None
     out = {"btc_d_change_24h": round(btc_d_change, 4), "total3_change_24h": round(total3_change, 4)}
     # ETH.D — снимок его несёт с самого начала (``_parse_global``), а дельту не считал никто, так

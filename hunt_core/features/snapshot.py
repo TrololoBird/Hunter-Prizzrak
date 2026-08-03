@@ -206,7 +206,8 @@ def btc_beta_1h(sym_work_1h: Any, btc_work_1h: Any, *, lookback: int = 48) -> fl
         )
         beta = float(result["coef"].struct.field("x")[0])
         return round(beta, 4)
-    except Exception:
+    except Exception:  # noqa: BLE001 — внешний плагин polars_ols, форма API дрейфует
+        # DEBUG намеренно: прежняя форма вызова падала КАЖДЫЙ тик, и WARNING залил бы лог.
         LOG.debug("btc_beta_1h polars_ols failed", exc_info=True)
         return None
 

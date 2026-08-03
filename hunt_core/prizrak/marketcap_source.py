@@ -79,7 +79,8 @@ def _read_cache(symbol: str) -> dict[str, Any] | None:
         if not path.exists():
             return None
         return serde.loads(path.read_text())
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 — кэш может быть битым; молчать нельзя
+        log.warning("marketcap_cache_unreadable", path=str(path), error=repr(exc))
         return None
 
 
@@ -103,7 +104,8 @@ def _write_cache(symbol: str, days: int, series: list[list[float]]) -> None:
 def _cache_fresh(entry: dict[str, Any], *, ttl_s: int) -> bool:
     try:
         return (time.time() * 1000 - float(entry["fetched_ms"])) < ttl_s * 1000  # noqa: TID251 — TTL против собственного штампа выше — пара локальных отметок
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 — штамп кэша мог быть записан кривым
+        log.warning("marketcap_cache_stamp_unreadable", error=repr(exc))
         return False
 
 
@@ -132,7 +134,8 @@ async def _resolve_id(session: Any, ticker: str) -> str | None:
             rows = await resp.json()
         if isinstance(rows, list) and rows and isinstance(rows[0], dict):
             return rows[0].get("id")
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 — сеть/форма ответа CoinGecko
+        log.warning("coingecko_id_lookup_failed", error=repr(exc))
         return None
     return None
 
