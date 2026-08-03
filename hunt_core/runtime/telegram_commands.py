@@ -44,12 +44,16 @@ class HuntTelegramCommands:
         token: str,
         *,
         allowed_user_ids: frozenset[int],
+        target_chat_id: int | None = None,
+        public: bool = False,
         poll_timeout: int = 25,
         proxy_url: str | None = None,
         client: Any = None,
     ) -> None:
         self._token = token
         self._allowed_user_ids = allowed_user_ids
+        self._target_chat_id = target_chat_id
+        self._public = public
         self._poll_timeout = poll_timeout
         self._proxy_url = proxy_url
         # Shared watch CCXT client — probes reuse it instead of spinning a 2nd plane.
@@ -65,12 +69,30 @@ class HuntTelegramCommands:
         self._dp: Dispatcher | None = None
 
     def _authorized(self, chat_id: int, user_id: int | None) -> bool:
-        # Any chat/group/channel where the bot is a member may use /signal.
-        if chat_id != 0:
+        """Кто имеет право дёргать /signal и получать ответ в СВОЙ чат.
+
+        ⚠ ПРЕЖНЯЯ РЕДАКЦИЯ НЕ АВТОРИЗОВЫВАЛА НИКОГО. Она начиналась с ``if chat_id != 0:
+        return True``, а ``chat_id`` приходит из ``message.chat.id`` (см. :meth:`_on_message`),
+        и у Telegram он не бывает нулём ни для одного реального апдейта: приватные чаты —
+        положительные id, группы и каналы — отрицательные. То есть первая ветка срабатывала
+        ВСЕГДА, а список операторов (``TELEGRAM_OPERATOR_USER_IDS`` → :attr:`_allowed_user_ids`)
+        был физически недостижим — мёртвый код, выглядящий как гейт доступа.
+
+        Чем это плохо на практике: ответ уходит в чат ЗАПРОСИВШЕГО (``_send`` поднимает
+        broadcaster на произвольный ``chat_id``), поэтому любой участник любой группы или
+        канала, куда добавлен бот, получал полные карточки со входом, стопом и целями.
+        Это утечка сигналов третьим лицам, а не косметика.
+
+        Теперь право даётся тремя явными способами:
+        1. чат равен боевому ``target_chat_id`` — там карточки и так публикуются;
+        2. отправитель есть в списке операторов — он же работает и в личке с ботом;
+        3. ``HUNT_PUBLIC_SIGNAL=1`` — явный опт-ин «отвечать кому угодно», по умолчанию ВЫКЛ.
+        """
+        if self._target_chat_id is not None and chat_id == self._target_chat_id:
             return True
         if user_id is not None and user_id in self._allowed_user_ids:
             return True
-        return False
+        return self._public
 
     async def _send(self, chat_id: int, text: str) -> None:
         broadcaster = TelegramBroadcaster(self._token, str(chat_id), proxy_url=self._proxy_url)
@@ -339,6 +361,23 @@ class HuntTelegramCommands:
                 await self._bot.session.close()
 
 
+def _numeric_chat_id(raw: str) -> int | None:
+    """``TELEGRAM_CHAT_ID`` → int, либо None если это ``@username`` или мусор.
+
+    Канал можно адресовать и по ``@username`` — отправке это не мешает
+    (``TelegramBroadcaster`` кладёт строку в ``chat_id`` как есть), но СРАВНИТЬ такую
+    цель с ``message.chat.id`` нельзя: в апдейте приходит числовой id, имя лежит в
+    отдельном поле. Возвращаем None и даём вызывающему сказать об этом вслух.
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        return None
+
+
 def build_hunt_telegram_commands(
     settings: Any, *, proxy_url: str | None = None, client: Any = None
 ) -> HuntTelegramCommands | None:
@@ -347,9 +386,42 @@ def build_hunt_telegram_commands(
         return None
     secrets = load_secrets()
     user_ids = {int(x) for x in (secrets.operator_user_ids or ())}
+    raw_target = str(getattr(settings, "target_chat_id", "") or "")
+    target_chat_id = _numeric_chat_id(raw_target)
+    public = os.environ.get("HUNT_PUBLIC_SIGNAL", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+    # ⚠ Молчание запрещено: конфигурация доступа объявляется вслух, потому что оба её
+    # крайних состояния выглядят одинаково тихо — и «отвечаем только своим», и
+    # «не отвечаем никому», и «отвечаем всему интернету».
+    if public:
+        LOG.warning(
+            "hunt_tg_public_signal_enabled",
+            note="HUNT_PUBLIC_SIGNAL=1 — /signal отвечает ЛЮБОМУ чату; карточки уйдут третьим лицам",
+        )
+    elif target_chat_id is None and not user_ids:
+        LOG.error(
+            "hunt_tg_commands_locked",
+            target_chat_id=raw_target or None,
+            note=(
+                "нет ни числового TELEGRAM_CHAT_ID, ни TELEGRAM_OPERATOR_USER_IDS — "
+                "команды не ответят никому. Задайте операторов или HUNT_PUBLIC_SIGNAL=1."
+            ),
+        )
+    elif target_chat_id is None:
+        LOG.warning(
+            "hunt_tg_target_chat_not_numeric",
+            target_chat_id=raw_target,
+            operators=len(user_ids),
+            note="цель задана как @username — сверить с message.chat.id нельзя, работает только allowlist",
+        )
+    else:
+        LOG.info("hunt_tg_commands_authz", target_chat_id=target_chat_id, operators=len(user_ids))
+
     return HuntTelegramCommands(
         token,
         allowed_user_ids=frozenset(user_ids),
+        target_chat_id=target_chat_id,
+        public=public,
         proxy_url=proxy_url,
         client=client,
     )
