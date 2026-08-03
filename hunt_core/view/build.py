@@ -13,7 +13,6 @@ computes them from a periodically-refreshed history (ADR-0004 S3).
 """
 from __future__ import annotations
 
-import time
 from collections.abc import Sequence
 from typing import Any
 
@@ -26,6 +25,7 @@ from hunt_core.toolkit.book_math import depth_imbalance_from_book, microprice_bi
 from hunt_core.toolkit.ohlcv import ccxt_ohlcv_to_frame
 from hunt_core.view.models import Book, Cross, Derivs, Klines, MarketView, Orderflow, Spot
 from hunt_core.view.price import resolve_price
+from hunt_core import clock
 
 _DEFAULT_TFS: tuple[str, ...] = ("1m", "5m", "15m", "1h", "4h", "1d", "1w")
 _TF_FIELD: dict[str, str] = {"1m": "m1", "5m": "m5", "15m": "m15", "1h": "h1", "4h": "h4", "1d": "d1", "1w": "w1"}
@@ -152,7 +152,9 @@ def _build_book(snap: MarketSnapshot) -> Book:
     )
 
 
-def _build_derivs(snap: MarketSnapshot, mark: dict[str, Any] | None) -> Derivs:
+def _build_derivs(
+    snap: MarketSnapshot, mark: dict[str, Any] | None, *, funding_interval_h: float | None
+) -> Derivs:
     # Explicit float fields (not **dict unpacking): the typed model is the whole point — a dict
     # splat would let a float value reach the str `funding_trend` field. funding_zscore/
     # funding_trend are deferred to features/ (they need funding history, not a per-tick plane).
@@ -166,6 +168,7 @@ def _build_derivs(snap: MarketSnapshot, mark: dict[str, Any] | None) -> Derivs:
         global_ls_5m=_num(snap.optional("global_ls_5m")),
         top_ls_acct_5m=_num(snap.optional("top_ls_acct_5m")),
         top_ls_pos_5m=_num(snap.optional("top_ls_pos_5m")),
+        funding_interval_h=funding_interval_h,
     )
 
 
@@ -229,7 +232,7 @@ def build_market_view(
     cross-venue from ``MultiEngine.cross_*``, spot from ``SpotEngine``. No fabricated field — a plane
     the engine did not prove fresh stays ``None``.
     """
-    now = now_ms if now_ms is not None else int(time.time() * 1000)
+    now = now_ms if now_ms is not None else int(clock.now_ms())
     engine = multi.primary
     snap = multi.snapshot(symbol, requested_planes(timeframes))
     mark = snap.optional("mark")
@@ -240,7 +243,7 @@ def build_market_view(
         return None  # no price → no view (never a fabricated one)
     last_price, price_source = quote.price, quote.source
 
-    derivs = _build_derivs(snap, mark)
+    derivs = _build_derivs(snap, mark, funding_interval_h=engine.funding_interval_h(symbol))
     return MarketView(
         symbol=symbol,
         now_ms=now,

@@ -30,6 +30,13 @@ FUNNEL_STAGES: tuple[str, ...] = (
 
 
 def _append_jsonl_line(path: Path, line: str) -> None:
+    # Гейт боевой записи — тот же, что у `signal_history` и ленты исходов. Замер 2026-08-02:
+    # 7 строк `TESTUSDT` из 12 в `data/signal_events.jsonl` пришли из verify-скрипта, потому
+    # что гард стоял ТОЛЬКО на пути `signal_history`. Три стока — один гейт.
+    from hunt_core.track.outcomes import refuse_production_write, resolve_ledger_path
+
+    path = resolve_ledger_path(path)
+    refuse_production_write(path)
     rotate_jsonl_if_needed(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:

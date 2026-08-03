@@ -206,12 +206,12 @@ def _run_check_logic() -> tuple[bool | None, str]:
 
 def _log_stale(log_path: Path, *, max_age_s: float) -> bool:
     if TICK_JSONL.exists():
-        age = time.time() - TICK_JSONL.stat().st_mtime
+        age = time.time() - TICK_JSONL.stat().st_mtime  # noqa: TID251 — возраст ЛОКАЛЬНОГО файла по mtime
         if age <= max(120.0, max_age_s * 0.5):
             return False
     if not log_path.exists():
         return True
-    if time.time() - log_path.stat().st_mtime > max_age_s:
+    if time.time() - log_path.stat().st_mtime > max_age_s:  # noqa: TID251 — возраст ЛОКАЛЬНОГО файла по mtime
         return True
     try:
         tail = log_path.read_text(encoding="utf-8", errors="replace")[-15000:]
@@ -253,7 +253,7 @@ def main(argv: list[str] | None = None) -> int:
     _log(f"SESSION_START run_id={run_id} hours={args.hours}", run_dir=run_dir)
 
     _start_watch(interval=args.watch_interval, log_path=watch_log)
-    end_at = time.time() + args.hours * 3600.0
+    end_at = time.time() + args.hours * 3600.0  # noqa: TID251 — длительность сессии супервизора — чистая локальная разность
     log_offset = 0
     tick_offset = TICK_JSONL.stat().st_size if TICK_JSONL.exists() else 0
     pass_n = 0
@@ -261,9 +261,9 @@ def main(argv: list[str] | None = None) -> int:
     restarts = 0
     all_errors: list[str] = []
 
-    while time.time() < end_at:
+    while time.time() < end_at:  # noqa: TID251 — длительность сессии супервизора — чистая локальная разность
         pass_n += 1
-        sleep_s = min(float(args.verify_interval), max(5.0, end_at - time.time()))
+        sleep_s = min(float(args.verify_interval), max(5.0, end_at - time.time()))  # noqa: TID251 — длительность сессии супервизора — чистая локальная разность
         time.sleep(sleep_s)
 
         new_lines, log_offset = _read_log_delta(watch_log, log_offset)
@@ -292,9 +292,9 @@ def main(argv: list[str] | None = None) -> int:
             healthy = True
 
         check_ok: bool | None = None
-        if time.time() - last_check_logic >= args.check_logic_every:
+        if time.time() - last_check_logic >= args.check_logic_every:  # noqa: TID251 — интервал между запусками check_logic — локальная разность
             check_ok, check_tail = _run_check_logic()
-            last_check_logic = time.time()
+            last_check_logic = time.time()  # noqa: TID251 — интервал между запусками check_logic — локальная разность
             if check_ok is None:
                 _log(f"PASS_{pass_n} check_logic=SKIP ({check_tail})", run_dir=run_dir)
             elif not check_ok:

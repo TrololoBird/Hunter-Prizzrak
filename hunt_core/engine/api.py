@@ -43,6 +43,10 @@ _CLOCK_SYNC_GAP_S = 0.4
 # Пересинхронизация раз в час: типичный дрейф кварцевых часов — секунды в сутки, так что час
 # держит сдвиг далеко под порогом тревоги, и это один публичный запрос в час.
 _CLOCK_RESYNC_S = 3600.0
+# Интервал фандинга меняется биржей редко и с предварительным объявлением, поэтому час —
+# не «разумное значение» (I-7), а запас на два порядка против скорости изменения предмета.
+# Стоимость опроса при этом ноль: один запрос на всю вселенную, вес 1.
+_FUNDING_INTERVAL_TTL_S = 3600.0
 # 2 с — шестая часть запаса `_BAR_SETTLE_S = 12 c`, которым полоса эмиссии страхуется от
 # чтения ещё не закрытого бара. Больше этого — и выравнивание начнёт промахиваться.
 _CLOCK_SKEW_ALERT_MS = 2000.0
@@ -133,6 +137,9 @@ class Engine:
         # Последний вердикт по бонду каждого плана — чтобы писать в лог СМЕНУ состояния,
         # а не повторять одно и то же условие каждые CADENCE_PUBLISH_S.
         self._bound_state: dict[str, str] = {}
+        # Интервал фандинга по символам, часы. НЕ план: величина почти статична (биржа меняет
+        # её редко и объявляет заранее), поэтому у неё нет бонда свежести — есть TTL.
+        self._funding_intervals: dict[str, float] = {}
 
     async def start(self) -> None:
         await self._ingest.exchange.load_markets()
@@ -150,6 +157,9 @@ class Engine:
         self._bg.append(asyncio.create_task(self._publish_cadence(), name="engine_cadence"))
         self._bg.append(asyncio.create_task(self._sample_loop_lag(), name="engine_loop_lag"))
         self._bg.append(asyncio.create_task(self._resync_clock_loop(), name="engine_clock_sync"))
+        self._bg.append(
+            asyncio.create_task(self._poll_funding_intervals(), name="engine_funding_intervals")
+        )
         metrics.start_exporter(params.METRICS_PORT)
         LOG.info("engine_started", symbols=len(self._symbols), timeframes=self._timeframes)
 
@@ -177,13 +187,13 @@ class Engine:
         """
         samples: list[float] = []
         for _ in range(_CLOCK_SYNC_SAMPLES):
-            t0 = time.time() * 1000.0
+            t0 = time.time() * 1000.0  # noqa: TID251 — латентность: разность двух локальных отметок, сдвиг сокращается
             try:
                 server_ms = float(await self._ingest.exchange.fetch_time())
             except Exception as exc:  # noqa: BLE001 — источник времени может быть недоступен
                 LOG.warning("engine_clock_sync_probe_failed", error=repr(exc))
                 continue
-            t1 = time.time() * 1000.0
+            t1 = time.time() * 1000.0  # noqa: TID251 — латентность: разность двух локальных отметок, сдвиг сокращается
             samples.append(server_ms - (t0 + t1) / 2.0)
             await asyncio.sleep(_CLOCK_SYNC_GAP_S)
         if not samples:
@@ -216,6 +226,46 @@ class Engine:
         while True:
             await asyncio.sleep(_CLOCK_RESYNC_S)
             await self._sync_clock()
+
+    async def _poll_funding_intervals(self) -> None:
+        """Обновлять карту «символ → интервал фандинга в часах» раз в ``_FUNDING_INTERVAL_TTL_S``.
+
+        Один запрос на всю вселенную (вес 1), поэтому опрос дешёвый, а величина почти
+        статична — биржа меняет интервал редко и объявляет заранее.
+
+        ⚠ Первый проход делается СРАЗУ, до первого сна: до него ``funding_interval_h``
+        отвечает «не измерено», и издержка фандинга у потребителя становится нижней оценкой.
+        Затягивать это состояние на час незачем.
+        """
+        while True:
+            data = await rest.poll_funding_intervals(self._ingest.exchange)
+            if data:
+                self._funding_intervals = data
+                buckets: dict[float, int] = {}
+                for hours in data.values():
+                    buckets[hours] = buckets.get(hours, 0) + 1
+                LOG.info(
+                    "engine_funding_intervals_refreshed",
+                    symbols=len(data),
+                    # Распределение печатается умышленно: дефолт 8 ч был неверен для 60%
+                    # вселенной (замер 2026-08-03), и это тот факт, который должен быть
+                    # виден в логе, а не выясняться следующим аудитом.
+                    hours_histogram={f"{k:g}h": v for k, v in sorted(buckets.items())},
+                )
+            else:
+                LOG.warning(
+                    "engine_funding_intervals_empty",
+                    note="интервал фандинга не измерен — издержка удержания станет нижней оценкой",
+                )
+            await asyncio.sleep(_FUNDING_INTERVAL_TTL_S)
+
+    def funding_interval_h(self, symbol: str) -> float | None:
+        """Измеренный интервал фандинга в часах, либо ``None`` — НИКОГДА не дефолт 8 ч.
+
+        Подставлять восьмёрку здесь нельзя: у потребителя (`track/equity.py`) она неотличима
+        от измеренного значения, а неверна она была для 60% вселенной.
+        """
+        return self._funding_intervals.get(symbol)
 
     async def _publish_cadence(self) -> None:
         """Публиковать ИЗМЕРЕННЫЙ темп планов и громко ругаться на недостижимый бонд.
@@ -361,7 +411,7 @@ class Engine:
 
     async def _seed_symbol(self, symbol: str, *, sem: asyncio.Semaphore | None = None) -> None:
         """REST-seed every timeframe's kline plane for one symbol (startup + dynamic ``add_symbol``)."""
-        now = int(time.time() * 1000)
+        now = int(clock.now_ms())
         ex = self._ingest.exchange
         st = self._ingest.state_for(symbol)
         gate = sem or asyncio.Semaphore(len(self._timeframes) or 1)
@@ -458,7 +508,7 @@ class Engine:
             if bsym is None:
                 return
             st = self._ingest.state_for(symbol)
-            now = int(time.time() * 1000)
+            now = int(clock.now_ms())
             oi = await rest.poll_open_interest(ex, symbol)
             if oi is not None:
                 st.put_value("oi", oi, PlaneStamp(Source.REST_SEED, now, now, bound))
@@ -609,7 +659,7 @@ class Engine:
         parallel copy of ccxt's data; nothing fabricated — an unresolved/stale plane lands in
         ``not_ready``.
         """
-        now = int(time.time() * 1000)
+        now = int(clock.now_ms())
         st = self._ingest.states.get(symbol)
         if st is None:
             return MarketSnapshot(symbol, now, {}, (f"{symbol}: not tracked",))
@@ -658,7 +708,7 @@ class Engine:
         stamps, never a fabricated age.
         """
         st = self._ingest.states.get(symbol)
-        return st.ages(int(time.time() * 1000)) if st is not None else {}
+        return st.ages(int(clock.now_ms())) if st is not None else {}
 
     async def close(self) -> None:
         if self._watchdog is not None:

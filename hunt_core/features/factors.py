@@ -90,7 +90,6 @@ def build_factor_panel(row: dict[str, Any]) -> dict[str, float | None]:
                     panel["flow_taker"] = _clamp11((tr - 1.0) * 2.0)
             except (TypeError, ValueError):
                 LOG.debug("taker_ratio float conversion failed", exc_info=True)
-                pass
 
     oi_z = market.get("oi_z")
     if oi_z is not None:
@@ -100,7 +99,6 @@ def build_factor_panel(row: dict[str, Any]) -> dict[str, float | None]:
                     panel["deriv_oi_z"] = _clamp11(oz / 3.0)
             except (TypeError, ValueError):
                 LOG.debug("oi_z float conversion failed", exc_info=True)
-                pass
 
     # Полоса `market["funding_pct"]` снята 2026-07-26: писателя нет НИ ОДНОГО во всём дереве
     # (`rg` по присваиванию ключа — ноль совпадений), это наследие дословарного пути. Единственный

@@ -157,7 +157,6 @@ def _coil_prebreak_checks(row: dict[str, Any], market: dict[str, Any], price: fl
             price_near = distance < 0.02 and price < vah_f * 1.005
         except (TypeError, ValueError):
             LOG.debug("vah_f float conversion failed in _coil_prebreak_checks", exc_info=True)
-            pass
     vol_ratio = r5.get("vol_ratio")
     if vol_ratio is not None:
         try:
@@ -165,7 +164,6 @@ def _coil_prebreak_checks(row: dict[str, Any], market: dict[str, Any], price: fl
             vol_dry = float(vol_ratio) < 0.7 and float(vol_ratio) > 0
         except (TypeError, ValueError):
             LOG.debug("vol_ratio float conversion failed in _coil_prebreak_checks", exc_info=True)
-            pass
     bid_abs = _bool_market(row, "map_accum_bid_absorption")
     return price_near, vol_dry, bid_abs
 
@@ -224,7 +222,6 @@ def evaluate_manipulation_fusion(row: dict[str, Any]) -> ManipulationAssessment:
             above_vah = price > float(vah)
         except (TypeError, ValueError):
             LOG.debug("vah float conversion failed in evaluate_manipulation_fusion", exc_info=True)
-            pass
     near_top = pos >= 0.85 or above_vah
     if _apply_check(checks, check_sources, "pos_near_high", near_top, "vp_range"):
         predump += 1.0

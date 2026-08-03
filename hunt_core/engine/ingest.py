@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import random
-import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -21,6 +20,7 @@ import structlog
 
 from hunt_core.engine import freshness, params, rest
 from hunt_core.engine.state import PlaneStamp, Source, SymbolState
+from hunt_core import clock
 
 LOG = structlog.get_logger(__name__)
 
@@ -36,7 +36,7 @@ def backoff_delay_s(attempt: int) -> float:
 
 
 def _now_ms() -> int:
-    return int(time.time() * 1000)
+    return int(clock.now_ms())
 
 
 class Ingest:
@@ -128,7 +128,16 @@ class Ingest:
         """Force a clean reconnect: cancel loops, drop the frozen client, respawn on a fresh one.
 
         Invoked by the health watchdog when the whole feed goes silent (ccxt reports ``errors=0``).
-        The ``last_frame_ms`` dict identity is preserved so the watchdog keeps observing. Holds
+
+        ⚠ ``last_frame_ms`` ЗДЕСЬ ОЧИЩАЕТСЯ, и это не мелочь для вотчдога. Прежняя редакция
+        этой строки обещала, что «identity словаря сохранена, поэтому вотчдог продолжает
+        наблюдать»: identity — да, СОДЕРЖИМОЕ — нет. На пустом словаре ``feed_silence_s``
+        возвращал ``None``, вотчдог писал в гейдж ``0.0`` и не брал ветку реконнекта, то есть
+        становился ОДНОРАЗОВЫМ: блэкаут, переживший первый реконнект, был невидим. Починено
+        2026-08-02 не здесь, а у наблюдателя — ``health.py::Watchdog`` держит монотонную
+        отметку последнего доказательства жизни, которая эту очистку переживает.
+
+        Holds
         ``_mutation_lock`` across the whole teardown→respawn so an ``add_symbol`` spawn cannot land in
         the ``gather()``→``clear()`` window and get orphaned (untracked + uncancellable).
         """

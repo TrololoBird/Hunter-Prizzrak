@@ -100,7 +100,7 @@ def fetch_full_history(
 
     cache_file = cache_path(config.symbol, config.timeframe, version)
     existing = pl.DataFrame()
-    t_start = time.time()
+    t_start = time.time()  # noqa: TID251 — секундомер загрузки истории: разность двух локальных отметок
 
     # ── incremental: start after last cached bar ────────────
     if cache_file.exists():
@@ -174,7 +174,7 @@ def fetch_full_history(
     df.write_parquet(cache_file)
 
     # ── write metadata ──────────────────────────────────────
-    duration = time.time() - t_start
+    duration = time.time() - t_start  # noqa: TID251 — секундомер загрузки истории: разность двух локальных отметок
     first_ts = int(df["timestamp"].min())
     last_ts = int(df["timestamp"].max())
     n_dupes = len(all_bars) - len(new_df)  # bars lost to dedup

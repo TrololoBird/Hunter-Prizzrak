@@ -390,7 +390,7 @@ async def collect(symbols: list[str]) -> list[dict]:
     ex = ccxtpro.binanceusdm({"options": {"defaultType": "swap"}, "enableRateLimit": True})
     await ex.load_markets()
     rows: list[dict] = []
-    t_start = time.time()
+    t_start = time.time()  # noqa: TID251 — секундомер прогресса: разность двух локальных отметок
     try:
         for sym in symbols:
             tier: dict[str, list[list[float]]] = {}
@@ -431,7 +431,7 @@ async def collect(symbols: list[str]) -> list[dict]:
                     if m:
                         rows.append(m)
             print(f"{sym}: зон промерено {len([r for r in rows if r['symbol'] == sym])} "
-                  f"({time.time() - t_start:.0f}s)", flush=True)
+                  f"({time.time() - t_start:.0f}s)", flush=True)  # noqa: TID251 — секундомер прогресса: разность двух локальных отметок
     finally:
         await ex.close()
     return rows
@@ -663,7 +663,11 @@ def report(rows: list[dict], write: bool) -> None:
     say("| символ | ТФ | баров | источник | корзины | окно ±2 | окно ±1 |")
     say("|---|---|---|---|---|---|---|")
     for r in worst:
-        def f(k: str) -> str:
+        def f(k: str, r: dict = r) -> str:  # noqa: B006 — r связан значением, см. ниже
+            # `r` связан значением по умолчанию, а не захвачен замыканием (ruff B023):
+            # иначе все строки таблицы напечатались бы по последнему элементу `worst`,
+            # как только вызов `f` окажется отложенным. Сейчас он синхронный, но
+            # правильность отчёта не должна держаться на порядке исполнения.
             v = r.get(k)
             return f"{v:.1f}%" if v is not None else "—"
         say(f"| {r['symbol'].split('/')[0]} | {r['tf']} | {r['bars']} | "

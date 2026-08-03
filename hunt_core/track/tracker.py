@@ -976,7 +976,7 @@ def close_signal(
         del history[:len(history) - 1000]
     if archive:
         from hunt_core.track.outcomes import (
-            ProductionWriteUnderTestError,
+            ProductionLedgerWriteRefused,
             append_outcome_record,
             kpi_bucket,
         )
@@ -984,10 +984,10 @@ def close_signal(
 
         try:
             append_outcome_record(SIGNAL_HISTORY, {**record, "kpi_bucket": kpi_bucket(record)})
-        except ProductionWriteUnderTestError:
+        except ProductionLedgerWriteRefused:
             # ⚠ НЕ ГЛУШИТЬ. Широкий `except` здесь ровно 17 внутренних вызовов close_signal
             # превращал в тихую запись фикстур в боевой леджер — 3423 строки из 3722.
-            # Пусть тест падает: это единственное, что делает утечку заметной автору.
+            # Пусть вызывающий падает: это единственное, что делает утечку заметной автору.
             raise
         except Exception:  # noqa: BLE001
             _LOG.exception("outcome record append failed")

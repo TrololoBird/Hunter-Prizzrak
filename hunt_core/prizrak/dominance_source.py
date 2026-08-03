@@ -47,7 +47,8 @@ def _read_snapshots() -> list[dict[str, Any]]:
             return []
         data = serde.loads(DOMINANCE_CACHE.read_text())
         return data if isinstance(data, list) else []
-    except Exception:
+    except Exception as exc:
+        log.warning("dominance_cache_unreadable", path=str(DOMINANCE_CACHE), error=repr(exc))
         return []
 
 
@@ -89,7 +90,7 @@ def _parse_global(payload: dict[str, Any]) -> dict[str, float] | None:
     if total <= 0:
         return None
     total3 = total * max(0.0, 1.0 - (btc_d + eth_d) / 100.0)
-    return {"ts_ms": time.time() * 1000.0, "btc_d": btc_d, "eth_d": eth_d, "total3": total3, "total": total}
+    return {"ts_ms": time.time() * 1000.0, "btc_d": btc_d, "eth_d": eth_d, "total3": total3, "total": total}  # noqa: TID251 — штамп СОБСТВЕННОГО снимка кэша; читается локальным же now в этом файле
 
 
 async def _fetch_stable_cd(session: Any, total_mcap: float) -> float | None:
@@ -110,7 +111,8 @@ async def _fetch_stable_cd(session: Any, total_mcap: float) -> float | None:
             return None
         stable_cap = sum(float(r.get("market_cap") or 0.0) for r in rows if isinstance(r, dict))
         return stable_cap / total_mcap * 100.0 if stable_cap > 0 else None
-    except Exception:
+    except Exception as exc:
+        log.warning("stablecoin_dominance_parse_failed", error=repr(exc))
         return None
 
 
@@ -123,7 +125,7 @@ async def refresh_dominance(*, ttl_s: int = _DEFAULT_TTL_S) -> None:
     snaps = _read_snapshots()
     if snaps:
         try:
-            if (time.time() * 1000.0 - float(snaps[-1]["ts_ms"])) < ttl_s * 1000:
+            if (time.time() * 1000.0 - float(snaps[-1]["ts_ms"])) < ttl_s * 1000:  # noqa: TID251 — TTL против собственного штампа выше — пара локальных отметок
                 return
         except Exception as exc:  # noqa: BLE001 — битый штамп: считаем кэш просроченным
             # Проваливаемся к запросу — это безопасная сторона. Но битый ``ts_ms`` означает,
@@ -197,7 +199,8 @@ def read_cached_changes_24h() -> dict[str, float] | None:
         if t3_prior <= 0:
             return None
         total3_change = (t3_now - t3_prior) / t3_prior * 100.0
-    except Exception:
+    except Exception as exc:
+        log.warning("dominance_delta_failed", error=repr(exc))
         return None
     out = {"btc_d_change_24h": round(btc_d_change, 4), "total3_change_24h": round(total3_change, 4)}
     # ETH.D — снимок его несёт с самого начала (``_parse_global``), а дельту не считал никто, так

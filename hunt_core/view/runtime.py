@@ -78,7 +78,21 @@ class MarketRuntime:
             # товары (XAG, XAU, SPY, CL…), а потребители глубже по стеку знают только строку
             # -символ и биржевой ручки не держат. Без реестра трекер не может отличить
             # серебро от криптоперпа и заводит по нему сделку.
-            register_underlyings_from_markets(markets.values())
+            registered = register_underlyings_from_markets(markets.values())
+            LOG.info("underlyings_registry_ready", symbols=registered)
+        else:
+            # ⚠ МОЛЧАТЬ ЗДЕСЬ НЕЛЬЗЯ. Пустой реестр не отключает торговлю — `is_crypto_symbol`
+            # намеренно fail-open (глушить BTC хуже, чем пропустить одну акцию), — поэтому
+            # снаружи такой отказ НЕОТЛИЧИМ от здорового старта: карточки идут, трекер
+            # принимает всё подряд, и токенизированная акция проезжает как криптоперп.
+            # Замер 2026-08-03: не крипта — 154 перпа из 848 (18%), из них 131 EQUITY.
+            LOG.error(
+                "underlyings_registry_empty",
+                note=(
+                    "реестр классов актива не заполнен: гейт `is_crypto_symbol` fail-open, "
+                    "и не-крипта (18% вселенной) будет допущена к сделкам как криптоперп"
+                ),
+            )
         if self._spot is not None:
             await self._spot.start()
 

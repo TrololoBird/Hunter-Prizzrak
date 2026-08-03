@@ -24,6 +24,7 @@ from hunt_core.data.tick_jsonl import ensure_fusion_lifecycle_fields
 from hunt_core.data.universe import PINNED_SYMBOLS
 from hunt_core.deliver.digest import get_advisory_digest
 from hunt_core.deliver.telegram import TelegramBroadcaster
+from hunt_core.domain.quality import DataNotReady
 from hunt_core.engine import metrics
 from hunt_core.errors import defensive_exc_types
 from hunt_core.features.build import prepared_cache_stats
@@ -51,6 +52,12 @@ from hunt_core.track.tracker import (
 )
 from hunt_core.prizrak.zone_watch import evaluate_zone_watch
 from hunt_core.view.runtime import MarketRuntime
+
+#: Разделение отказов ЗА ТИК: штатная нехватка данных против дефекта кода. Считается
+#: отдельно, потому что смешение этих двух и БЫЛО инцидентом — настоящий `ValueError:
+#: min() arg is empty` месяцами читался как `watch_symbol_data_reject`. Сбрасывается
+#: в начале каждого тика; печатается в его конце строкой `tick_reject_split`.
+_tick_counters: dict[str, int] = {"data_reject": 0, "code_error": 0}
 
 
 def _compact(symbol: str) -> str:
@@ -170,6 +177,7 @@ async def run_tick(
     # итогом с момента запуска. Без этого вызова счётчик копился бесконечно, а его
     # докстрока утверждала «вызывается в начале тика» — вызывающего не существовало.
     reset_substitution_counts()
+    _tick_counters.update(data_reject=0, code_error=0)
     now = clock.now_utc()
     exchange = rt.multi.primary.exchange
     rows: list[dict[str, Any]] = []
@@ -199,13 +207,34 @@ async def run_tick(
             except TimeoutError:
                 LOG.warning("watch_symbol_timeout", symbol=sym, timeout_s=symbol_timeout_s)
                 return sym, _error_row(sym, "symbol_tick_timeout", now), None
+            except DataNotReady as exc:
+                # ШТАТНАЯ нехватка данных: символ не прогрет, план не поспел, окно коротко.
+                # Отдельная строка и отдельный уровень — это НЕ дефект, и трасса не нужна.
+                _tick_counters["data_reject"] += 1
+                LOG.info(
+                    "watch_symbol_data_reject", symbol=sym, reason=exc.reason, detail=exc.detail
+                )
+                return sym, _error_row(sym, f"not_ready:{exc.reason}", now), None
             except defensive_exc_types(asyncio.IncompleteReadError) as exc:
-                # ⚠ `exc_info` здесь ОБЯЗАТЕЛЕН, а не «для отладки». Символ вылетает из тика
-                # целиком, то есть это отказ, а не деградация; без трассы сообщение
-                # `ValueError('max() iterable argument is empty')` не указывает НИ НА ЧТО —
-                # `max()` в дереве призрака десятки. Живой прогон 2026-08-01 дал 7 таких
-                # отказов по XAUUSDT/XAGUSDT, и найти место по логу было нельзя.
-                LOG.warning("dump_symbol_failed", symbol=sym, error=repr(exc), exc_info=exc)
+                # ⚠ ВСЁ ОСТАЛЬНОЕ — ОШИБКА КОДА, И НАЗЫВАЕТСЯ ОНА ТАК ЖЕ ПРЯМО.
+                #
+                # Ровно здесь жил измеренный инцидент: настоящий `ValueError: min() arg is
+                # empty` месяцами печатался как `watch_symbol_data_reject`, то есть дефект
+                # был неотличим от штатной нехватки данных (замеры 8/18, 6/52, 6/51 отказов
+                # на трёх прогонах — по логу нельзя было сказать, что из этого баг).
+                #
+                # `exc_info` ОБЯЗАТЕЛЕН, а не «для отладки»: символ вылетает из тика целиком,
+                # и без трассы сообщение `ValueError('max() iterable argument is empty')` не
+                # указывает НИ НА ЧТО — `max()` в дереве призрака десятки. Живой прогон
+                # 2026-08-01 дал 7 таких отказов по XAUUSDT/XAGUSDT, и найти место было нельзя.
+                _tick_counters["code_error"] += 1
+                LOG.error(
+                    "watch_symbol_code_error",
+                    symbol=sym,
+                    error=repr(exc),
+                    exc_type=type(exc).__name__,
+                    exc_info=exc,
+                )
                 return sym, _error_row(sym, repr(exc), now), None
             if nav is None:
                 return sym, _error_row(sym, "not_ready", now), None
@@ -492,6 +521,14 @@ async def run_tick(
         from hunt_core.runtime.tick_state import hunt_scan_store
 
         hunt_scan_store().put_many(rows)
+        # ⚠ Разделение печатается КАЖДЫЙ тик, даже нулевое. Смысл строки в том, чтобы
+        # `code_error > 0` был виден сразу и без грепа по трассам: именно незаметность
+        # дефекта среди штатных отказов и была инцидентом, который эта правка закрывает.
+        LOG.info(
+            "tick_reject_split",
+            data_reject=_tick_counters["data_reject"],
+            code_error=_tick_counters["code_error"],
+        )
         _tick_success = True
         return rows
     finally:
@@ -529,8 +566,24 @@ def _settle_native_results(
     for sym, res in zip(ordered, results, strict=True):
         if isinstance(res, asyncio.CancelledError):
             raise res
-        if isinstance(res, BaseException):
-            LOG.warning("snapshot_unhandled_exc", symbol=sym, error=repr(res))
+        if isinstance(res, DataNotReady):
+            # Долетело мимо `_native_one` (например, поднято уже после его try) — но это
+            # всё равно ШТАТНАЯ нехватка, и путать её с дефектом нельзя и здесь.
+            _tick_counters["data_reject"] += 1
+            LOG.info("watch_symbol_data_reject", symbol=sym, reason=res.reason, detail=res.detail)
+            settled[sym] = (_error_row(sym, f"not_ready:{res.reason}", now), None)
+        elif isinstance(res, BaseException):
+            # ⚠ Это исключение вылетело ЗА пределы каченного набора `_native_one` — то есть
+            # заведомо не то, что кто-то предвидел. Уровень ERROR и трасса обязательны:
+            # прежний WARNING без `exc_info` давал `repr` без единого указания на место.
+            _tick_counters["code_error"] += 1
+            LOG.error(
+                "snapshot_unhandled_exc",
+                symbol=sym,
+                error=repr(res),
+                exc_type=type(res).__name__,
+                exc_info=res,
+            )
             settled[sym] = (_error_row(sym, repr(res), now), None)
         else:
             _sym, err_row, nav = res

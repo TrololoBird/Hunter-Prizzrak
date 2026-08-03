@@ -80,9 +80,15 @@ def add_microstructure_features(df: pl.DataFrame) -> pl.DataFrame:
         denom = (pl.col("bid_qty") + pl.col("ask_qty")).clip(lower_bound=1e-9)
         result = result.with_columns(
             [
+                # ⚠ Было `.fill_nan(0.0)` — а НОЛЬ здесь означает «стакан идеально
+                # сбалансирован», то есть измеренный факт. NaN на этом выражении может
+                # прийти только из нечисловых bid_qty/ask_qty, и объявлять такой случай
+                # балансом — подмена неизвестного правдоподобным (I-6, тот же класс, что
+                # `wilder_mean`). Ветка `else` ниже уже умеет говорить «данных нет»
+                # (`tob_imbalance_data_missing`); здесь честный ответ — null.
                 ((pl.col("bid_qty") - pl.col("ask_qty")) / denom)
                 .clip(-1.0, 1.0)
-                .fill_nan(0.0)
+                .fill_nan(None)
                 .alias("tob_imbalance"),
             ]
         )

@@ -25,13 +25,24 @@
 """
 from __future__ import annotations
 
+import os
 import sys
+import tempfile
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+# ⚠ ОБЪЯВИТЬ ПЕСОЧНИЦУ ДО ПЕРВОГО ВЫЗОВА ТРЕКЕРА. Проверка `check_armed_expires` гоняет
+# НАСТОЯЩИЙ `evaluate_levels`, а тот закрывает сделку через `close_signal(archive=True)` —
+# то есть дописывает боевые `signal_history.jsonl`, `signal_events.jsonl` и ленту исходов.
+# Замер 2026-08-02: так сюда и попали 3 строки `TESTUSDT` из 4 в истории сигналов и 7 из 12
+# в ленте событий. Гард 2026-07-27 этого не видел: он ключевался на `PYTEST_CURRENT_TEST`, а
+# pytest из проекта удалён — сторож остался у двери, которой больше нет.
+_SANDBOX = tempfile.mkdtemp(prefix="hunt_verify_ledger_")
+os.environ["HUNT_LEDGER_SANDBOX"] = _SANDBOX
 
 from hunt_core import serde  # noqa: E402
 from hunt_core.data.lake import _merge_tracker_state  # noqa: E402
@@ -218,6 +229,7 @@ def check_armed_expires() -> None:
 
 def main() -> int:
     live = _live_state()
+    print(f"леджеры отведены в песочницу: {_SANDBOX}")
     print("=== 1. слияние состояния не теряет правки других писателей")
     check_merge_keeps_other_writers(live)
     print("\n=== 2. регистрация не затирает уже объявленную сделку")

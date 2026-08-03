@@ -11,7 +11,10 @@ _FEATURE_STACK: tuple[str, ...] = (
     "polars_ta",
     "polars_ols",
     "polars_ds",
-    # polars-trading is optional (fallbacks in research_plugins.py)
+    # ⚠ `polars_trading` здесь не значится не потому, что «опционален» — так гласил
+    # прежний комментарий, — а потому, что 2026-08-03 удалён совсем. Пакет не был объявлен
+    # ни в pyproject, ни в uv.lock и не стоял в окружении, то есть «фоллбэк» в
+    # research_plugins.py был единственным исполнявшимся путём с самого начала.
 )
 
 

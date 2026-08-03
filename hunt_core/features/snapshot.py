@@ -17,7 +17,6 @@ from hunt_core.data.completeness import (
     series_z_strict,
 )
 from hunt_core.features.candle_patterns import candle_pattern_snapshot
-from hunt_core.features.chart_patterns import chart_pattern_snapshot
 from hunt_core.features.pivots import _pivot_rows, rsi_trendline_break, with_spec_columns
 from hunt_core.features.polars_ta_bridge import rsi_series as _rsi_series
 from hunt_core.toolkit.trend import legacy_trend_label, trend_from_snapshot
@@ -129,7 +128,6 @@ def distribution_stats(df: Any, *, idx: int = -1) -> dict[str, float]:
             out["return_zscore"] = round(series_z_strict(ret_window, field="return_zscore"), 2)
         except (DataIncompleteError, TypeError, ValueError):
             LOG.debug("distribution_stats return_zscore failed", exc_info=True)
-            pass
 
     skew, kurt = _return_skew_kurt(ret_window)
     if skew is not None:
@@ -208,7 +206,8 @@ def btc_beta_1h(sym_work_1h: Any, btc_work_1h: Any, *, lookback: int = 48) -> fl
         )
         beta = float(result["coef"].struct.field("x")[0])
         return round(beta, 4)
-    except Exception:
+    except Exception:  # noqa: BLE001 — внешний плагин polars_ols, форма API дрейфует
+        # DEBUG намеренно: прежняя форма вызова падала КАЖДЫЙ тик, и WARNING залил бы лог.
         LOG.debug("btc_beta_1h polars_ols failed", exc_info=True)
         return None
 
@@ -513,7 +512,6 @@ def tf_snapshot(
     closed: bool = False,
     rsi_trendline: bool = False,
     hidden_stoch_div: bool = False,
-    chart_patterns: bool = False,
     candle_patterns: bool = False,
 ) -> dict[str, Any]:
     if df is None or df.is_empty():
@@ -689,11 +687,6 @@ def tf_snapshot(
             }
         ),
         "closed_bar": closed and df.height >= 2,
-        **(
-            chart_pattern_snapshot(df.slice(0, df.height + idx + 1 if idx < 0 else idx + 1))
-            if chart_patterns
-            else {}
-        ),
     }
 
 

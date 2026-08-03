@@ -15,7 +15,7 @@ def _archive_if_expired(path: Path, *, max_age_days: int = _RETENTION_DAYS) -> N
         if not path.exists():
             return
         mtime = path.stat().st_mtime
-        age_s = time.time() - mtime
+        age_s = time.time() - mtime  # noqa: TID251 — возраст ЛОКАЛЬНОГО файла по его mtime: обе отметки локальные, сдвиг сокращается
         if age_s > max_age_days * 86400:
             archive_dir = path.parent / "archive"
             archive_dir.mkdir(parents=True, exist_ok=True)

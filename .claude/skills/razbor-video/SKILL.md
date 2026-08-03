@@ -97,5 +97,10 @@ the backtest dataset should carry. Reference sample: `short_manip_gtc_img2700.ra
 ### Rules
 - **Never commit** the video or the keyframes (image/binary bloat) — only transcript, segments,
   manifest/INDEX, and the `.razbor.md`.
-- Keep the module label correct; never file a Prizrak level разбор under manipulations or vice versa.
-- Reference sample: `research/manipulations_corpus/short_manip_gtc_img2700.razbor.md`.
+- Модуль здесь ОДИН (ПРИЗРАК), поэтому «положить не в тот корпус» больше некуда: любой разбор
+  идёт в `research/prizrak_corpus/`.
+- Образец формата — любой существующий файл `research/prizrak_corpus/*.razbor.md` (взять свежий
+  по `git log`). ⚠ Прежде здесь стояла ссылка на
+  `research/manipulations_corpus/short_manip_gtc_img2700.razbor.md` (**удалён 2026-07-31**) —
+  она пережила вырез корпуса и противоречила разделу «1. Check the content is PRIZRAK» этого же
+  файла. Имя оставлено намеренно, как некролог: так его не заведут обратно по памяти.

@@ -81,7 +81,7 @@ def _tail_value_signature(row: dict[str, object]) -> tuple[_FrameCacheValue, ...
         except (TypeError, ValueError):
             values.append(None)
             continue
-        values.append(None if value != value else value)
+        values.append(value if math.isfinite(value) else None)  # NaN и ±inf → нет значения
     return tuple(values)
 
 
@@ -1216,7 +1216,7 @@ def factor_panel_from_frames(
             v = float(df[col][-1])
         except (TypeError, ValueError):
             return None
-        return v if v == v else None
+        return v if math.isfinite(v) else None  # NaN и ±inf → нет значения
 
     row: dict[str, Any] = {
         "timeframes": {

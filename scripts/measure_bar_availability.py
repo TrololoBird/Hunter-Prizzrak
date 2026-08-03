@@ -24,6 +24,7 @@ import time
 
 import structlog
 
+from hunt_core import clock
 from hunt_core.engine.api import Engine
 
 LOG = structlog.get_logger(__name__)
@@ -84,7 +85,19 @@ async def _collect(
     deadline = time.monotonic() + minutes * 60.0
     while time.monotonic() < deadline:
         await asyncio.sleep(_POLL_S)
-        now_ms = time.time() * 1000.0
+        # ⚠ ЧАСЫ БИРЖЕВЫЕ, НЕ ЛОКАЛЬНЫЕ. `_observe_delay` вычитает из этого момента
+        # ГРАНИЦУ БАРА (`newest_open + _STEP_MS`) — то есть биржевой штамп. До 2026-08-03
+        # здесь стояло `time.time()`, и вся измеренная задержка была смещена на сдвиг
+        # локальных часов (замер 2026-07-27: +43.4 с против Binance).
+        #
+        # Смещение шло в ОБЕ опасные стороны. Во-первых, `_BAR_SETTLE_S = 12.0` в
+        # `runtime/analyst_assembly.py` выведен ровно из этого замера (med 4.18 с,
+        # max 10.60 с) — то есть из чисел, завышенных на неизвестную величину.
+        # Во-вторых, и это хуже: опережающие локальные часы ДЕЛАЮТ `delay_s` больше,
+        # а значит проверка `delay_s < -1.0` — детектор нарушения I-5 «кадр отдал
+        # незакрытый бар» — маскируется ровно тем сдвигом, ради которого её и писали.
+        # `Engine.start()` уже свёл часы (`_sync_clock`), так что здесь есть что читать.
+        now_ms = clock.now_ms()
         for symbol in symbols:
             newest_open = _newest_closed_open_ms(engine, symbol)
             if newest_open is None:

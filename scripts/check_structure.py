@@ -36,31 +36,56 @@ CORE = ROOT / "hunt_core"
 _ENTRYPOINTS = ("_cli.py", "__main__.py")
 
 
+def _resolve_relative(pkg: str, level: int, module: str | None) -> str | None:
+    """``from ..x import y`` внутри пакета ``a.b.c`` → ``a.b.x``.
+
+    ⚠ УРОВЕНЬ ОТНОСИТЕЛЬНОСТИ ЧИТАЕТСЯ ИЗ AST, А НЕ УГАДЫВАЕТСЯ. До 2026-08-02 обходчик
+    брал только ``node.module`` и пробовал два кандидата: голое имя и «имя от родительского
+    пакета». Для ``from .x import y`` это случайно совпадало с истиной, а для ``from ..x``
+    давало мимо: модуль, достижимый ТОЛЬКО таким импортом, был бы объявлен мёртвым. Именно
+    такая ошибка (граф, не знающий про относительные импорты) однажды уже привела к
+    удалению живого кода. Сейчас в дереве 3 файла с ``from ..`` — они достижимы и другими
+    путями, поэтому ложного срабатывания ещё не случилось; это везение, а не свойство.
+    """
+    if level == 0:
+        return module or ""
+    parts = pkg.split(".") if pkg else []
+    if level - 1 > len(parts):
+        return None  # импорт выше корня пакета — такого модуля не существует
+    base_parts = parts[: len(parts) - (level - 1)]
+    if module:
+        base_parts = [*base_parts, *module.split(".")]
+    return ".".join(base_parts)
+
+
 def _imports(path: pathlib.Path) -> set[str]:
-    """Абсолютные и относительные импорты файла, приведённые к точечным именам."""
+    """Импорты файла, приведённые к АБСОЛЮТНЫМ точечным именам."""
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"))
     except (OSError, SyntaxError):
         return set()
+    pkg = path.parent.relative_to(ROOT).as_posix().replace("/", ".")
     out: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             out.update(a.name for a in node.names)
         elif isinstance(node, ast.ImportFrom):
-            if node.module:
-                out.add(node.module)
+            base = _resolve_relative(pkg, node.level, node.module)
+            if base is None:
+                continue
+            if base:
+                out.add(base)
             # ⚠ `from hunt_core import clock, serde` кладёт САМИ МОДУЛИ в `names`, а не в
             # `module`. Первая редакция обходчика читала только `module` и объявила
             # недостижимыми clock.py и serde.py, которые импортирует половина дерева.
             # Ровно та ошибка, из-за которой прежний сканер мёртвого кода однажды удалил
             # живое: граф обязан идти и по именам тоже.
-            base = node.module or ""
             for alias in node.names:
                 out.add(f"{base}.{alias.name}" if base else alias.name)
     return out
 
 
-def check_reachability() -> list[str]:
+def check_reachability(coverage: dict[str, int] | None = None) -> list[str]:
     """Каждый модуль hunt_core достижим от точки входа по относительным импортам."""
     seen: set[pathlib.Path] = set()
     queue = [CORE / e for e in _ENTRYPOINTS if (CORE / e).exists()]
@@ -73,34 +98,46 @@ def check_reachability() -> list[str]:
         if cur in seen:
             continue
         seen.add(cur)
-        for name in _imports(cur):
-            # Относительный импорт `from .x import y` даёт module="x" — разрешаем от пакета.
-            for cand in (name, f"{cur.parent.relative_to(ROOT).as_posix().replace('/', '.')}.{name}"):
-                target = by_name.get(cand) or by_name.get(f"{cand}.__init__")
-                if target is not None and target not in seen:
-                    queue.append(target)
-                # ⚠ `__init__.py` КАЖДОГО пакета по пути исполняется при импорте подмодуля,
-                # поэтому его импорты — тоже рёбра графа. Без этого модуль, который тянет
-                # только `maps/__init__.py`, объявлялся мёртвым: так ложно всплыли
-                # toolkit/forecast.py и toolkit/archetypes.py.
-                parts = cand.split(".")
-                for depth in range(1, len(parts)):
-                    pkg = by_name.get(".".join(parts[:depth]) + ".__init__")
-                    if pkg is not None and pkg not in seen:
-                        queue.append(pkg)
+        for cand in _imports(cur):
+            target = by_name.get(cand) or by_name.get(f"{cand}.__init__")
+            if target is not None and target not in seen:
+                queue.append(target)
+            # ⚠ `__init__.py` КАЖДОГО пакета по пути исполняется при импорте подмодуля,
+            # поэтому его импорты — тоже рёбра графа. Без этого модуль, который тянет
+            # только `maps/__init__.py`, объявлялся мёртвым: так ложно всплыли
+            # toolkit/forecast.py и toolkit/archetypes.py.
+            parts = cand.split(".")
+            for depth in range(1, len(parts)):
+                pkg = by_name.get(".".join(parts[:depth]) + ".__init__")
+                if pkg is not None and pkg not in seen:
+                    queue.append(pkg)
+    all_modules = list(CORE.rglob("*.py"))
     unreachable = sorted(
         p.relative_to(ROOT).as_posix()
-        for p in CORE.rglob("*.py")
+        for p in all_modules
         if p not in seen and p.name != "__init__.py"
     )
     # Осознанные исключения — вторые точки входа, вызываемые вручную.
     allowed = {"hunt_core/engine/__main__.py"}
+    if coverage is not None:
+        coverage["total"] = len(all_modules)
+        coverage["visited"] = len(seen)
+        coverage["entrypoints"] = sum(1 for e in _ENTRYPOINTS if (CORE / e).exists())
     return [f"недостижим от точки входа: {u}" for u in unreachable if u not in allowed]
 
 
 def main() -> int:
-    reach = check_reachability()
-    print(f"достижимость: {'OK' if not reach else f'{len(reach)} недостижимых'}")
+    # ⚠ ОХВАТ — ЧАСТЬ ОТВЕТА, А НЕ УКРАШЕНИЕ. «Нарушений нет» без числа просмотренных
+    # объектов неотличимо от «ничего не просмотрено»: заниженный охват выглядит как чистый
+    # результат. Здесь это уже кусалось — сканер, не знавший про относительные импорты,
+    # объявлял живое мёртвым, и наоборот.
+    coverage: dict[str, int] = {}
+    reach = check_reachability(coverage)
+    print(
+        f"достижимость: {'OK' if not reach else f'{len(reach)} недостижимых'} "
+        f"(обойдено {coverage.get('visited', 0)} из {coverage.get('total', 0)} модулей "
+        f"от {coverage.get('entrypoints', 0)} точек входа)"
+    )
     for r in reach[:20]:
         print(f"  ✗ {r}")
     if len(reach) > 20:

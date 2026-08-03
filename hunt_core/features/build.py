@@ -11,6 +11,7 @@ already produces the frames + per-TF summaries the tick and deliver layers read.
 """
 from __future__ import annotations
 
+import math
 import threading
 from collections import OrderedDict
 
@@ -166,7 +167,10 @@ def _last_finite(frame: pl.DataFrame | None, col: str) -> float | None:
     if val.len() == 0:
         return None
     out = float(val.item())
-    return out if out == out else None  # NaN-guard
+    # math.isfinite вместо `out == out`: та же защита от NaN, плюс ±inf. Бесконечная
+    # фича — не измерение; остальное дерево её и так отбрасывает (`clean_non_finite`,
+    # `wilder_mean`), здесь она проходила насквозь.
+    return out if math.isfinite(out) else None
 
 
 def _build_factors(

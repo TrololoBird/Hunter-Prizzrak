@@ -480,7 +480,16 @@ def compute_interest_zones(
             # The edge price tests first: long → the box top, short → the box bottom.
             return float(z["hi"] if side == "long" else z["lo"])
 
-        def _course_flags(z: dict[str, Any], *, side: str) -> dict[str, Any]:
+        def _course_flags(
+            z: dict[str, Any], *, side: str, bars: Any = bars
+        ) -> dict[str, Any]:
+            # ⚠ `bars` СВЯЗАН ЗНАЧЕНИЕМ ПО УМОЛЧАНИЮ, а не захвачен замыканием (ruff B023).
+            # Замыкание читает переменную объемлющего ЦИКЛА в момент ВЫЗОВА, а не определения.
+            # Сегодня это безвредно: вызов синхронный и происходит в той же итерации. Но
+            # безвредность держится на порядке исполнения, а не на конструкции — любая
+            # отложенная передача (собрать список функций и вызвать после цикла, уехать в
+            # `asyncio.gather`, в `to_thread`) даст ВСЕМ вызовам последний кадр цикла.
+            # Дефект такого рода не падает, а тихо считает уровни по чужому символу.
             edge = _entry_edge(z, side=side)
             worked = _level_already_worked(bars, level=edge, direction=side)
             saw = detect_level_saw(bars, level=edge)
@@ -1204,23 +1213,14 @@ def _htf_bias(
         if "meso" in struct_by_tier:
             struct_by_tf["1h"] = struct_by_tier["meso"]
 
-    weights: list[tuple[str, float, str]] = [
-        ("1w", cfg.htf_1w_weight, "1w"),
-        ("1d", cfg.htf_1d_weight, "1d"),
-        ("4h", cfg.htf_4h_weight, "4h"),
-        ("1h", cfg.htf_1h_weight, "1h"),
-    ]
-    # Published on EVERY return path (incl. accumulation/distribution/unknown early
-    # returns) so the МТФ render's per-TF weight suffixes never vanish — the main
-    # path added them but the early ones dropped the key (a dead-render gap).
-    weights_pub = {display_key: round(w, 2) for _tf, w, display_key in weights}
-
+    # Голоса считаются по ВСЕМ четырём ТФ: 1ч нужен карточке («📐 МТФ структура») и
+    # слою тайминга. В НАПРАВЛЕНИЕ он не входит — см. _DIRECTION_TFS ниже.
     votes: dict[str, str] = {}
-    for tf_key, _w, display_key in weights:
+    for tf_key in _ALL_TFS:
         tf_struct = struct_by_tf.get(tf_key)
         if not tf_struct:
             continue
-        votes[display_key] = _tier_trend(tf_struct)
+        votes[tf_key] = _tier_trend(tf_struct)
 
     trend_4h = votes.get("4h", "neutral")
     trend_1w = votes.get("1w", "neutral")
@@ -1234,81 +1234,93 @@ def _htf_bias(
     # литерал 1.0 — заявка «покрытие полное» от кода, который покрытие не мерил: цикл ниже,
     # который его накапливает, на этот путь не доходит. Потребитель, желающий дисконтировать
     # вывод по объёму доказательств, получал ложную единицу вместо реальной доли.
-    _cov = sum(w for tf_key, w, _ in weights if struct_by_tf.get(tf_key))
+    # Покрытие — доля НАПРАВЛЕНЧЕСКИХ ТФ, по которым структура вообще посчиталась.
+    # Считается по 1d/4h, а не по всем четырём: прогретый 1ч не является доказательством
+    # направления, и включать его в знаменатель значило бы завышать уверенность.
+    def _coverage() -> float:
+        warm = sum(1 for tf in _DIRECTION_TFS if struct_by_tf.get(tf))
+        return warm / len(_DIRECTION_TFS)
+
+    def _out(bias: str, score: float, **extra: Any) -> dict[str, Any]:
+        decided_by = extra.pop("decided_by", None)
+        return {
+            "bias": bias,
+            "score": round(score, 3),
+            # Доля прогретых НАПРАВЛЕНЧЕСКИХ ТФ (0..1). Прежний ключ нёс сумму весов;
+            # весов больше нет, смысл — покрытие доказательств. Имя сохранено ради
+            # потребителя, желающего дисконтировать вывод по объёму данных.
+            "weight_available": round(_coverage(), 3),
+            "votes": votes,
+            "struct_by_tf": struct_by_tf,
+            # Каким ТФ принято решение. Из прежнего результата это узнать было нельзя,
+            # а при детерминированном приоритете это главный факт вывода.
+            "decided_by": decided_by,
+            **extra,
+        }
+
     if trend_4h == "bull" and (trend_1w == "bear" or trend_1d == "bear"):
-        return {"bias": "neutral", "score": 0.0, "weight_available": round(_cov, 3), "votes": votes, "struct_by_tf": struct_by_tf, "weights": weights_pub, "regime": "accumulation"}
+        return _out("neutral", 0.0, regime="accumulation")
     # Distribution: 4h bear against higher-TF bull → no directional edge
     if trend_4h == "bear" and (trend_1w == "bull" or trend_1d == "bull"):
-        return {"bias": "neutral", "score": 0.0, "weight_available": round(_cov, 3), "votes": votes, "struct_by_tf": struct_by_tf, "weights": weights_pub, "regime": "distribution"}
+        return _out("neutral", 0.0, regime="distribution")
 
-    # All TFs agree or mixed without accumulation — use weighted vote.
-    net = 0.0
-    weight_available = 0.0
-    for tf_key, w, display_key in weights:
-        tf_struct = struct_by_tf.get(tf_key)
-        if not tf_struct:
-            continue
-        trend = votes[display_key]
-        if trend == "neutral":
-            weight_available += w
-            continue
-        if _is_bos_only_trend(tf_struct, trend) and _higher_tf_neutral(struct_by_tf, tf_key, weights):
-            w *= 0.5
-        weight_available += w
-        net += w if trend == "bull" else -w
+    # ── ТРЁХСЛОЙНАЯ СХЕМА (T4.1) ────────────────────────────────────────────────────
+    # Слой 1 «НАПРАВЛЕНИЕ» — только 1d и 4h, в порядке старшинства (_DIRECTION_TFS).
+    # Слой 2 «УРОВЕНЬ» — уровень принадлежит своему ТФ и живёт в setups.py/grid.py.
+    # Слой 3 «ТАЙМИНГ» — 1ч/15м/5м, исполнение; в направлении не участвует ВООБЩЕ.
+    #
+    # Правило детерминированное: побеждает СТАРШИЙ прогретый не-нейтральный ТФ. Взвешенная
+    # сумма снята именно поэтому — она позволяла двум младшим перевесить одного старшего,
+    # то есть отрицала приоритет, ради которого веса и делались монотонными.
+    directional = [
+        (tf, votes.get(tf)) for tf in _DIRECTION_TFS if votes.get(tf) in ("bull", "bear")
+    ]
+    if not directional:
+        # Ни один направленческий ТФ не высказался. Прогретые, но нейтральные — это
+        # ИЗМЕРЕННЫЙ флэт (neutral); ни одного прогретого — это «нет данных» (unknown).
+        warm_any = any(struct_by_tf.get(tf) for tf in _DIRECTION_TFS)
+        return _out("neutral" if warm_any else "unknown", 0.0)
 
-    if weight_available <= 0.0:
-        return {"bias": "unknown", "score": 0.0, "weight_available": 0.0, "votes": votes, "struct_by_tf": struct_by_tf, "weights": weights_pub}
-    # ⚠ Нормировка на ДОСТУПНЫЙ вес — намеренная (см. `confluence/mtf.py::_htf_bias`: «single
-    # warmed HTF can still express a bias, но без прогретых HTF — unknown, не ложный neutral»).
-    # Цена этого решения: прогрет только 1h (вес 0.10 из 1.00) и он бычий → norm = +1.0, то есть
-    # МАКСИМАЛЬНАЯ уверенность с 10% доказательств, и она перебивает порог 0.30 легче, чем
-    # полностью прогретый символ со спорящими ТФ. Порог покрытия здесь НЕ вводится: любое число
-    # было бы непромеренным (I-7). Дисконтировать вывод потребитель может по `weight_available`,
-    # который теперь честен на всех ветках возврата.
-    norm = net / weight_available
-    if norm >= cfg.htf_bias_threshold:
-        bias = "long"
-    elif norm <= -cfg.htf_bias_threshold:
-        bias = "short"
-    else:
-        bias = "neutral"
-    return {
-        "bias": bias,
-        "score": round(norm, 3),
-        "weight_available": round(weight_available, 3),
-        "votes": votes,
-        "struct_by_tf": struct_by_tf,
-        # Per-TF weights so the render can show the score is WEIGHTED, not a flat
-        # 4-TF average (a live −0.60 = −(0.35+0.25) confused a careful reader into
-        # reading it as a mean over four equal TFs). Sourced from cfg → no drift.
-        "weights": weights_pub,
-    }
+    senior_tf, direction = directional[0]
+
+    # Конфликт внутри направленческой пары. Практически недостижим — 1d против 4h уже
+    # перехватывают ветки накопления/распределения выше, — но оставлен явно: правило
+    # «старший побеждает» не должно зависеть от того, что его кто-то перехватил раньше.
+    if any(vote != direction for _tf, vote in directional[1:]):
+        return _out("neutral", 0.0, regime="tf_conflict", decided_by=senior_tf)
+
+    # 1W — КОНТЕКСТ-ФИЛЬТР, а не источник направления: он может ветировать, но не может
+    # задать сторону сам. Курс делает старший ТФ приоритетным для КОНТЕКСТА, а торговое
+    # решение строит от структуры 1d/4h.
+    vote_1w = votes.get("1w")
+    if vote_1w in ("bull", "bear") and vote_1w != direction:
+        return _out("neutral", 0.0, regime="htf_context_veto", decided_by="1w")
+
+    # Уверенность = доля СОГЛАСНЫХ направленческих ТФ. Один 1d при нейтральном 4h → 0.5;
+    # согласные 1d+4h → 1.0. Порог `htf_bias_threshold` остаётся рабочим: подняв его выше
+    # 0.5, оператор отсекает решения по единственному прогретому ТФ.
+    agree = sum(1 for _tf, vote in directional if vote == direction)
+    score = agree / len(_DIRECTION_TFS)
+    signed = score if direction == "bull" else -score
+    if score < cfg.htf_bias_threshold:
+        return _out("neutral", signed, decided_by=senior_tf)
+    return _out("long" if direction == "bull" else "short", signed, decided_by=senior_tf)
 
 
-def _is_bos_only_trend(struct: dict[str, Any], trend: str) -> bool:
-    """True when the trend signal comes purely from BOS/CHoCH, not organic HH/HL/LH/LL."""
-    if trend == "bull":
-        return bool(struct.get("bos_up") or struct.get("choch_bull")) and not bool(struct.get("hh") or struct.get("hl"))
-    if trend == "bear":
-        return bool(struct.get("bos_down") or struct.get("choch_bear")) and not bool(struct.get("lh") or struct.get("ll"))
-    return False
+# ⚠ `_is_bos_only_trend` и `_higher_tf_neutral` удалены 2026-08-03 вместе со взвешенным
+# голосованием: оба обслуживали ТОЛЬКО его (половинный вес голосу, который держится на
+# одном BOS, когда старший ТФ нейтрален). В детерминированной схеме такой скидки нет —
+# голос либо есть, либо нет, а роль «старший нейтрален» играет сам порядок приоритета.
+# Оставить их значило бы держать мёртвые функции, которые выглядят частью правила.
 
 
-def _higher_tf_neutral(
-    struct_by_tf: dict[str, dict[str, Any]],
-    tf_key: str,
-    weights: list[tuple[str, float, str]],
-) -> bool:
-    """Check if the next higher timeframe (in the weight list) is neutral/ranging."""
-    idx = [w[0] for w in weights].index(tf_key)
-    if idx == 0:
-        return False  # 1w is the highest — no context above
-    higher_key = weights[idx - 1][0]
-    higher = struct_by_tf.get(higher_key)
-    if not higher:
-        return False
-    return _tier_trend(higher) == "neutral"
+#: Порядок старшинства ТФ, от старшего к младшему. Единственный источник этого порядка.
+_ALL_TFS: tuple[str, ...] = ("1w", "1d", "4h", "1h")
+#: ТФ, формирующие НАПРАВЛЕНИЕ, в порядке приоритета (T4.1).
+#: ⚠ 1ч сюда не входит СОЗНАТЕЛЬНО: курс использует его как ТФ отработки (прокол/пробой,
+#: реакция от уровня), а не как источник директивного смещения. 1W тоже не входит — он
+#: работает контекст-фильтром (может ветировать, не может задать сторону).
+_DIRECTION_TFS: tuple[str, ...] = ("1d", "4h")
 
 
 def _mk_scale_tier(tf: LadderTF, tier_key: str, cfg: PrizrakConfig) -> ScaleTier:
@@ -1347,9 +1359,42 @@ def _direction_has_slom(
     keys = ("bos_up", "choch_bull") if direction == "long" else ("bos_down", "choch_bear")
 
     def _fresh(s: dict[str, Any]) -> bool:
-        return any(
-            s.get(k) and (s.get(f"{k}_bar_offset") or 99) <= max_bar_offset for k in keys
-        )
+        """Есть ли в ``s`` слом нужного направления, случившийся не дальше ``max_bar_offset``.
+
+        ⚠ ЗДЕСЬ БЫЛА FALSY-ZERO ЦЕПОЧКА (I-6), И ОНА ИНВЕРТИРОВАЛА ГЕЙТ. Стояло
+        ``(s.get(f"{k}_bar_offset") or 99) <= max_bar_offset``. Продюсер
+        (`pipeline/structure.py::_detect_structure`) считает
+        ``bos_up_bar_offset = (_n - 1 - idx_hh)``, то есть **0 означает «сломанный уровень
+        стоит на ПОСЛЕДНЕМ баре»** — самый свежий слом из возможных. А ``0 or 99`` даёт 99,
+        и `99 <= 5` ложно: самый свежий слом объявлялся самым протухшим.
+
+        ЗАМЕР 2026-08-03 (30 символов × 1ч/4ч/1д, 2515 структур, скользящее окно):
+
+            вид слома      всего   offset=0   доля
+            bos_up            54         49   90.7%
+            bos_down          79         67   84.8%
+            choch_bull        45          5   11.1%
+            choch_bear        53          5    9.4%
+            ИТОГО            231        126   54.5%
+
+        Из 5030 проверок направления **83 (1.7%)** меняли вердикт с FALSE на TRUE при
+        честной проверке, и **0** — в обратную сторону. То есть ошибка односторонняя: она
+        только ЗАПРЕЩАЛА контр-трендовый вход, который курс разрешает («для шортов нужен
+        свежий слом структуры на МТФ»), и никогда не разрешала лишнего. Направление
+        безопасное, но вето по признаку «слишком свежий» — это не осторожность, а поломка.
+
+        ⚠ И вывод аудита `windows-2026-07-26.md:53` («проверка свежести не фильтрует»)
+        неверен дважды: она фильтрует CHoCH по-настоящему (25 из 45 и 21 из 53 — за
+        порогом) и одновременно ошибочно отсекает свежие BOS.
+        """
+        for k in keys:
+            if not s.get(k):
+                continue
+            offset = s.get(f"{k}_bar_offset")
+            # `None` = смещение неизвестно; это НЕ «свежий», а «не доказано» → не пускаем.
+            if offset is not None and int(offset) <= max_bar_offset:
+                return True
+        return False
 
     for tier in ("macro", "meso"):
         if _fresh(struct_by_tier.get(tier) or {}):

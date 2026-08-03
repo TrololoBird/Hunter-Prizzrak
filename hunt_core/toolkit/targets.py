@@ -72,7 +72,6 @@ def collect_upward_targets(row: dict[str, Any], price: float) -> tuple[list[floa
                         factors.append("naked_poc")
             except (TypeError, ValueError):
                 LOG.debug("naked_poc float conversion failed", exc_info=True)
-                pass
 
     void_above = market.get("map_void_above")
     if void_above is not None:
@@ -88,7 +87,6 @@ def collect_upward_targets(row: dict[str, Any], price: float) -> tuple[list[floa
                     factors.append("void_path")
         except (TypeError, ValueError):
             LOG.debug("map_void_above float conversion failed", exc_info=True)
-            pass
 
     # Deduplicate targets within 0.1% of each other (first added wins)
     deduped: list[float] = []
@@ -146,7 +144,6 @@ def collect_downward_targets(row: dict[str, Any], price: float) -> tuple[list[fl
                         factors.append("val_magnet")
             except (TypeError, ValueError):
                 LOG.debug("val float conversion failed", exc_info=True)
-                pass
 
     hunt_low = session.get("hunt_low") or session.get("low_24h")
     if hunt_low is not None:
@@ -158,7 +155,6 @@ def collect_downward_targets(row: dict[str, Any], price: float) -> tuple[list[fl
                     factors.append("range_low")
         except (TypeError, ValueError):
             LOG.debug("hunt_low/low_24h float conversion failed", exc_info=True)
-            pass
 
     void_below = market.get("map_void_below")
     if void_below is not None:
@@ -170,7 +166,6 @@ def collect_downward_targets(row: dict[str, Any], price: float) -> tuple[list[fl
                     factors.append("void_path_down")
         except (TypeError, ValueError):
             LOG.debug("map_void_below float conversion failed", exc_info=True)
-            pass
 
     cvd = str(market.get("map_cvd_divergence") or "")
     if cvd == "bearish_div":

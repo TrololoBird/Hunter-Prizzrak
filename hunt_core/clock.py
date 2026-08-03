@@ -37,7 +37,7 @@ def is_synced() -> bool:
 
 def now_ms() -> float:
     """Exchange-corrected epoch milliseconds."""
-    return time.time() * 1000.0 + _offset_ms
+    return time.time() * 1000.0 + _offset_ms  # noqa: TID251 — здесь и определяется коррекция — читать сырые часы обязано именно это место
 
 
 def now_utc() -> datetime:

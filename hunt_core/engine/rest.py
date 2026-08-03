@@ -19,6 +19,7 @@ import structlog
 
 from hunt_core.engine import metrics, params
 from hunt_core.engine.freshness import Bar
+from hunt_core import clock
 
 # --- /futures/data ban backoff (Binance error -1003) ---------------------------------------------
 # Binance IP-bans callers who exceed the /futures/data/* budget, and a call that RETRIES against a
@@ -203,7 +204,7 @@ async def fetch_ohlcv_between(
     # консервативной при любом знаке сдвига; при историческом `end_ms` в прошлом связывает
     # он, и поведение не меняется. Живой путь `fetch_klines_full` чинится позиционно —
     # здесь нельзя, потому что окно задано явно и последний бар может быть законно закрыт.
-    cutoff = min(int(end_ms), int(time.time() * 1000) - interval_ms)
+    cutoff = min(int(end_ms), int(clock.now_ms()) - interval_ms)
     return [b for b in bars if int(b[0]) + interval_ms <= cutoff]
 
 
@@ -335,6 +336,63 @@ async def poll_funding_rates(exchange: Any, symbols: list[str]) -> dict[str, flo
     return out
 
 
+async def poll_funding_intervals(exchange: Any) -> dict[str, float]:
+    """Фактический интервал фандинга по символам, часы — ``{unified_symbol: hours}``.
+
+    Источник — ``fetch_funding_intervals`` (Binance: ``GET /fapi/v1/fundingInfo``, поле
+    ``fundingIntervalHours``). Запрос ОДИН на всю вселенную, вес 1; лимит эндпоинта
+    500 запросов / 5 мин / IP, общий с ``fundingRate``.
+
+    ⚠ ЗАЧЕМ ЭТО ВООБЩЕ. До 2026-08-03 ключ ``funding_interval_h`` читался
+    (`track/equity.py`), но **не писался ни одной строкой в дереве** — классическая фантомная
+    ручка. Чтение всегда сваливалось в дефолт 8 ч.
+
+    ЗАМЕР 2026-08-03 (живой вызов, 743 символа Binance USDⓈ-M):
+    **4 ч — 443 символа, 8 ч — 296, 1 ч — 4.** То есть дефолт 8 ч был неверен для
+    **60% вселенной**, и на этих символах количество интервалов удержания занижалось
+    вдвое (а на четырёх — восьмикратно). Издержка фандинга занижена ⇒ PnL в леджере завышен.
+
+    Fail-loud: отказ запроса — пустой словарь, а не подстановка восьмёрок. Вызывающий
+    обязан отличать «интервал измерен» от «интервала нет» (см. ``Engine.funding_interval_h``).
+    """
+    if not getattr(exchange, "has", {}).get("fetchFundingIntervals"):
+        LOG.warning(
+            "engine_funding_intervals_unsupported",
+            venue=getattr(exchange, "id", "?"),
+            note="интервал фандинга останется неизмеренным — издержка будет нижней оценкой",
+        )
+        return {}
+    try:
+        data = await exchange.fetch_funding_intervals()
+    except Exception as exc:  # noqa: BLE001 — венью может не отдать; молчать нельзя
+        LOG.warning(
+            "engine_funding_intervals_failed", venue=getattr(exchange, "id", "?"), err=str(exc)
+        )
+        return {}
+    out: dict[str, float] = {}
+    for sym, rec in (data or {}).items():
+        if not isinstance(rec, dict):
+            continue
+        # `interval` приходит строкой ccxt ('8h'/'4h'/'1h'); сырое число лежит в
+        # info.fundingIntervalHours. Берём сырое как первичное — оно не требует разбора
+        # формата, который ccxt может поменять между версиями.
+        hours: float | None = None
+        raw = (rec.get("info") or {}).get("fundingIntervalHours")
+        if raw is not None:
+            try:
+                hours = float(raw)
+            except (TypeError, ValueError):
+                hours = None
+        if hours is None:
+            text = str(rec.get("interval") or "").strip().lower()
+            if text.endswith("h") and text[:-1].isdigit():
+                hours = float(text[:-1])
+        if hours is None or hours <= 0.0:
+            continue
+        out[sym] = hours
+    return out
+
+
 async def poll_long_short_ratio(
     exchange: Any, symbol: str, *, timeframe: str = "1h"
 ) -> float | None:
@@ -388,11 +446,11 @@ async def poll_futures_data(
     # должны быть одни — там же, где уже живёт общий ``_BAN_UNTIL_MS``.
     async with _FD_GATE:
         global _FD_LAST_MS
-        wait = (_FD_LAST_MS + params.FUTURES_DATA_SPACING_S * 1000.0) - time.time() * 1000.0
+        wait = (_FD_LAST_MS + params.FUTURES_DATA_SPACING_S * 1000.0) - time.time() * 1000.0  # noqa: TID251 — спейсинг запросов к /futures/data: интервал между СВОИМИ вызовами
         if wait > 0:
             await asyncio.sleep(wait / 1000.0)
-        _FD_LAST_MS = time.time() * 1000.0
-    now_ms = time.time() * 1000.0
+        _FD_LAST_MS = time.time() * 1000.0  # noqa: TID251 — спейсинг запросов к /futures/data: интервал между СВОИМИ вызовами
+    now_ms = time.time() * 1000.0  # noqa: TID251 — спейсинг запросов к /futures/data: интервал между СВОИМИ вызовами
     if now_ms < _BAN_UNTIL_MS:
         return None  # paused during an active -1003 ban — hitting the endpoint would extend it
     fn = getattr(exchange, method, None)

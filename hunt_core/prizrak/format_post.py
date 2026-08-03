@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any
 
 from hunt_core.deliver._labels import fmt_price
 from hunt_core.maps.liquidation import liq_is_synthetic
+from hunt_core.market.symbols import _CRYPTO_UNDERLYINGS, underlying_type_for
 from hunt_core.prizrak.orchestrator import _INTEREST_ZONE_MAX_WIDTH_PCT
 
 if TYPE_CHECKING:
@@ -605,6 +606,13 @@ def _regime_line(structure: dict[str, Any], summary: dict[str, Any]) -> str:
         return "режим: <b>накопление</b> — крупный набирает; шорт против набора"
     if regime == "distribution":
         return "режим: <b>распределение</b> — крупный раздаёт; лонг против раздачи"
+    # Два режима трёхслойной схемы (T4.1). Соседний комментарий выше объясняет, почему их
+    # нельзя сваливать в общий «⏸ ждём»: свёрнутый в безликий neutral информативный
+    # вердикт — потерянное знание, а тут как раз named-причина нейтральности.
+    if regime == "htf_context_veto":
+        return "режим: <b>1W против</b> — старший контекст ветирует сторону 1d/4h"
+    if regime == "tf_conflict":
+        return "режим: <b>спор ТФ</b> — 1d и 4h смотрят в разные стороны"
     if bias == "long":
         return "режим: старшие ТФ <b>вверх</b>"
     if bias == "short":
@@ -691,7 +699,7 @@ def _dominance_token() -> str:
     age_s: float | None = None
     ts_ms = now.get("ts_ms")
     if isinstance(ts_ms, (int, float)) and ts_ms > 0:
-        age_s = max(0.0, time.time() - float(ts_ms) / 1000.0)
+        age_s = max(0.0, time.time() - float(ts_ms) / 1000.0)  # noqa: TID251 — возраст снимка CoinGecko против его ts_ms, проставленного dominance_source локально
     stale_note = ""
     if age_s is None:
         stale_note = " · <i>возраст неизвестен</i>"
@@ -1518,6 +1526,20 @@ def format_prizrak_post(analysis: AnalystReport) -> str:
     header = f"💻 <b>#{html.escape(base)}</b> · Prizrak-bot"
     if price > 0:
         header += f" · <code>{fmt_price(price)}</code>"
+    # ⚠ БЕЙДЖ НЕ-КРИПТЫ. Binance USDⓈ-M листит токенизированные акции и товары; замер
+    # 2026-08-03 по 848 линейным перпам: COIN 694, **EQUITY 131**, COMMODITY 8, HK_EQUITY 7,
+    # INDEX 3, KR_EQUITY 3, PREMARKET 2 — то есть 154 (18%) не крипта. XAU/XAG закреплены в
+    # пиннед-наборе как макро-якоря и потому доходят до карточки, а трекер их к сделкам не
+    # допускает (`track/tracker.py::is_crypto_symbol`). Без пометки оператор видел полноценную
+    # сделку со входом, стопом и целями, неотличимую от крипто-сигнала.
+    #
+    # `None` = реестр ещё не прогрет; это НЕ «крипта», и молчать о таком нельзя — иначе
+    # бейдж исчезал бы именно в окне старта, когда ошибиться легче всего.
+    kind = underlying_type_for(analysis.symbol)
+    if kind is None:
+        header += "\n⚠️ <i>класс актива неизвестен — реестр не прогрет</i>"
+    elif kind not in _CRYPTO_UNDERLYINGS:
+        header += f"\n⚠️ <i>не крипта ({html.escape(kind.lower())}) — только контекст, не сделка</i>"
     action_now = str(summary.get("action") or "").lower()
     has_trade = action_now in {"long", "short"}
     recs = _registry_zones(analysis.symbol)

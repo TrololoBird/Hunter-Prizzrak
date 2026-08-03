@@ -41,6 +41,7 @@ from hunt_core.engine.api import Engine, _DEFAULT_TFS
 from hunt_core.engine.liquidations import liquidation_notional, market_contract_size
 from hunt_core.engine.state import MarketSnapshot, PlaneStamp, Source, SymbolState
 from hunt_core.toolkit.book_math import depth_snapshot_from_book
+from hunt_core import clock
 
 LOG = structlog.get_logger(__name__)
 
@@ -127,7 +128,7 @@ class MultiEngine:
                     except Exception as exc:  # noqa: BLE001 — мёртвая вторичка не топит основную
                         LOG.warning("engine_secondary_markets_unavailable", venue=venue, err=str(exc))
                         continue
-                now = int(time.time() * 1000)
+                now = int(clock.now_ms())
                 venue_state = self._cross[venue]
                 cap = self._cap.get(venue, {})
                 markets = getattr(ex, "markets", None) or {}
@@ -186,7 +187,7 @@ class MultiEngine:
         Binance from the primary engine, secondaries from the cross poll. A stale/absent venue reads
         ``None`` (no data), never a fabricated value, so a divergence is only computed from fresh venues.
         """
-        now = int(time.time() * 1000)
+        now = int(clock.now_ms())
         out: dict[str, float | None] = {}
         pv = self._primary.snapshot(symbol, (primary_plane,)).optional(primary_plane)
         out[_PRIMARY] = float(pv) if isinstance(pv, (int, float)) else None
@@ -232,7 +233,7 @@ class MultiEngine:
         the venue's recent-liquidations window on every cycle (an empty poll is a fresh ``[]``, not
         ``None``). So ``None`` here means "no fresh data", not necessarily "no liquidations".
         """
-        now = int(time.time() * 1000)
+        now = int(clock.now_ms())
         out: dict[str, list[dict[str, Any]] | None] = {}
         prim = self._primary.snapshot(symbol, ("liq",)).optional("liq")
         out[_PRIMARY] = list(prim) if isinstance(prim, list) else None
@@ -283,7 +284,7 @@ class MultiEngine:
             asks = [(float(p), float(q)) for p, q in (prim.get("asks") or [])]
             if bids and asks:
                 snap = depth_snapshot_from_book(bids, asks)
-                snap["fetched_at_ms"] = float(int(time.time() * 1000))
+                snap["fetched_at_ms"] = float(int(clock.now_ms()))
                 out[_PRIMARY] = snap
 
         async def _one(venue: str, ex: Any) -> tuple[str, dict[str, Any]] | None:
@@ -303,7 +304,7 @@ class MultiEngine:
             if not bids or not asks:
                 return None
             snap = depth_snapshot_from_book(bids, asks)
-            snap["fetched_at_ms"] = float(int(time.time() * 1000))
+            snap["fetched_at_ms"] = float(int(clock.now_ms()))
             return venue, snap
 
         results = await asyncio.gather(

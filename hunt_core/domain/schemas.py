@@ -111,12 +111,37 @@ class PreparedSymbol:
     liquidation_cascade_5m: bool | None = None
     funding_rate_zscore_48h: float | None = None
     funding_trend: str | None = None  # "rising" | "falling" | "flat" | None
-    estimated_settle_price: float | None = None
     interest_rate: float | None = None
-    next_funding_time_ms: int | None = None
-    funding_rate_cap: float | None = None
-    funding_rate_floor: float | None = None
-    funding_interval_hours: int | None = None
+    # ⚠ ЗДЕСЬ ЛЕЖАЛИ ПЯТЬ ПОЛЕЙ-СИРОТ. Удалены 2026-08-03: `funding_interval_hours` (T1.2),
+    # затем `estimated_settle_price`, `next_funding_time_ms`, `funding_rate_cap`,
+    # `funding_rate_floor`.
+    #
+    # Проверено ЧЕТЫРЬМЯ независимыми способами, а не одним грепом:
+    #   1. ссылок вне этого файла — ноль;
+    #   2. единственный сайт конструирования (`features/prepare.py::_build_prepared`) их
+    #      не передаёт, то есть продюсера нет;
+    #   3. присваиваний `.поле = ...` нигде нет, а `slots=True` запрещает и завести их
+    #      динамически;
+    #   4. динамический доступ к `PreparedSymbol` существует, но ограничен списком
+    #      `data_readiness.py::REQUIRED_PREPARED_LIVE_FIELDS` (oi_change_pct, ls_ratio,
+    #      global_ls_ratio, taker_ratio, funding_rate) — этих имён там нет.
+    # Класс объект нигде не сериализуется (в `asdict` не попадает, в `data/` не пишется),
+    # поэтому удаление не меняет ни одной формы на диске.
+    #
+    # ПОЧЕМУ УДАЛИТЬ, А НЕ ПОДКЛЮЧИТЬ. Данные бесплатны — `engine/rest.py::
+    # poll_funding_intervals` уже получает `adjustedFundingRateCap`/`Floor` в `rec["info"]`
+    # и выбрасывает их. Но ЧИТАТЕЛЯ у них нет и сегодня: кросс-СИМВОЛЬНОГО сравнения
+    # фандинга в дереве не существует (ни аннуализации, ни нормировки; `regime/
+    # market_regime.py` фандинг вообще не трогает), а `funding_rate_zscore_48h` считается
+    # по СОБСТВЕННОЙ истории символа, где потолок не нужен. Подключить их сейчас значило бы
+    # заменить сироту «объявлено, никто не пишет» на сироту «пишется, никто не читает» —
+    # тот же класс I-6, названный в CLAUDE.md, только другой половиной.
+    #
+    # Когда потребитель появится (ТЗ T4.3 хочет cap для сравнения XAU/XAG с крипто-перпами),
+    # подключение стоит трёх строк по маршруту, проложенному T1.2. ⚠ И тогда правильное
+    # место — `view/models.py::Derivs`, ТИПИЗИРОВАННЫЙ позвоночник, а НЕ этот dataclass:
+    # ADR-0004 увёл тик-путь на типизированные вью, и возврат в легаси-структуру был бы
+    # движением назад. То есть поля здесь не «задел на будущее» — они задел на неверное.
     basis_pct: float | None = (
         None  # (futures - index) / index * 100; + = contango, - = backwardation
     )
