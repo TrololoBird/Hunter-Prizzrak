@@ -152,7 +152,9 @@ def _build_book(snap: MarketSnapshot) -> Book:
     )
 
 
-def _build_derivs(snap: MarketSnapshot, mark: dict[str, Any] | None) -> Derivs:
+def _build_derivs(
+    snap: MarketSnapshot, mark: dict[str, Any] | None, *, funding_interval_h: float | None
+) -> Derivs:
     # Explicit float fields (not **dict unpacking): the typed model is the whole point — a dict
     # splat would let a float value reach the str `funding_trend` field. funding_zscore/
     # funding_trend are deferred to features/ (they need funding history, not a per-tick plane).
@@ -166,6 +168,7 @@ def _build_derivs(snap: MarketSnapshot, mark: dict[str, Any] | None) -> Derivs:
         global_ls_5m=_num(snap.optional("global_ls_5m")),
         top_ls_acct_5m=_num(snap.optional("top_ls_acct_5m")),
         top_ls_pos_5m=_num(snap.optional("top_ls_pos_5m")),
+        funding_interval_h=funding_interval_h,
     )
 
 
@@ -240,7 +243,7 @@ def build_market_view(
         return None  # no price → no view (never a fabricated one)
     last_price, price_source = quote.price, quote.source
 
-    derivs = _build_derivs(snap, mark)
+    derivs = _build_derivs(snap, mark, funding_interval_h=engine.funding_interval_h(symbol))
     return MarketView(
         symbol=symbol,
         now_ms=now,

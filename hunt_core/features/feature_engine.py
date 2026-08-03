@@ -243,6 +243,9 @@ def build_feature_vector_native(
         "range_24h_pct": _coerce_float(sess.get("range_pct_24h")),
         "oi": _coerce_float(derivs.oi),
         "funding_rate": _coerce_float(derivs.funding),
+        # Продюсер `funding_interval_h`. До 2026-08-03 ключ читался в `track/equity.py`, но не
+        # писался НИГДЕ — чтение всегда падало в дефолт 8 ч, неверный для 60% вселенной.
+        "funding_interval_h": _coerce_float(derivs.funding_interval_h),
         "ls_ratio": _coerce_float(derivs.top_ls_pos_5m),
         "global_ls_ratio": _coerce_float(derivs.global_ls_5m),
         "depth_imbalance": _coerce_float(book.depth_imbalance),

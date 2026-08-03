@@ -89,6 +89,11 @@ class Derivs(_View):
     top_ls_pos_5m: float | None = None
     funding_zscore: float | None = None
     funding_trend: str | None = None
+    #: Фактический интервал начисления фандинга, ЧАСЫ. ``None`` = не измерен.
+    #: ⚠ Не подставлять сюда 8.0 «по умолчанию»: замер 2026-08-03 по 743 символам Binance
+    #: дал 4 ч у 443, 8 ч у 296 и 1 ч у 4 — дефолт был неверен для 60% вселенной, и
+    #: потребитель (`track/equity.py`) не мог отличить догадку от измерения.
+    funding_interval_h: float | None = None
 
 
 class Orderflow(_View):

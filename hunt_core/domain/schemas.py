@@ -116,7 +116,13 @@ class PreparedSymbol:
     next_funding_time_ms: int | None = None
     funding_rate_cap: float | None = None
     funding_rate_floor: float | None = None
-    funding_interval_hours: int | None = None
+    # ⚠ `funding_interval_hours: int | None` УДАЛЁН 2026-08-03 (T1.2). Ни продюсера, ни
+    # читателя — проверено грепом по дереву. Опасен он был не бесполезностью, а ИМЕНЕМ:
+    # живое поле называется `funding_interval_h` (float, часы) и живёт в market-блоке;
+    # два похожих имени рядом — приглашение прочитать не то. Соседние поля этого блока
+    # (`funding_rate_cap`, `funding_rate_floor`, `next_funding_time_ms`,
+    # `estimated_settle_price`) тоже без продюсера и читателя — вынесено отдельной задачей,
+    # чистить их заодно с правкой поведения нельзя.
     basis_pct: float | None = (
         None  # (futures - index) / index * 100; + = contango, - = backwardation
     )
