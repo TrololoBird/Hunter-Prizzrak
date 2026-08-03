@@ -6,11 +6,16 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Literal
 
+import structlog
+
 from hunt_core import serde
-from hunt_core.domain.config import BotSettings
+from hunt_core.domain.config import BotSettings, config_section
 from hunt_core.paths import WATCHLIST as WATCHLIST_PATH
 
+LOG = structlog.get_logger(__name__)
+
 WatchMode = Literal["short", "long", "both"]
+_VALID_MODES: frozenset[str] = frozenset({"short", "long", "both"})
 
 _CANONICAL_PINNED: tuple[str, ...] = (
     "BTCUSDT",
@@ -24,27 +29,71 @@ _CANONICAL_PINNED: tuple[str, ...] = (
 
 
 def load_pinned_symbols() -> tuple[str, ...]:
-    """Operator pinned set (config.defaults.toml [pinned.defaults])."""
-    try:
-        from hunt_core.domain.config import load_settings
+    """Operator pinned set из ``config.defaults.toml`` ``[pinned.defaults]``.
 
-        settings = load_settings()
-        assets = getattr(settings, "assets", None) or {}
-        if isinstance(assets, dict):
-            deep = [
-                str(s).upper()
-                for s, block in assets.items()
-                if isinstance(block, dict) and block.get("analyst")
-            ]
-            if deep:
-                return tuple(dict.fromkeys(deep))
-    except Exception:
-        import structlog
+    ⚠ ДО 2026-08-02 ЭТА ФУНКЦИЯ НЕ ЧИТАЛА КОНФИГ ВООБЩЕ, хотя её докстрока называла именно
+    эту секцию. Она смотрела в ``load_settings().assets`` — а это секция ``[bot.assets]``,
+    которой в файле нет: замер дал ``assets == {}``. Хуже того, ветка была недостижима
+    ДВАЖДЫ: ``assets`` держит модели ``AssetConfig``, а условие требовало
+    ``isinstance(block, dict)`` — проверено на заполненном вручную ``HuntSettings``, результат
+    пустой. То есть правка ``symbols``/``modes``/``analyst`` в TOML не меняла НИЧЕГО, а
+    совпадение с каноном держалось на ручном дублировании списка в двух местах.
 
-        structlog.get_logger("hunt_core.data.universe").debug(
-            "load_pinned_symbols_failed_using_canonical", exc_info=True
+    Теперь секция читается напрямую (``config_section`` — универсальный читатель; тот, что
+    рядом, ``load_config_defaults_toml``, форвардит по белому списку и секции ``pinned`` не
+    знает). Фоллбэк на канон остался, но он ГРОМКИЙ: молча подставленный список — это ровно
+    тот случай, когда оператор правит файл и не понимает, почему ничего не происходит.
+    """
+    section = config_section("pinned", "defaults")
+    raw = section.get("symbols")
+    symbols = (
+        tuple(dict.fromkeys(str(s).strip().upper() for s in raw if str(s).strip()))
+        if isinstance(raw, (list, tuple))
+        else ()
+    )
+    if not symbols:
+        LOG.warning(
+            "pinned_symbols_section_missing",
+            key="[pinned.defaults].symbols",
+            fallback=list(_CANONICAL_PINNED),
+            note="секции нет или список пуст — работаю по канону, но конфиг НЕ применён",
         )
-    return _CANONICAL_PINNED
+        return _CANONICAL_PINNED
+    # `analyst` — единственный потребитель этого ключа: символ из `symbols`, помеченный
+    # `analyst = false`, в набор не входит. Отсутствие символа в карте = включён (иначе
+    # добавление символа в `symbols` молча не срабатывало бы — та же ловушка, что чинится).
+    analyst = section.get("analyst")
+    if isinstance(analyst, dict):
+        enabled = tuple(s for s in symbols if analyst.get(s, True))
+        if enabled:
+            return enabled
+        LOG.error(
+            "pinned_analyst_map_disables_everything",
+            key="[pinned.defaults].analyst",
+            symbols=list(symbols),
+            note="все символы выключены — беру список `symbols` целиком, иначе вселенная пуста",
+        )
+    return symbols
+
+
+def load_pinned_modes(symbols: tuple[str, ...]) -> dict[str, WatchMode]:
+    """Режим наблюдения на символ из ``[pinned.defaults].modes``; неизвестное — ``both``."""
+    raw = config_section("pinned", "defaults").get("modes")
+    table = raw if isinstance(raw, dict) else {}
+    modes: dict[str, WatchMode] = {}
+    for sym in symbols:
+        value = str(table.get(sym, "both")).strip().lower()
+        if value not in _VALID_MODES:
+            LOG.warning(
+                "pinned_mode_unknown",
+                symbol=sym,
+                value=value,
+                fallback="both",
+                key="[pinned.defaults].modes",
+            )
+            value = "both"
+        modes[sym] = value  # type: ignore[assignment]  # проверено против _VALID_MODES
+    return modes
 
 
 PINNED_SYMBOLS: tuple[str, ...] = load_pinned_symbols()
@@ -53,7 +102,7 @@ DEFAULT_SYMBOLS = PINNED_SYMBOLS
 
 def is_pinned_symbol(symbol: str) -> bool:
     return str(symbol or "").upper() in PINNED_SYMBOLS
-DEFAULT_MODES: dict[str, WatchMode] = {sym: "both" for sym in PINNED_SYMBOLS}
+DEFAULT_MODES: dict[str, WatchMode] = load_pinned_modes(PINNED_SYMBOLS)
 MAX_DYNAMIC_SYMBOLS = 12
 # Debounced prescan outliers merged per tick (on top of resolve_watch_universe cap).
 MAX_PRESCAN_MERGE = 8

@@ -253,48 +253,77 @@ def _outcome_already_archived(path: Any, key: tuple[str, str, str]) -> bool:
     return False
 
 
-class ProductionWriteUnderTestError(RuntimeError):
-    """Тест попытался дописать строку в БОЕВОЙ леджер."""
+class ProductionLedgerWriteRefused(RuntimeError):
+    """Процесс, не объявивший себя боевым прогоном, попытался дописать боевой леджер."""
 
 
-def _refuse_production_write(path: Any) -> None:
-    """Fail loud when a test process is about to append to the real ledger.
+#: Боевой прогон объявляет себя ЯВНО (ставит `_cli.py::main`). Всё остальное — не писатель.
+LIVE_WRITER_ENV = "HUNT_LEDGER_WRITER"
+#: Песочница верификатора: каталог, куда уезжают все три леджера вместо `data/`.
+SANDBOX_ENV = "HUNT_LEDGER_SANDBOX"
 
-    ⚠ ЭТО НЕ ПЕРЕСТРАХОВКА — УТЕЧКА БЫЛА ИЗМЕРЕНА И ОКАЗАЛАСЬ ОГРОМНОЙ.
-    `close_signal(archive=True)` — значение ПО УМОЛЧАНИЮ, а его докстрока просила тесты
-    передавать `archive=False`. Прямые вызовы это и делали; но `close_signal` зовут изнутри
-    ещё 17 мест (`_evaluate_levels`, `_followups`, `auto_resolve_active_signals`), и ЭТИ
-    вызовы шли с дефолтом. Любой тест, дёргающий функцию уровнем выше, писал в боевой файл.
 
-    ЗАМЕР 2026-07-27: в `data/signal_history.jsonl` было 3722 строки, из них **3423 —
-    фикстуры** (символ `X`, вход 100, стоп 90, цель 110/150; и ETHUSDT со входом 99/100 и
-    выходом 116.5 — 247 идентичных копий). Они давали **86% суммы pnl** (+37205% из +43045%).
-    Прогон одного `tests/test_manipulation_runner.py` дописывал 9 строк — проверено счётчиком
-    до/после. За 2026-07-26 накапало 372 строки, за 07-27 — 198.
+def resolve_ledger_path(default: Any) -> Any:
+    """Куда писать на самом деле: боевой путь либо песочница верификатора.
 
-    Договорённость «тесты передают archive=False» — не механизм, а обещание, и оно не
-    сработало. Механизм — этот отказ: он не полагается на память автора теста.
+    Разрешение делается В МОМЕНТ ЗАПИСИ, а не при импорте. Это важно: `events.py` держит
+    боевой путь в ЗНАЧЕНИИ ПО УМОЛЧАНИЮ аргумента, а оно вычисляется один раз при `def`, —
+    подмена `hunt_core.paths.SIGNAL_EVENTS` после импорта на него уже не влияет. Поэтому
+    песочница объявляется переменной окружения и читается здесь, у самой записи.
     """
     import os
     from pathlib import Path
 
-    if not os.environ.get("PYTEST_CURRENT_TEST"):
+    sandbox = os.environ.get(SANDBOX_ENV, "").strip()
+    if not sandbox:
+        return default
+    return Path(sandbox) / Path(default).name
+
+
+def refuse_production_write(path: Any) -> None:
+    """Fail loud when a process that is not the live run appends to the real ledger.
+
+    ⚠ ЭТО НЕ ПЕРЕСТРАХОВКА — УТЕЧКА ИЗМЕРЯЛАСЬ ДВАЖДЫ, И ВТОРОЙ РАЗ ГАРД ЕЁ НЕ ВИДЕЛ.
+
+    ЗАМЕР 2026-07-27 (первый заход): в `data/signal_history.jsonl` было 3722 строки, из них
+    **3423 — фикстуры** (символ `X`, вход 100, стоп 90; и 247 идентичных ETHUSDT). Они давали
+    **86% суммы pnl**. Источник — `close_signal(archive=True)` по умолчанию: 17 внутренних
+    вызовов шли с дефолтом, и любой тест уровнем выше писал в боевой файл.
+
+    ЗАМЕР 2026-08-02 (второй заход, этот): гард ключевался на `PYTEST_CURRENT_TEST` — то есть
+    на переменной, которую ставит pytest. Но **каталог `tests/` удалён 2026-07-27**, и роль
+    тестов перешла к `scripts/verify_*.py`, где этой переменной НЕТ НИКОГДА. Итог: в
+    `signal_history.jsonl` 4 строки, из них **3 — `TESTUSDT` из
+    `scripts/verify_tracker_state_ownership.py`** (две побайтово равные, `pnl_pct=98.51`),
+    в `signal_events.jsonl` — **7 строк `TESTUSDT` из 12**. Гард молчал: он сторожил дверь,
+    которой больше нет.
+
+    Отсюда инверсия умолчания. Раньше: «пиши всем, запрещай тесту». Теперь: **писать боевой
+    леджер имеет право только тот, кто объявил себя боевым прогоном** (`LIVE_WRITER_ENV`,
+    ставится в `_cli.py::main`). Верификатору не нужно ничего помнить про `archive=False` —
+    ему достаточно объявить песочницу (`SANDBOX_ENV`), и тогда записи вообще не касаются
+    `data/`. Умолчание — отказ, а не разрешение: обещание уже один раз не исполнилось.
+    """
+    import os
+    from pathlib import Path
+
+    if os.environ.get(LIVE_WRITER_ENV) == "1":
         return
     import hunt_core.paths as paths
 
-    # ⚠ Каталог считается ОТ ФАЙЛА МОДУЛЯ, а не из `paths.DATA`. Изолирующая фикстура
-    # (`tests/conftest.py`) как раз подменяет `paths.DATA` на tmp — читая его здесь, гард
-    # объявил бы боевым сам песочный каталог и завалил бы каждый честный тест. Проверено:
-    # первая редакция именно так и уронила 9 тестов, которые ничего не нарушали.
+    # ⚠ Каталог считается ОТ ФАЙЛА МОДУЛЯ, а не из `paths.DATA`: подмена `paths.DATA` на tmp —
+    # это как раз легальный способ увести запись в сторону, и читая его здесь, гард объявил бы
+    # боевым сам песочный каталог.
     real_data = Path(paths.__file__).resolve().parents[1] / "data"
     try:
         inside = Path(path).resolve().is_relative_to(real_data)
     except (OSError, ValueError):  # неразрешимый путь — не наш случай
         return
     if inside:
-        raise ProductionWriteUnderTestError(
-            f"тест пишет в боевой леджер {path!r}: закрывай сигнал с archive=False "
-            "либо переопредели hunt_core.paths.SIGNAL_HISTORY на tmp_path"
+        raise ProductionLedgerWriteRefused(
+            f"запись в боевой леджер {path!r} из процесса, который не объявил себя боевым "
+            f"прогоном. Верификатору: задайте {SANDBOX_ENV}=<каталог> — все леджеры уедут "
+            f"туда. Боевому прогону: {LIVE_WRITER_ENV}=1 ставит hunt_core/_cli.py::main."
         )
 
 
@@ -302,7 +331,8 @@ def append_outcome_record(path: Any, record: dict[str, Any]) -> None:
     """Single-writer outcome log append (§8E / P10)."""
     from pathlib import Path
 
-    _refuse_production_write(path)
+    path = resolve_ledger_path(path)
+    refuse_production_write(path)
     key = outcome_archive_key(record)
     if key is not None and _outcome_already_archived(path, key):
         return
@@ -320,7 +350,10 @@ def kpi_bucket(record: dict[str, Any]) -> str:
 
 
 __all__ = [
+    "LIVE_WRITER_ENV",
     "LOSS_REASONS",
+    "SANDBOX_ENV",
+    "ProductionLedgerWriteRefused",
     "UNRESOLVED_REASONS",
     "WIN_REASONS",
     "append_outcome_record",
@@ -332,5 +365,7 @@ __all__ = [
     "outcome_archive_key",
     "outcome_kind",
     "pollution_reason",
+    "refuse_production_write",
+    "resolve_ledger_path",
     "split_by_lane",
 ]

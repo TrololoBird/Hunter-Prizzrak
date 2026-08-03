@@ -6,12 +6,16 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from hunt_core import serde
-from hunt_core.paths import DATA
+from hunt_core.paths import OUTCOME_LEDGER
 
 if TYPE_CHECKING:
     from hunt_core.runtime.native_assembly import NativeAnalystView
 
-LEDGER_PATH = DATA / "hunt_outcome_ledger.jsonl"
+# ⚠ Один файл — одна константа. До 2026-08-02 путь был объявлен ЗДЕСЬ вторично
+# (`DATA / "hunt_outcome_ledger.jsonl"`), а `paths.py::OUTCOME_LEDGER` описывал тот же файл и
+# не имел ни одного читателя: два имени одного пути, одно из которых мёртвое. Разъехаться они
+# ещё не успели, но именно так расхождения и заводятся.
+LEDGER_PATH = OUTCOME_LEDGER
 
 _MISSION_BLOCK_PREFIXES = ("mission_",)
 _PLAYBOOK_BLOCK_CODES = frozenset(
@@ -86,7 +90,10 @@ def build_authority_snapshot(
 
 def append_ledger_event(record: dict[str, Any], *, path: Path | None = None) -> None:
     """Append one deliver/block boundary event."""
-    p = path or LEDGER_PATH
+    from hunt_core.track.outcomes import refuse_production_write, resolve_ledger_path
+
+    p = resolve_ledger_path(path or LEDGER_PATH)
+    refuse_production_write(p)
     p.parent.mkdir(parents=True, exist_ok=True)
     row = dict(record)
     row.setdefault("ts", datetime.now(UTC).isoformat())
