@@ -390,7 +390,7 @@ async def collect(symbols: list[str]) -> list[dict]:
     ex = ccxtpro.binanceusdm({"options": {"defaultType": "swap"}, "enableRateLimit": True})
     await ex.load_markets()
     rows: list[dict] = []
-    t_start = time.time()
+    t_start = time.time()  # noqa: TID251 — секундомер прогресса: разность двух локальных отметок
     try:
         for sym in symbols:
             tier: dict[str, list[list[float]]] = {}
@@ -431,7 +431,7 @@ async def collect(symbols: list[str]) -> list[dict]:
                     if m:
                         rows.append(m)
             print(f"{sym}: зон промерено {len([r for r in rows if r['symbol'] == sym])} "
-                  f"({time.time() - t_start:.0f}s)", flush=True)
+                  f"({time.time() - t_start:.0f}s)", flush=True)  # noqa: TID251 — секундомер прогресса: разность двух локальных отметок
     finally:
         await ex.close()
     return rows

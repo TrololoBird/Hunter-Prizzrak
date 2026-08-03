@@ -39,6 +39,7 @@ from hunt_core.runtime.native_producers import (
 from hunt_core.toolkit.manipulation_fusion_native import compute_manipulation_fusion_native
 from hunt_core.view.models import MarketView
 from hunt_core.view.runtime import MarketRuntime
+from hunt_core import clock
 
 LOG = structlog.get_logger("hunt.runtime.native_assembly")
 
@@ -294,7 +295,7 @@ async def assemble_native_analyst(
         symbol, price=view.last_price, spot=rt.spot, contract_weekly=view.klines.w1
     )
     freshness = freshness_native(
-        now_ms=int(time.time() * 1000),
+        now_ms=int(clock.now_ms()),
         tick_ts_ms=int(view.now_ms),
         dom_fetched_at_ms=cross_walls_fetched_at_ms(cross_walls),
     )

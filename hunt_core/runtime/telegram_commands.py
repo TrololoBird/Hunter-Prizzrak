@@ -315,7 +315,7 @@ class HuntTelegramCommands:
             return
         # getUpdates redelivers a backlog after downtime — a probe for a 20-min-old
         # /signal is worse than none, so skip anything older than the window.
-        if message.date is not None and time.time() - message.date.timestamp() > _STALE_UPDATE_S:
+        if message.date is not None and time.time() - message.date.timestamp() > _STALE_UPDATE_S:  # noqa: TID251 — время Telegram, НЕ биржи: сдвиг clock выведен из Binance и здесь неприменим
             LOG.info("hunt_tg_skip_stale", chat_id=chat_id, text=text[:60])
             return
         await self._dispatch_incoming(chat_id, user_id, text)

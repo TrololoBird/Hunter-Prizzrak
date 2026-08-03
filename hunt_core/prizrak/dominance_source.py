@@ -89,7 +89,7 @@ def _parse_global(payload: dict[str, Any]) -> dict[str, float] | None:
     if total <= 0:
         return None
     total3 = total * max(0.0, 1.0 - (btc_d + eth_d) / 100.0)
-    return {"ts_ms": time.time() * 1000.0, "btc_d": btc_d, "eth_d": eth_d, "total3": total3, "total": total}
+    return {"ts_ms": time.time() * 1000.0, "btc_d": btc_d, "eth_d": eth_d, "total3": total3, "total": total}  # noqa: TID251 — штамп СОБСТВЕННОГО снимка кэша; читается локальным же now в этом файле
 
 
 async def _fetch_stable_cd(session: Any, total_mcap: float) -> float | None:
@@ -123,7 +123,7 @@ async def refresh_dominance(*, ttl_s: int = _DEFAULT_TTL_S) -> None:
     snaps = _read_snapshots()
     if snaps:
         try:
-            if (time.time() * 1000.0 - float(snaps[-1]["ts_ms"])) < ttl_s * 1000:
+            if (time.time() * 1000.0 - float(snaps[-1]["ts_ms"])) < ttl_s * 1000:  # noqa: TID251 — TTL против собственного штампа выше — пара локальных отметок
                 return
         except Exception as exc:  # noqa: BLE001 — битый штамп: считаем кэш просроченным
             # Проваливаемся к запросу — это безопасная сторона. Но битый ``ts_ms`` означает,

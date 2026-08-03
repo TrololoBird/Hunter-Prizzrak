@@ -31,6 +31,7 @@ from hunt_core.engine.spot_metrics import (
     spread_bps,
 )
 from hunt_core.engine.state import PlaneStamp, Source, SymbolState
+from hunt_core import clock
 
 LOG = structlog.get_logger(__name__)
 
@@ -38,7 +39,7 @@ _WEEKLY_TTL_S = 6 * 3600.0  # a closed 1W candle changes once a week (old compan
 
 
 def _now_ms() -> int:
-    return int(time.time() * 1000)
+    return int(clock.now_ms())
 
 
 def _to_spot_symbol(symbol: str) -> str:

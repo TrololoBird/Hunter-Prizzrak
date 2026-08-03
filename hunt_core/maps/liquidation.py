@@ -14,11 +14,11 @@ from __future__ import annotations
 
 import collections
 import structlog
-import time
 from dataclasses import dataclass, field
 from typing import Any
 
 from hunt_core.maps.config import MapsConfig
+from hunt_core import clock
 
 LOG = structlog.get_logger("hunt_core.maps.liquidation")
 # Industry ladder (CoinGlass/Hyblock): include 25× and 100× — 100× liquidations sit
@@ -382,7 +382,7 @@ def _bucket_events(
 ) -> dict[int, dict[str, float]]:
     if current_price <= 0:
         return {}
-    cutoff_ms = int(time.time() * 1000) - window_seconds * 1000
+    cutoff_ms = int(clock.now_ms()) - window_seconds * 1000
     span = current_price * price_range_pct / 100.0
     price_min = current_price - span
     price_max = current_price + span
@@ -778,7 +778,7 @@ def build_liquidation_map(
     # ликвидаций» (those 5 events were other symbols, outside the window), and a feeder
     # that died hours ago still looked alive on the strength of its stale backlog.
     # 0 here now honestly means "live but quiet"; absent means "no feeder".
-    cutoff_ms = int(time.time() * 1000) - cfg.window_seconds * 1000
+    cutoff_ms = int(clock.now_ms()) - cfg.window_seconds * 1000
     sym_u = symbol.upper()
     venue_events: dict[str, int] = {
         venue: sum(1 for ev in buf if ev[1] == sym_u and ev[0] >= cutoff_ms)

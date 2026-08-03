@@ -177,13 +177,13 @@ class Engine:
         """
         samples: list[float] = []
         for _ in range(_CLOCK_SYNC_SAMPLES):
-            t0 = time.time() * 1000.0
+            t0 = time.time() * 1000.0  # noqa: TID251 — латентность: разность двух локальных отметок, сдвиг сокращается
             try:
                 server_ms = float(await self._ingest.exchange.fetch_time())
             except Exception as exc:  # noqa: BLE001 — источник времени может быть недоступен
                 LOG.warning("engine_clock_sync_probe_failed", error=repr(exc))
                 continue
-            t1 = time.time() * 1000.0
+            t1 = time.time() * 1000.0  # noqa: TID251 — латентность: разность двух локальных отметок, сдвиг сокращается
             samples.append(server_ms - (t0 + t1) / 2.0)
             await asyncio.sleep(_CLOCK_SYNC_GAP_S)
         if not samples:
@@ -361,7 +361,7 @@ class Engine:
 
     async def _seed_symbol(self, symbol: str, *, sem: asyncio.Semaphore | None = None) -> None:
         """REST-seed every timeframe's kline plane for one symbol (startup + dynamic ``add_symbol``)."""
-        now = int(time.time() * 1000)
+        now = int(clock.now_ms())
         ex = self._ingest.exchange
         st = self._ingest.state_for(symbol)
         gate = sem or asyncio.Semaphore(len(self._timeframes) or 1)
@@ -458,7 +458,7 @@ class Engine:
             if bsym is None:
                 return
             st = self._ingest.state_for(symbol)
-            now = int(time.time() * 1000)
+            now = int(clock.now_ms())
             oi = await rest.poll_open_interest(ex, symbol)
             if oi is not None:
                 st.put_value("oi", oi, PlaneStamp(Source.REST_SEED, now, now, bound))
@@ -609,7 +609,7 @@ class Engine:
         parallel copy of ccxt's data; nothing fabricated — an unresolved/stale plane lands in
         ``not_ready``.
         """
-        now = int(time.time() * 1000)
+        now = int(clock.now_ms())
         st = self._ingest.states.get(symbol)
         if st is None:
             return MarketSnapshot(symbol, now, {}, (f"{symbol}: not tracked",))
@@ -658,7 +658,7 @@ class Engine:
         stamps, never a fabricated age.
         """
         st = self._ingest.states.get(symbol)
-        return st.ages(int(time.time() * 1000)) if st is not None else {}
+        return st.ages(int(clock.now_ms())) if st is not None else {}
 
     async def close(self) -> None:
         if self._watchdog is not None:

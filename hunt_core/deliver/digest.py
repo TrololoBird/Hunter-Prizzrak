@@ -51,7 +51,7 @@ class DigestEntry:
     change_24h_pct: float
     phase: str
     note: str = ""
-    enqueued_at: float = field(default_factory=time.time)
+    enqueued_at: float = field(default_factory=time.time)  # noqa: TID251 — отметка постановки в локальную очередь; сравнивается с локальным же now
 
 
 class AdvisoryDigest:

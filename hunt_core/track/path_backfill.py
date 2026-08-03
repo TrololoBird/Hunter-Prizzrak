@@ -20,6 +20,7 @@ from __future__ import annotations
 import structlog
 from typing import Any
 
+from hunt_core import clock
 from hunt_core.track.candidate_ledger import (
     load_pending_backfill,
     record_candidate_forward_path,
@@ -192,7 +193,6 @@ async def path_backfill_loop(exchange: Any, *, interval_s: float = 900.0) -> Non
     _LOG.info("path_backfill_loop_start interval_s=%s", interval_s)
     while not should_stop():
         try:
-            import time as _time
 
             # Roll the ledger BEFORE the pass: this loop is its only writer, so
             # rotating here cannot interleave with an append. Live it had grown
@@ -207,7 +207,7 @@ async def path_backfill_loop(exchange: Any, *, interval_s: float = 900.0) -> Non
             from hunt_core.track.candidate_ledger import rotate_ledger_if_large
 
             await asyncio.to_thread(rotate_ledger_if_large)
-            n = await run_backfill_pass(exchange, now_ms=int(_time.time() * 1000))
+            n = await run_backfill_pass(exchange, now_ms=int(clock.now_ms()))
             if n:
                 _LOG.info("path_backfill_loop_tick backfilled=%s", n)
         except Exception:

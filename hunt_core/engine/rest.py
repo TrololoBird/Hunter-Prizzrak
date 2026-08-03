@@ -19,6 +19,7 @@ import structlog
 
 from hunt_core.engine import metrics, params
 from hunt_core.engine.freshness import Bar
+from hunt_core import clock
 
 # --- /futures/data ban backoff (Binance error -1003) ---------------------------------------------
 # Binance IP-bans callers who exceed the /futures/data/* budget, and a call that RETRIES against a
@@ -203,7 +204,7 @@ async def fetch_ohlcv_between(
     # консервативной при любом знаке сдвига; при историческом `end_ms` в прошлом связывает
     # он, и поведение не меняется. Живой путь `fetch_klines_full` чинится позиционно —
     # здесь нельзя, потому что окно задано явно и последний бар может быть законно закрыт.
-    cutoff = min(int(end_ms), int(time.time() * 1000) - interval_ms)
+    cutoff = min(int(end_ms), int(clock.now_ms()) - interval_ms)
     return [b for b in bars if int(b[0]) + interval_ms <= cutoff]
 
 
@@ -388,11 +389,11 @@ async def poll_futures_data(
     # должны быть одни — там же, где уже живёт общий ``_BAN_UNTIL_MS``.
     async with _FD_GATE:
         global _FD_LAST_MS
-        wait = (_FD_LAST_MS + params.FUTURES_DATA_SPACING_S * 1000.0) - time.time() * 1000.0
+        wait = (_FD_LAST_MS + params.FUTURES_DATA_SPACING_S * 1000.0) - time.time() * 1000.0  # noqa: TID251 — спейсинг запросов к /futures/data: интервал между СВОИМИ вызовами
         if wait > 0:
             await asyncio.sleep(wait / 1000.0)
-        _FD_LAST_MS = time.time() * 1000.0
-    now_ms = time.time() * 1000.0
+        _FD_LAST_MS = time.time() * 1000.0  # noqa: TID251 — спейсинг запросов к /futures/data: интервал между СВОИМИ вызовами
+    now_ms = time.time() * 1000.0  # noqa: TID251 — спейсинг запросов к /futures/data: интервал между СВОИМИ вызовами
     if now_ms < _BAN_UNTIL_MS:
         return None  # paused during an active -1003 ban — hitting the endpoint would extend it
     fn = getattr(exchange, method, None)

@@ -1,12 +1,12 @@
 """Map 1 — Orderbook heatmap: walls, sticky/iceberg/absorption/spoof/void + footprint."""
 from __future__ import annotations
 
-import time
 from collections import deque
 from dataclasses import dataclass, field
 from math import ceil, floor
 from typing import Any
 
+from hunt_core import clock
 from hunt_core.maps.config import MapsConfig
 from hunt_core.toolkit.book_math import (
     WallCluster,
@@ -82,7 +82,7 @@ def _trade_footprint(
 ) -> list[FootprintBin]:
     if current_price <= 0 or not trades:
         return []
-    cutoff_ms = int(time.time() * 1000) - window_seconds * 1000
+    cutoff_ms = int(clock.now_ms()) - window_seconds * 1000
     span = current_price * price_range_pct / 100.0
     lo = current_price - span
     hi = current_price + span
@@ -329,7 +329,7 @@ def _detect_iceberg(
     for px, qty in asks:
         _consider(px, px * qty, "ask")
     fill_at: dict[float, float] = {}
-    cutoff_ms = int(time.time() * 1000) - 120_000
+    cutoff_ms = int(clock.now_ms()) - 120_000
     for pt in trades:
         ts_ms = int(getattr(pt, "ts_ms", 0) or 0)
         if ts_ms < cutoff_ms:
@@ -506,7 +506,7 @@ def _detect_cvd_divergence(
     """
     if price_change_pct is None or not trades:
         return None
-    cutoff_ms = int(time.time() * 1000) - window_seconds * 1000
+    cutoff_ms = int(clock.now_ms()) - window_seconds * 1000
     cvd = 0.0
     total = 0.0
     for pt in trades:

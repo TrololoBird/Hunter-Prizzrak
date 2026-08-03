@@ -9,11 +9,11 @@ event-driven stream (a quiet symbol's trades) legitimately goes silent.
 from __future__ import annotations
 
 import asyncio
-import time
 from collections.abc import Awaitable, Callable
 
 import structlog
 
+from hunt_core import clock
 from hunt_core.engine import metrics, params
 
 LOG = structlog.get_logger(__name__)
@@ -68,7 +68,14 @@ class Watchdog:
         self._on_rotate = on_rotate
         self._venue = venue
         self._stop = asyncio.Event()
-        self._started_ms = int(time.time() * 1000)
+        # ⚠ ЧАСЫ ЗДЕСЬ ОБЯЗАНЫ БЫТЬ ТЕМИ ЖЕ, ЧТО У `Ingest`. `_started_ms` — не только
+        # база аптайма (строка с `WS_ROTATE_S`): он засевает `_evidence_ms`, а тот берёт
+        # max со штампами из `last_frame_ms`, которые ставит `ingest.py::_now_ms`. С
+        # переходом ingest на `clock.now_ms()` локальное время здесь дало бы разницу
+        # часов ПРЯМО В МОЛЧАНИИ ФИДА: при измеренном сдвиге 43.4 с вотчдог видел бы
+        # 43 секунды тишины на полностью здоровом потоке. Аптайм от смены не страдает —
+        # постоянный сдвиг в разности сокращается.
+        self._started_ms = int(clock.now_ms())
         # Последнее ДОКАЗАТЕЛЬСТВО жизни фида — монотонная отметка, которая переживает
         # `last_frame_ms.clear()` при реконнекте. Пока кадров не было ни одного, ею служит
         # момент старта: «за N секунд не пришло ничего» — это тоже измерение, а не прогрев
@@ -86,7 +93,7 @@ class Watchdog:
                 return
             except asyncio.TimeoutError:
                 pass
-            now = int(time.time() * 1000)
+            now = int(clock.now_ms())
             newest = max(self._last.values(), default=0)
             if newest > self._evidence_ms:
                 self._evidence_ms = newest

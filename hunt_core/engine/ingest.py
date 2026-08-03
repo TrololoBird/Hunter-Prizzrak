@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import random
-import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -21,6 +20,7 @@ import structlog
 
 from hunt_core.engine import freshness, params, rest
 from hunt_core.engine.state import PlaneStamp, Source, SymbolState
+from hunt_core import clock
 
 LOG = structlog.get_logger(__name__)
 
@@ -36,7 +36,7 @@ def backoff_delay_s(attempt: int) -> float:
 
 
 def _now_ms() -> int:
-    return int(time.time() * 1000)
+    return int(clock.now_ms())
 
 
 class Ingest:

@@ -13,7 +13,6 @@ computes them from a periodically-refreshed history (ADR-0004 S3).
 """
 from __future__ import annotations
 
-import time
 from collections.abc import Sequence
 from typing import Any
 
@@ -26,6 +25,7 @@ from hunt_core.toolkit.book_math import depth_imbalance_from_book, microprice_bi
 from hunt_core.toolkit.ohlcv import ccxt_ohlcv_to_frame
 from hunt_core.view.models import Book, Cross, Derivs, Klines, MarketView, Orderflow, Spot
 from hunt_core.view.price import resolve_price
+from hunt_core import clock
 
 _DEFAULT_TFS: tuple[str, ...] = ("1m", "5m", "15m", "1h", "4h", "1d", "1w")
 _TF_FIELD: dict[str, str] = {"1m": "m1", "5m": "m5", "15m": "m15", "1h": "h1", "4h": "h4", "1d": "d1", "1w": "w1"}
@@ -229,7 +229,7 @@ def build_market_view(
     cross-venue from ``MultiEngine.cross_*``, spot from ``SpotEngine``. No fabricated field — a plane
     the engine did not prove fresh stays ``None``.
     """
-    now = now_ms if now_ms is not None else int(time.time() * 1000)
+    now = now_ms if now_ms is not None else int(clock.now_ms())
     engine = multi.primary
     snap = multi.snapshot(symbol, requested_planes(timeframes))
     mark = snap.optional("mark")

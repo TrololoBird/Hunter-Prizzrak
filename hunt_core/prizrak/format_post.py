@@ -691,7 +691,7 @@ def _dominance_token() -> str:
     age_s: float | None = None
     ts_ms = now.get("ts_ms")
     if isinstance(ts_ms, (int, float)) and ts_ms > 0:
-        age_s = max(0.0, time.time() - float(ts_ms) / 1000.0)
+        age_s = max(0.0, time.time() - float(ts_ms) / 1000.0)  # noqa: TID251 — возраст снимка CoinGecko против его ts_ms, проставленного dominance_source локально
     stale_note = ""
     if age_s is None:
         stale_note = " · <i>возраст неизвестен</i>"

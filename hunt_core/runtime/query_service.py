@@ -8,9 +8,9 @@ ever evaluated permanently-empty ``dump``/``long`` stubs (dead, G-41).
 from __future__ import annotations
 
 import html
-import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
+from hunt_core import clock
 
 if TYPE_CHECKING:
     from hunt_core.runtime.native_assembly import NativeAnalystView
@@ -54,7 +54,7 @@ def _native_age_seconds(native: NativeAnalystView) -> float | None:
     now_ms = native.view.now_ms
     if not now_ms:
         return None
-    return max(0.0, (time.time() * 1000.0 - float(now_ms)) / 1000.0)
+    return max(0.0, (clock.now_ms() - float(now_ms)) / 1000.0)
 
 
 def _pick_focus(native: NativeAnalystView) -> Literal["short", "long"]:

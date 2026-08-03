@@ -397,6 +397,16 @@ I-1..I-6 живут в [`docs/HUNTER_TARGET_SPEC.md`](docs/HUNTER_TARGET_SPEC.md
 - **No pandas / no requests** — mechanically enforced, not prose: ruff `TID251` banned-api
   (pyproject `[tool.ruff.lint.flake8-tidy-imports.banned-api]`). Polars Expression API /
   LazyFrame; aiohttp; entirely async.
+- **No `time.time()`** — с 2026-08-03 там же в `TID251`. Часы для сравнения с биржевыми
+  штампами берутся ТОЛЬКО из `clock.now_ms()`: локальные опережали Binance на **43.4 с**
+  (замер 2026-07-27), и при таком сдвиге минутный бар считался закрытым на 16.6-й секунде —
+  форминг-бар отдавался как закрытый **72% времени**. Обходов было **20**, включая отсечку
+  закрытых баров в `engine/rest.py` — тот же класс, что исходный инцидент.
+  Правило ловит обе формы (`from time import time` и `time.time()` по атрибуту) — проверено
+  пробником. Исключение — только построчный `# noqa: TID251` **с причиной**; пофайловых нет
+  умышленно: постоянный сдвиг сокращается в РАЗНОСТИ двух локальных отметок (латентность,
+  аптайм, спейсинг, TTL своего кэша), но не в сравнении с биржевым штампом, а пофайловая
+  поблажка эти два случая не различает.
 - **No stdlib logging** — structlog everywhere
 - **Pydantic BaseModel** for domain models — no dataclasses
 - **Full type hints + Google-style docstrings**
