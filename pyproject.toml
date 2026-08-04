@@ -35,7 +35,7 @@ dependencies = [
     "polars-talib>=0.1.6",
     "polars-ds>=0.12.0",   # query_entropy / ks_2samp exprs used by features/research_plugins.py
     "numpy>=2.4.6,<2.5",  # ceiling: numba (transitive via polars-ta) requires numpy<2.5 on py3.14; 2.5 forces a numba/llvmlite downgrade that fails to build
-    "aiohttp>=3.13.5,<4",
+    "aiohttp>=3.14.3,<4",
     "aiohttp-socks>=0.10.1",
     "python-socks[asyncio]>=2.8.2",
     "aiogram>=3.28.2,!=3.29.0",  # 3.29.0 yanked: severe slowdown parsing nested RichBlock entities
