@@ -100,7 +100,7 @@ Repository = "https://github.com/TrololoBird/Hunter-Prizzrak"
 # Большая часть автофиксится, но BLE001/S110/S112 трогают обработку исключений — это правка
 # поведения, её нельзя делать заодно.
 # Поднимать потолок — отдельным коммитом, вместе с разбором находок новой версии.
-dev = ["ruff>=0.15.22,<0.16", "mypy>=2.3.0,<2.4"]
+dev = ["ruff>=0.15.22,<0.16", "mypy>=2.3.0,<2.5"]
 diagnostics = ["rich>=13.0"]
 monitoring = ["prometheus-client>=0.26.0", "prometheus-async>=26.0"]
 otel = [
